@@ -4,9 +4,8 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
-class DataManager:
+class LogDataManager:
     """Manages all simulation data using pandas."""
-    
     def __init__(self):
         self.data: Dict[str, Dict[str, pd.DataFrame]] = {} # {study: {system: df}}
         self.warnings = []
@@ -14,7 +13,7 @@ class DataManager:
 
     def load_project_data(self, studies: Dict[str, List[str]], root_path, log_keywords: List[str] = None, file_map: Dict[str, Path] = None):
         """Loads all log file data for the discovered studies and systems."""
-        from lammps_parser import LammpsParser # Local import
+        from log_parser import LogParser # Local import
         self.data.clear()
         self.warnings = []
         self.available_columns = []
@@ -51,7 +50,7 @@ class DataManager:
                         if keyword in file_path.name:
                             successful_keywords.add(keyword)
 
-                df = LammpsParser.parse_multiple_logs(log_files)
+                df = LogParser.parse_multiple_logs(log_files)
 
                 if df is not None and not df.empty:
                     self.data[study_name][system_name] = df

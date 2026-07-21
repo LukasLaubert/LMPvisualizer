@@ -7,7 +7,7 @@ from pathlib import Path
 from io import StringIO
 from typing import Dict, List, Tuple, Optional
 
-class LammpsParser:
+class LogParser:
     """Parses LAMMPS project structures and log files."""
 
     @staticmethod
@@ -157,7 +157,7 @@ class LammpsParser:
         """
         all_dfs = []
         for log_file in log_files:
-            df = LammpsParser.extract_thermo_data(log_file)
+            df = LogParser.extract_thermo_data(log_file)
             if df is not None and not df.empty:
                 all_dfs.append(df)
 

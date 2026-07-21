@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from ui_components import ChipInputWidget
-from lammps_parser import LammpsParser
+from log_parser import LogParser
 from log_plot_panel import LogPlotPanel
 from trj_plot_panel import TrjPlotPanel
 
@@ -169,7 +169,7 @@ class MainWindow(QMainWindow):
              
         if path.is_dir():
             try:
-                 root = LammpsParser.find_project_root(path_str)
+                 root = LogParser.find_project_root(path_str)
                  self.path_edit.setText(str(root))
                  path = root
             except FileNotFoundError:

@@ -14,9 +14,9 @@ import random
 import numpy as np
 import pandas as pd
 
-from lammps_parser import LammpsParser
-from data_manager import DataManager
-from plotting_controller import PlottingController
+from log_parser import LogParser
+from log_data_manager import LogDataManager
+from log_controller import LogController
 from settings_manager import SettingsManager
 from ui_components import ColorButton, InconsistentDataDialog, RightClickButton
 from global_label_editor_dialog import GlobalLabelEditorDialog
@@ -27,7 +27,7 @@ class LogPlotPanel(QWidget):
         super().__init__()
         self.main_window = main_window_ref
         
-        self.data_manager = DataManager()
+        self.data_manager = LogDataManager()
         self.plot_controller = None
         self.sync_mean_enabled = False
         self.running_mean_setting = "symmetric_window"
@@ -97,7 +97,7 @@ class LogPlotPanel(QWidget):
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('w')
-        self.plot_controller = PlottingController(self.plot_widget)
+        self.plot_controller = LogController(self.plot_widget)
 
         self.lock_axes_btn = RightClickButton()
         self.lock_axes_btn.setCheckable(True)
@@ -217,7 +217,7 @@ class LogPlotPanel(QWidget):
             self._update_ui_state(project_loaded=False)
             return
 
-        studies, warnings, file_map = LammpsParser.discover_studies_systems(root_path, keywords)
+        studies, warnings, file_map = LogParser.discover_studies_systems(root_path, keywords)
         
         # Hide/show study/system selectors based on project structure
         is_flat_structure = list(studies.keys()) == ['.']
@@ -250,8 +250,8 @@ class LogPlotPanel(QWidget):
         units = None
         timestep = None
         if root_path.is_dir():
-            units = LammpsParser.get_units(root_path)
-            timestep = LammpsParser.get_timestep(root_path)
+            units = LogParser.get_units(root_path)
+            timestep = LogParser.get_timestep(root_path)
 
         time_units_map = {'lj': 'tau', 'real': 'fs', 'metal': 'ps', 'si': 's', 'cgs': 's', 'electron': 'fs', 'micro': 'us', 'nano': 'ns'}
         self.main_window.units_label.setText(f"Unit: {units or 'N/A'}")
@@ -935,7 +935,7 @@ class LogPlotPanel(QWidget):
             self._update_ui_state(project_loaded=False)
             return
 
-        studies, warnings, file_map = LammpsParser.discover_studies_systems(root_path, keywords)
+        studies, warnings, file_map = LogParser.discover_studies_systems(root_path, keywords)
         
         # Hide/show study/system selectors based on project structure
         is_flat_structure = list(studies.keys()) == ['.']
@@ -969,8 +969,8 @@ class LogPlotPanel(QWidget):
         units = None
         timestep = None
         if root_path.is_dir():
-            units = LammpsParser.get_units(root_path)
-            timestep = LammpsParser.get_timestep(root_path)
+            units = LogParser.get_units(root_path)
+            timestep = LogParser.get_timestep(root_path)
 
         time_units_map = {'lj': 'tau', 'real': 'fs', 'metal': 'ps', 'si': 's', 'cgs': 's', 'electron': 'fs', 'micro': 'us', 'nano': 'ns'}
         self.main_window.units_label.setText(f"Unit: {units or 'N/A'}")

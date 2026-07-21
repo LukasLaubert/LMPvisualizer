@@ -4,7 +4,7 @@ from typing import Dict, Any
 import numpy as np
 import copy
 
-class PlottingController:
+class LogController:
     """Manages the pyqtgraph PlotWidget and its items."""
     
     def __init__(self, plot_widget: pg.PlotWidget):
