@@ -1,5 +1,7 @@
 # lmp_visualizer/data_manager.py
 
+import re
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
@@ -10,6 +12,76 @@ class LogDataManager:
         self.data: Dict[str, Dict[str, pd.DataFrame]] = {} # {study: {system: df}}
         self.warnings = []
         self.available_columns = []
+        self.custom_properties = {} # Name -> Formula
+
+    def set_custom_properties(self, props: Dict[str, str]):
+        self.custom_properties = props
+
+    def _evaluate_custom_property(self, df: pd.DataFrame, property_name: str) -> Optional[pd.Series]:
+        if property_name not in self.custom_properties:
+            return None
+        
+        formula = self.custom_properties[property_name]
+        
+        # Identify columns used in the formula: {ColumnName}
+        pattern = r"\{([^}]+)\}"
+        tokens = re.findall(pattern, formula)
+        
+        local_env = {}
+        
+        # Recursively resolve tokens
+        for token in set(tokens):
+            series = self._get_series(df, token)
+            if series is None:
+                return None
+            local_env[token] = series
+
+        # Replace tokens in formula with valid variable names
+        clean_formula = formula
+        token_map = {}
+        for i, token in enumerate(local_env.keys()):
+            var_name = f"__var_{i}__"
+            # Escape token for regex since it might contain special chars
+            clean_formula = re.sub(r"\{" + re.escape(token) + r"\}", var_name, clean_formula)
+            token_map[var_name] = local_env[token]
+
+        # Handle 'cot' -> '1/tan' (simple text replacement)
+        clean_formula = clean_formula.replace("cot(", "1/np.tan(")
+        
+        # Safe environment for eval
+        safe_globals = {
+            "__builtins__": None,
+            "np": np,
+            "sqrt": np.sqrt,
+            "sin": np.sin,
+            "cos": np.cos,
+            "tan": np.tan,
+            "e": np.e,
+            "pi": np.pi,
+        }
+        
+        try:
+            # Use eval with numpy support (via safe_globals and pandas series in token_map)
+            result = eval(clean_formula, safe_globals, token_map)
+            return result
+        except Exception as e:
+            print(f"Error evaluating formula '{formula}': {e}")
+            return None
+
+    def _get_series(self, df: pd.DataFrame, col_name: str) -> Optional[pd.Series]:
+        if col_name in df.columns:
+            return df[col_name]
+        return self._evaluate_custom_property(df, col_name)
+
+    def _has_column(self, df: pd.DataFrame, col_name: str) -> bool:
+        if col_name in df.columns:
+            return True
+        if col_name in self.custom_properties:
+            # Check if it can be evaluated (shallow check)
+            # Deep check might be expensive, but necessary for validity.
+            # For now, assume if defined it exists, but _get_series returns None if failed.
+            return True
+        return False
 
     def load_project_data(self, studies: Dict[str, List[str]], root_path, log_keywords: List[str] = None, file_map: Dict[str, Path] = None):
         """Loads all log file data for the discovered studies and systems."""
@@ -109,9 +181,14 @@ class LogDataManager:
             return None
 
         if system != 'average':
-            if system in self.data[study] and x_col in self.data[study][system] and y_col in self.data[study][system]:
+            if system in self.data[study]:
                 df = self.data[study][system]
-                return {'x': df[x_col], 'y': df[y_col], 'std': None}
+                # Use _get_series to support custom properties
+                x_data = self._get_series(df, x_col)
+                y_data = self._get_series(df, y_col)
+                
+                if x_data is not None and y_data is not None:
+                    return {'x': x_data, 'y': y_data, 'std': None}
             return None
         
         # --- Averaging Logic ---
@@ -154,10 +231,21 @@ class LogDataManager:
         if not processed_dfs:
             return None
 
-        # Extract the series for x and y columns
-        x_series_list = [df[x_col] for df in processed_dfs if x_col in df.columns]
-        y_series_list = [df[y_col] for df in processed_dfs if y_col in df.columns]
+        # Extract the series for x and y columns using _get_series
+        # Filter out None results (where custom property evaluation failed)
+        x_series_list = []
+        y_series_list = []
+        
+        for df in processed_dfs:
+            x_s = self._get_series(df, x_col)
+            y_s = self._get_series(df, y_col)
+            
+            if x_s is not None: x_series_list.append(x_s)
+            if y_s is not None: y_series_list.append(y_s)
 
+        # If we couldn't get series for all DataFrames, we might still proceed with partial data?
+        # Or strictly require all? Original logic required column presence.
+        # Let's require at least some data.
         if not y_series_list:
             return None
 

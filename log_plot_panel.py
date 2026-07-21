@@ -8,11 +8,12 @@ from PyQt6.QtWidgets import (
     QMenu, QFileDialog
 )
 from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import QColor, QIntValidator, QAction, QActionGroup
+from PyQt6.QtGui import QColor, QIntValidator, QAction, QActionGroup, QFont
 import pyqtgraph as pg
 import random
 import numpy as np
 import pandas as pd
+import os
 
 from log_parser import LogParser
 from log_data_manager import LogDataManager
@@ -20,6 +21,7 @@ from log_controller import LogController
 from settings_manager import SettingsManager
 from ui_components import ColorButton, InconsistentDataDialog, RightClickButton
 from global_label_editor_dialog import GlobalLabelEditorDialog
+from custom_property_dialog import CustomPropertyDialog
 from popout_window import PopOutWindow
 
 class LogPlotPanel(QWidget):
@@ -36,6 +38,7 @@ class LogPlotPanel(QWidget):
         self.popout_windows = []
         self.current_x_axis = None
         self.global_label_map = {}
+        self.custom_properties = {} # Name -> Formula
         self.scale_lock_enabled = False
         
         # Track loaded path to prevent clearing data on mode switch
@@ -187,8 +190,9 @@ class LogPlotPanel(QWidget):
         
         self.study_combo.currentTextChanged.connect(self.on_study_selected)
         self.system_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('system', text))
-        self.xaxis_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('x_axis', text))
-        self.yaxis_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('y_axis', text))
+        # Use _handle_axis_change for axis combos to intercept "Custom" selection
+        self.xaxis_combo.currentTextChanged.connect(lambda text: self._handle_axis_change(self.xaxis_combo, 'x_axis', text))
+        self.yaxis_combo.currentTextChanged.connect(lambda text: self._handle_axis_change(self.yaxis_combo, 'y_axis', text))
         
         self.plot_table.itemSelectionChanged.connect(self.on_table_selection_changed)
         self.plot_table.cellDoubleClicked.connect(self._on_table_double_click)
@@ -201,8 +205,162 @@ class LogPlotPanel(QWidget):
         """Takes the floating Mode Combo and places it into the specific layout slot."""
         # We add it to the grid at 0,0 spanning 2 rows
         self.controls_layout.addWidget(combo_box, 0, 0, 2, 1)
-    
-    def load_project(self, root_path, keywords, show_discovery_warnings: bool = True, force_reload: bool = False):
+
+    def _handle_axis_change(self, combo, component, text):
+        """Handles changes in axis comboboxes, intercepting 'Custom' selection."""
+        if text.strip().lower() == "custom":
+            # Reset combo to previous valid text or placeholder to avoid loop if canceled
+            # But we don't easily know previous text. 
+            # The dialog handling will set the new text if saved.
+            self._open_custom_dialog(combo)
+            return
+        
+        self._update_selected_row_name_component(component, text)
+
+    def _open_custom_dialog(self, triggering_combo):
+        """Opens the custom property dialog."""
+        # Temporarily block signals to prevent unwanted updates
+        triggering_combo.blockSignals(True)
+        
+        try:
+            dialog = CustomPropertyDialog(self.data_manager.get_all_column_names(), self.custom_properties, self)
+            if dialog.exec():
+                # Update local properties
+                self.custom_properties = dialog.get_properties()
+                # Update data manager
+                self.data_manager.set_custom_properties(self.custom_properties)
+                
+                # Refresh all axis combos with new properties
+                self._refresh_axis_combos()
+                
+                # Check if user selected a property to use
+                selected_prop = dialog.get_selected_property()
+                if selected_prop:
+                    triggering_combo.setCurrentText(selected_prop)
+                    
+                    # Safe way: Update the internal state manually
+                    component = 'x_axis' if triggering_combo == self.xaxis_combo else 'y_axis'
+                    self._update_selected_row_name_component(component, selected_prop)
+                else:
+                    # Revert to previous value from table to avoid stuck on "Custom"
+                    self._revert_combo_selection(triggering_combo)
+            else:
+                # Revert to previous value from table
+                self._revert_combo_selection(triggering_combo)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An error occurred in the Custom Property Dialog:\n{e}")
+            triggering_combo.setCurrentIndex(0)
+        finally:
+            triggering_combo.blockSignals(False)
+
+    def _revert_combo_selection(self, combo):
+        """Reverts the combo box selection to match the current table state."""
+        if self.plot_table.currentRow() == -1:
+            combo.setCurrentIndex(0)
+            return
+
+        selected_row = self.plot_table.currentRow()
+        item = self.plot_table.item(selected_row, 1)
+        if not item:
+            combo.setCurrentIndex(0)
+            return
+
+        plot_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+        _, _, x_ax, y_ax = self._parse_plot_name(plot_name)
+        
+        target_val = x_ax if combo == self.xaxis_combo else y_ax
+        
+        # Try to set text, fallback to index 0
+        index = combo.findText(target_val)
+        if index != -1:
+            combo.setCurrentIndex(index)
+        else:
+            combo.setCurrentIndex(0)
+
+    def _refresh_axis_combos(self):
+        """Refreshes both axis combos with current columns and custom properties."""
+        # Helper to preserve selection if possible
+        def refresh(combo):
+            current = combo.currentText()
+            self._populate_axis_combo(combo, self.data_manager.get_all_column_names())
+            if combo.findText(current) != -1:
+                combo.setCurrentText(current)
+            else:
+                combo.setCurrentIndex(0)
+
+        # We need to temporarily disconnect signals or block them to avoid triggering updates during refresh
+        # IMPORTANT: Use the return value of blockSignals to restore the PREVIOUS state.
+        # This prevents unblocking a combo that was blocked by _open_custom_dialog.
+        
+        was_blocked_x = self.xaxis_combo.blockSignals(True)
+        was_blocked_y = self.yaxis_combo.blockSignals(True)
+        
+        try:
+            refresh(self.xaxis_combo)
+            refresh(self.yaxis_combo)
+        finally:
+            self.xaxis_combo.blockSignals(was_blocked_x)
+            self.yaxis_combo.blockSignals(was_blocked_y)
+
+    def _populate_axis_combo(self, combo: QComboBox, items: list):
+        """Populates axis combo with standard items, 'Custom', and custom properties."""
+        # Save previous state
+        was_blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            
+            # Standard placeholder
+            placeholder = "Select Axis"
+            combo.addItem(placeholder)
+            
+            # Standard Items
+            combo.addItems(items)
+            
+            # Separator
+            combo.insertSeparator(combo.count())
+            
+            # Custom Option (Bold)
+            combo.addItem("Custom")
+            custom_idx = combo.count() - 1
+            model = combo.model()
+            model.setData(model.index(custom_idx, 0), QFont(combo.font().family(), -1, QFont.Weight.Bold), Qt.ItemDataRole.FontRole)
+            
+            # Custom Properties (Italic)
+            for prop_name in self.custom_properties:
+                combo.addItem(prop_name)
+                idx = combo.count() - 1
+                font = QFont()
+                font.setItalic(True)
+                model.setData(model.index(idx, 0), font, Qt.ItemDataRole.FontRole)
+        finally:
+            # Restore previous state
+            combo.blockSignals(was_blocked)
+
+    def _revert_combo_selection(self, combo):
+        """Reverts the combo box selection to match the current table state."""
+        if self.plot_table.currentRow() == -1:
+            combo.setCurrentIndex(0)
+            return
+
+        selected_row = self.plot_table.currentRow()
+        item = self.plot_table.item(selected_row, 1)
+        if not item:
+            combo.setCurrentIndex(0)
+            return
+
+        plot_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+        _, _, x_ax, y_ax = self._parse_plot_name(plot_name)
+        
+        target_val = x_ax if combo == self.xaxis_combo else y_ax
+        
+        # Try to set text, fallback to index 0
+        index = combo.findText(target_val)
+        if index != -1:
+            combo.setCurrentIndex(index)
+        else:
+            combo.setCurrentIndex(0)
+
+    def load_project(self, root_path, keywords, show_discovery_warnings: bool = True, force_reload: bool = False, keep_table: bool = False):
         # Prevent redundant reloading if path is same and not forced
         if not force_reload and self.loaded_path == root_path:
             return
@@ -611,6 +769,17 @@ class LogPlotPanel(QWidget):
 
     def _update_selected_row_name_component(self, component: str, value: str):
         """Update only a specific component of the selected row's plot name."""
+        # Intercept "Custom" selection here to be safe
+        if value and value.strip().lower() == "custom":
+            # Determine which combo triggered this based on component
+            combo = None
+            if component == 'x_axis': combo = self.xaxis_combo
+            elif component == 'y_axis': combo = self.yaxis_combo
+            
+            if combo:
+                self._open_custom_dialog(combo)
+                return
+
         if self.plot_table.currentRow() == -1:
             return
         
@@ -918,6 +1087,30 @@ class LogPlotPanel(QWidget):
                 line_edit.setText(new_value)
                 line_edit.blockSignals(False)
 
+    def _revert_combo_selection(self, combo):
+        """Reverts the combo box selection to match the current table state."""
+        if self.plot_table.currentRow() == -1:
+            combo.setCurrentIndex(0)
+            return
+
+        selected_row = self.plot_table.currentRow()
+        item = self.plot_table.item(selected_row, 1)
+        if not item:
+            combo.setCurrentIndex(0)
+            return
+
+        plot_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+        _, _, x_ax, y_ax = self._parse_plot_name(plot_name)
+        
+        target_val = x_ax if combo == self.xaxis_combo else y_ax
+        
+        # Try to set text, fallback to index 0
+        index = combo.findText(target_val)
+        if index != -1:
+            combo.setCurrentIndex(index)
+        else:
+            combo.setCurrentIndex(0)
+
     def load_project(self, root_path, keywords, show_discovery_warnings: bool = True, force_reload: bool = False, keep_table: bool = False):
         # Prevent redundant reloading if path is same and not forced
         if not force_reload and self.loaded_path == root_path:
@@ -1015,8 +1208,10 @@ class LogPlotPanel(QWidget):
 
             reset_combo(self.study_combo, "Select Study", self.data_manager.get_study_names())
             reset_combo(self.system_combo, "Select System", self.data_manager.get_all_system_names())
-            reset_combo(self.xaxis_combo, "Select X-Axis", self.data_manager.get_all_column_names())
-            reset_combo(self.yaxis_combo, "Select Y-Axis", self.data_manager.get_all_column_names())
+            
+            # Use new population method for axes
+            self._populate_axis_combo(self.xaxis_combo, self.data_manager.get_all_column_names())
+            self._populate_axis_combo(self.yaxis_combo, self.data_manager.get_all_column_names())
             
             # Only add a default row if we cleared the table and have data
             if not keep_table:
@@ -1577,6 +1772,7 @@ class LogPlotPanel(QWidget):
             'average_choices': self.average_user_choices,
             'running_mean_setting': self.running_mean_setting,
             'global_label_map': self.global_label_map,
+            'custom_properties': self.custom_properties,
             'scale_lock': self.scale_lock_enabled,
             'axes_lock': self.lock_axes_btn.isChecked(),
             'view_ranges': self.plot_controller.get_view_ranges()
@@ -1609,6 +1805,7 @@ class LogPlotPanel(QWidget):
             'average_choices': self.average_user_choices,
             'running_mean_setting': self.running_mean_setting,
             'global_label_map': self.global_label_map,
+            'custom_properties': self.custom_properties,
             'scale_lock': self.scale_lock_enabled,
             'axes_lock': self.lock_axes_btn.isChecked(),
             'view_ranges': self.plot_controller.get_view_ranges()
@@ -1656,6 +1853,8 @@ class LogPlotPanel(QWidget):
 
         self.average_user_choices = config.get('average_choices', {})
         self.global_label_map = config.get('global_label_map', {})
+        self.custom_properties = config.get('custom_properties', {})
+        self.data_manager.set_custom_properties(self.custom_properties)
 
         project_path = config.get('path')
         if project_path:
@@ -1668,6 +1867,9 @@ class LogPlotPanel(QWidget):
                 # Get keywords from UI and pass them to load_project
                 keywords = self.main_window.chip_input.get_chips()
                 self.load_project(root_path, keywords, show_discovery_warnings=False)
+                
+                # Refresh combos to show loaded custom properties
+                self._refresh_axis_combos()
                 
                 # Load settings after project load to prevent them from being reset
                 self.running_mean_setting = config.get('running_mean_setting', 'symmetric_window')
