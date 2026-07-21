@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # 'Del'
         self.plot_table.setColumnWidth(2, 80) # Give style dropdown more space
         self.plot_table.verticalHeader().hide()
+        self._setup_plot_table()
 
         main_splitter.addWidget(left_panel)
         main_splitter.addWidget(self.plot_table)
@@ -144,6 +145,37 @@ class MainWindow(QMainWindow):
 
         self._connect_signals()
         self._update_ui_state()
+
+    def _setup_plot_table(self):
+        """Creates the permanent staging row at the top of the table."""
+        self.plot_table.insertRow(0)
+        
+        # Name Item
+        name_item = QTableWidgetItem("-(Staging)-")
+        name_item.setData(Qt.ItemDataRole.UserRole, 'staging')
+        name_item.setForeground(Qt.GlobalColor.gray)
+        self.plot_table.setItem(0, 0, name_item)
+
+        # Color Button
+        color_btn = ColorButton(QColor('gray'))
+        color_btn.colorChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(0, 1, color_btn)
+
+        # Style Combo
+        style_combo = self._create_style_combo()
+        style_combo.setCurrentText("Solid")
+        style_combo.currentTextChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(0, 2, style_combo)
+
+        # Show Checkbox (disabled for staging)
+        show_check = QCheckBox()
+        show_check.setChecked(True)
+        show_widget = self._create_centered_widget(show_check)
+        show_widget.setEnabled(False)
+        self.plot_table.setCellWidget(0, 3, show_widget)
+
+        # Del Button (placeholder)
+        self.plot_table.setCellWidget(0, 4, self._create_centered_widget(QLabel("-")))
 
     def _create_combo(self, placeholder: str) -> QComboBox:
         combo = QComboBox()
@@ -232,10 +264,14 @@ class MainWindow(QMainWindow):
 
     def _update_ui_state(self, clear_plots=True):
         if clear_plots:
-            self.plot_table.setRowCount(0)
-            self.plot_controller.remove_plot("_temp_")
-            for name in list(self.plot_controller.plots.keys()):
-                self.plot_controller.remove_plot(name)
+            # Clear permanent rows only, leaving the staging row at index 0
+            for row in reversed(range(1, self.plot_table.rowCount())):
+                self.plot_table.removeRow(row)
+            
+            # Clear the plot controller and reset the staging row text
+            self.plot_controller.clear_all_plots()
+            if self.plot_table.item(0, 0):
+                self.plot_table.item(0, 0).setText("-(Staging)-")
 
         # Helper to reset a combo box with a placeholder
         def reset_combo(combo, placeholder, items):
@@ -278,77 +314,96 @@ class MainWindow(QMainWindow):
         
         self.update_plots()
 
-    def is_selection_valid(self):
-        """Check if dropdowns have a valid selection (not placeholder)."""
-        return all(combo.currentIndex() > 0 for combo in [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo])
-
     def on_system_combo_changed(self):
         """Handles visibility of the std checkbox and updates plots."""
         is_average = self.system_combo.currentText() == "average"
         self.std_checkbox.setVisible(is_average)
         self.update_plots()
-        
+
+    def is_selection_valid(self):
+        """Check if dropdowns have a valid selection (not placeholder)."""
+        return all(combo.currentIndex() > 0 for combo in [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo])
+
     def add_plot_from_selection(self):
-        # Find the temporary row
-        temp_row = -1
-        for row in range(self.plot_table.rowCount()):
-            item = self.plot_table.item(row, 0)
-            if item and item.data(Qt.ItemDataRole.UserRole) == 'temp':
-                temp_row = row
-                break
+        if not self.is_selection_valid():
+            return
+
+        # --- Read properties from the staging row (row 0) ---
+        staging_name = self.plot_table.item(0, 0).text()
         
-        if temp_row == -1:
-            return # No temp row to add
-
-        item = self.plot_table.item(temp_row, 0)
-        plot_name = item.text()
-
-        # Prevent adding duplicate plots (check against permanent rows)
-        for row in range(self.plot_table.rowCount()):
-            if row == temp_row: continue
+        # Prevent adding duplicate plots
+        for row in range(1, self.plot_table.rowCount()): # Skip staging row
             perm_item = self.plot_table.item(row, 0)
-            if perm_item and perm_item.text() == plot_name:
+            if perm_item and perm_item.text() == staging_name:
                 QMessageBox.warning(self, "Duplicate Plot", "This plot has already been added.")
                 return
 
-        # Promote the temp row to a permanent one
-        item.setData(Qt.ItemDataRole.UserRole, 'permanent')
-        item.setForeground(Qt.GlobalColor.black)
+        staging_color = self.plot_table.cellWidget(0, 1).color()
+        staging_style = self.plot_table.cellWidget(0, 2).currentText()
 
-        # The widgets for color and style are already connected and enabled.
-        # We just need to enable the 'Show' checkbox container.
-        show_check_widget = self.plot_table.cellWidget(temp_row, 3)
-        show_check_widget.setEnabled(True)
+        # --- Insert new permanent row at row 1 ---
+        self.plot_table.insertRow(1)
+        
+        # Name Item
+        name_item = QTableWidgetItem(staging_name)
+        name_item.setData(Qt.ItemDataRole.UserRole, 'permanent')
+        self.plot_table.setItem(1, 0, name_item)
 
-        # Replace placeholder with a real delete button
+        # Color Button
+        color_btn = ColorButton(staging_color)
+        color_btn.colorChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(1, 1, color_btn)
+
+        # Style Combo
+        style_combo = self._create_style_combo()
+        style_combo.setCurrentText(staging_style)
+        style_combo.currentTextChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(1, 2, style_combo)
+
+        # Show Checkbox
+        show_check = QCheckBox()
+        show_check.setChecked(True)
+        show_check.stateChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(1, 3, self._create_centered_widget(show_check))
+
+        # Delete Button
         del_btn = QPushButton("X")
         del_btn.setStyleSheet("color: red; font-weight: bold;")
-        del_btn.clicked.connect(lambda checked, name=plot_name: self.delete_plot_row(name))
-        self.plot_table.setCellWidget(temp_row, 4, self._create_centered_widget(del_btn))
+        del_btn.clicked.connect(lambda checked, name=staging_name: self.delete_plot_row(name))
+        self.plot_table.setCellWidget(1, 4, self._create_centered_widget(del_btn))
 
-        # Reset dropdowns to consume the selection
+        # Reset dropdowns, which clears the staging row via update_plots
         self.system_combo.setCurrentIndex(0)
         self.xaxis_combo.setCurrentIndex(0)
         self.yaxis_combo.setCurrentIndex(0)
 
-        self.update_plots()
-
     def update_plots(self):
-        # --- Preserve state of the temporary row before deleting it ---
-        temp_state = {'color': QColor('gray'), 'style': 'Dash'}
-        for row in reversed(range(self.plot_table.rowCount())):
-            item = self.plot_table.item(row, 0)
-            if item and item.data(Qt.ItemDataRole.UserRole) == 'temp':
-                temp_state['color'] = self.plot_table.cellWidget(row, 1).color()
-                temp_state['style'] = self.plot_table.cellWidget(row, 2).currentText()
-                self.plot_table.removeRow(row)
-                break
-
-        # --- Rebuild the entire plot from the table state ---
         self.plot_controller.clear_all_plots()
 
-        # --- Draw permanent plots ---
-        for row in range(self.plot_table.rowCount()):
+        # --- Update Staging Row and Draw Temporary Plot ---
+        staging_item = self.plot_table.item(0, 0)
+        self.add_btn.setEnabled(self.is_selection_valid())
+
+        if self.is_selection_valid():
+            study = self.study_combo.currentText()
+            system = self.system_combo.currentText()
+            x_ax = self.xaxis_combo.currentText()
+            y_ax = self.yaxis_combo.currentText()
+            plot_name = f"{study}_{system}_{x_ax}_{y_ax}"
+            staging_item.setText(plot_name)
+
+            data = self.data_manager.get_plot_data(study, system, x_ax, y_ax, self.std_checkbox.isChecked())
+            if data:
+                color = self.plot_table.cellWidget(0, 1).color()
+                style_text = self.plot_table.cellWidget(0, 2).currentText()
+                style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
+                data['y_col'] = y_ax
+                self.plot_controller.add_or_update_plot("_temp_", data, color, style)
+        else:
+            staging_item.setText("-(Staging)-")
+
+        # --- Draw Permanent Plots ---
+        for row in range(1, self.plot_table.rowCount()): # Skip staging row
             item = self.plot_table.item(row, 0)
             show_widget = self.plot_table.cellWidget(row, 3)
             if not (item and show_widget): continue
@@ -374,53 +429,8 @@ class MainWindow(QMainWindow):
                     color = self.plot_table.cellWidget(row, 1).color()
                     style_text = self.plot_table.cellWidget(row, 2).currentText()
                     style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
-                    # Pass y_ax name for multi-axis handling
                     data['y_col'] = y_ax
                     self.plot_controller.add_or_update_plot(plot_name, data, color, style)
-
-        # --- Draw temporary plot and add temporary table row ---
-        self.add_btn.setEnabled(self.is_selection_valid())
-        if self.is_selection_valid():
-            study = self.study_combo.currentText()
-            system = self.system_combo.currentText()
-            x_ax = self.xaxis_combo.currentText()
-            y_ax = self.yaxis_combo.currentText()
-            plot_name = f"{study}_{system}_{x_ax}_{y_ax}"
-
-            # Add temporary row to table
-            row = self.plot_table.rowCount()
-            self.plot_table.insertRow(row)
-            
-            name_item = QTableWidgetItem(plot_name)
-            name_item.setData(Qt.ItemDataRole.UserRole, 'temp')
-            name_item.setForeground(Qt.GlobalColor.gray)
-            self.plot_table.setItem(row, 0, name_item)
-
-            # Add enabled widgets for the temp row and connect them
-            color_btn = ColorButton(temp_state['color'])
-            color_btn.colorChanged.connect(self.update_plots)
-            self.plot_table.setCellWidget(row, 1, color_btn)
-            
-            style_combo = self._create_style_combo()
-            style_combo.setCurrentText(temp_state['style'])
-            style_combo.currentTextChanged.connect(self.update_plots)
-            self.plot_table.setCellWidget(row, 2, style_combo)
-
-            show_check = QCheckBox()
-            show_check.setChecked(True)
-            self.plot_table.setCellWidget(row, 3, self._create_centered_widget(show_check))
-            self.plot_table.cellWidget(row, 3).setEnabled(False)
-
-            self.plot_table.setCellWidget(row, 4, self._create_centered_widget(QLabel("-")))
-
-            # Draw temporary plot line
-            data = self.data_manager.get_plot_data(study, system, x_ax, y_ax, self.std_checkbox.isChecked())
-            if data:
-                temp_color = color_btn.color()
-                temp_style_text = style_combo.currentText()
-                temp_style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(temp_style_text)
-                data['y_col'] = y_ax # Pass y_ax name for multi-axis handling
-                self.plot_controller.add_or_update_plot("_temp_", data, temp_color, temp_style)
 
         self._update_axis_labels()
 
@@ -428,8 +438,8 @@ class MainWindow(QMainWindow):
         x_label = ""
         y_labels = {}
 
-        # Get labels from permanent plots
-        for row in range(self.plot_table.rowCount()):
+        # Get labels from visible permanent plots
+        for row in range(1, self.plot_table.rowCount()): # Skip staging row
             item = self.plot_table.item(row, 0)
             show_widget = self.plot_table.cellWidget(row, 3)
             if not (item and show_widget): continue
@@ -441,7 +451,7 @@ class MainWindow(QMainWindow):
                 if not x_label: x_label = x_ax
                 if y_ax not in y_labels: y_labels[y_ax] = y_ax
         
-        # If no permanent plots, use temp plot for labels
+        # If no permanent plots are showing, use the temp plot for labels
         if not y_labels and self.is_selection_valid():
             x_label = self.xaxis_combo.currentText()
             y_labels[self.yaxis_combo.currentText()] = self.yaxis_combo.currentText()
@@ -449,12 +459,12 @@ class MainWindow(QMainWindow):
         self.plot_controller.set_axis_labels(x_label, y_labels)
 
     def delete_plot_row(self, plot_name_to_delete: str):
-        for row in range(self.plot_table.rowCount()):
+        for row in range(1, self.plot_table.rowCount()): # Skip staging row
             item = self.plot_table.item(row, 0)
             if item and item.text() == plot_name_to_delete:
                 self.plot_table.removeRow(row)
-                self.update_plots() # Refresh plot view
-                break
+                self.update_plots()
+                return
 
     def _create_centered_widget(self, widget: QWidget) -> QWidget:
         """Helper to place a widget in a centered layout."""

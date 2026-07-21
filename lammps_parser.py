@@ -80,6 +80,7 @@ class LammpsParser:
     def extract_thermo_data(logfile_path: Path) -> Optional[pd.DataFrame]:
         """
         Efficiently extracts thermo data from a LAMMPS log file into a pandas DataFrame.
+        Handles log files with multiple data sections.
         """
         try:
             with open(logfile_path, 'r') as f:
@@ -87,36 +88,43 @@ class LammpsParser:
         except Exception:
             return None
 
-        data_lines = []
+        all_data_lines = []
         header_line = None
         in_data_block = False
 
-        # Regex to find the start of the data block (e.g., "Step Temp ...")
         header_regex = re.compile(r'^\s*Step\s+')
+        end_block_regex = re.compile(r'^\s*Loop time of')
 
         for line in lines:
-            if in_data_block:
-                # The end of the data block is marked by "Loop time"
-                if line.strip().startswith("Loop time"):
-                    in_data_block = False
-                    break
-                data_lines.append(line)
-            elif header_regex.match(line):
-                # Found a potential header, this might be the last one
-                header_line = line.strip()
+            if header_regex.match(line):
+                if header_line is None:
+                    header_line = line.strip()
                 in_data_block = True
-                data_lines = [] # Reset data lines for this new block
+                # Skip the header line itself from being added to data
+                continue
 
-        if not header_line or not data_lines:
+            if in_data_block:
+                if end_block_regex.match(line):
+                    in_data_block = False
+                else:
+                    # Add a check to ensure the line looks like data
+                    if re.match(r'^\s*[-0-9]', line):
+                        all_data_lines.append(line)
+
+        if not header_line or not all_data_lines:
             return None
         
         # Use StringIO to let pandas read the string data as if it were a file
         column_names = header_line.split()
-        data_io = StringIO(''.join(data_lines))
+        data_io = StringIO(''.join(all_data_lines))
         
         try:
             # FIX: Changed delim_whitespace to sep='\s+'
             df = pd.read_csv(data_io, sep=r'\s+', names=column_names, engine='python')
+            
+            # Drop duplicate steps, keeping the last occurrence
+            df.drop_duplicates(subset='Step', keep='last', inplace=True)
+
             # Ensure all numeric columns are actually numeric, coercing errors
             for col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')

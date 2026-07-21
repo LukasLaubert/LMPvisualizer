@@ -23,13 +23,16 @@ class PlottingController:
 
     def add_or_update_plot(self, name: str, data: dict, color: QColor, style):
         """Adds a new plot or updates an existing one by name."""
-        # If the plot already exists, remove it before adding the new one
         if name in self.plots:
             self.remove_plot(name)
 
         x, y = data['x'], data['y']
         std = data.get('std')
-        y_col_name = name.split('_')[-1] if name != '_temp_' else data.get('y_col')
+        y_col_name = data.get('y_col')
+
+        # Prevent crash if y-axis column name is not provided
+        if not y_col_name:
+            return
 
         # --- Y-Axis and ViewBox Management ---
         if y_col_name not in self.y_axes:
