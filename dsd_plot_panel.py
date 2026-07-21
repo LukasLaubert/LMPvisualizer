@@ -344,8 +344,20 @@ class DSDPlotPanel(QWidget):
         self.player_controls.playToggled.connect(lambda p: self.controller.play() if p else self.controller.pause())
         self.player_controls.fpsChanged.connect(self.controller.set_fps)
         self.player_controls.autoReplayToggled.connect(self.controller.set_auto_replay)
+        self.player_controls.rangeRequested.connect(self._on_range_requested)
+        self.player_controls.jumpToStepRequested.connect(self._on_jump_to_step)
         
         self.popout_btn.clicked.connect(self.launch_popout)
+
+    def _on_jump_to_step(self, val):
+        if not self.controller.timesteps: return
+        # Find closest step
+        arr = np.array(self.controller.timesteps)
+        idx = (np.abs(arr - val)).argmin()
+        
+        # Set in controller and player controls
+        self.controller.set_timestep_index(idx)
+        self.player_controls.set_step_index(idx)
         self.export_btn.clicked.connect(self.quick_export)
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
@@ -708,6 +720,36 @@ class DSDPlotPanel(QWidget):
 
     def _on_step_changed_by_user(self, step):
         self.controller.set_timestep_index(step)
+
+    def _on_range_requested(self, min_val, max_val):
+        new_timesteps = self.controller.set_timestep_range(min_val, max_val)
+        if new_timesteps:
+            self.player_controls.set_timesteps(new_timesteps)
+            
+            # Sync slider index to the controller's current timestep
+            # (Indices shift if the start of the range changes)
+            curr_ts = self.controller.current_timestep
+            try:
+                new_idx = new_timesteps.index(curr_ts)
+                self.player_controls.set_step_index(new_idx)
+            except ValueError:
+                self.player_controls.set_step_index(0)
+            
+            # Refresh Filter Limits if active (Initial/Final refs might have changed)
+            z_col = self.zfilter_combo.currentText()
+            if z_col != "No Z-Filter":
+                ref = self.zfilter_ref_combo.currentText()
+                study = self.study_combo.currentText()
+                system = self.system_combo.currentText()
+                
+                # Check study/system validity to avoid errors
+                if study and system and "Select" not in study and "Select" not in system:
+                    limits = self.controller.get_scope_min_max(study, system, z_col, ref)
+                    if limits:
+                        self.filter_bar.set_data_range(limits[0], limits[1])
+
+            # Update plot to reflect new range (e.g. Initial Frame might change)
+            self.update_plot()
         
     def _on_table_item_changed(self, item):
         if item.column() == 0: 

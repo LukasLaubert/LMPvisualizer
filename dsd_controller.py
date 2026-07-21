@@ -32,6 +32,7 @@ class DSDController(QObject):
         self.current_system = None
         self.current_timestep = 0
         self.timesteps = []
+        self.full_timesteps = [] # Store all available steps for range adjustment
         
         self.plot_config = {}
         self.domains = []
@@ -78,7 +79,10 @@ class DSDController(QObject):
 
             self.current_study = study
             self.current_system = system
-            self.timesteps = self.data_manager.get_timesteps(study, system)
+            self.full_timesteps = self.data_manager.get_timesteps(study, system)
+            # Default to full range
+            self.timesteps = list(self.full_timesteps)
+            
             self.data_manager.clear_cache()
             
             if self.timesteps:
@@ -95,6 +99,44 @@ class DSDController(QObject):
             
             if not self.view_locked:
                 self.plot_item.autoRange()
+
+    def set_timestep_range(self, min_val, max_val):
+        """
+        Updates the active subset of timesteps based on user-entered min/max.
+        Rounds to nearest available steps.
+        """
+        if not self.full_timesteps: return
+        
+        # 1. Round to nearest
+        full_arr = np.array(self.full_timesteps)
+        
+        # Find closest indices (searchsorted finds insertion points, we need closest value)
+        idx_min = (np.abs(full_arr - min_val)).argmin()
+        idx_max = (np.abs(full_arr - max_val)).argmin()
+        
+        # Ensure proper order
+        if idx_min > idx_max: idx_min, idx_max = idx_max, idx_min
+        
+        # 2. Slice
+        new_timesteps = self.full_timesteps[idx_min : idx_max + 1]
+        
+        if not new_timesteps:
+            new_timesteps = [self.full_timesteps[idx_min]] # at least one
+            
+        # 3. Apply if changed
+        if new_timesteps != self.timesteps:
+            self.timesteps = new_timesteps
+            
+            # Clamp current timestep
+            if self.current_timestep not in self.timesteps:
+                self.current_timestep = self.timesteps[0]
+            
+            # Notify UI
+            # We must return the new list so the panel can update the slider
+            return self.timesteps
+        
+        # Even if unchanged, return current list to force UI refresh (revert invalid inputs)
+        return self.timesteps
 
     def set_view_lock(self, locked):
         self.view_locked = locked
@@ -324,7 +366,8 @@ class DSDController(QObject):
             self.current_study, self.current_system,
             slice_axis, observe_axis, 
             global_options.get('z_filter_col'), global_options.get('z_filter_ref'),
-            tuple(sorted(z_ranges)) if z_ranges else None
+            tuple(sorted(z_ranges)) if z_ranges else None,
+            tuple(self.timesteps) # Include active range in cache key
         )
 
         if self._strain_cache_key != new_key:

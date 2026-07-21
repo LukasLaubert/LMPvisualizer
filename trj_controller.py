@@ -47,6 +47,7 @@ class TrjController(QObject):
         self.current_system = None
         self.current_timestep = 0
         self.timesteps = []
+        self.full_timesteps = []
         
         # Cache for "Initial" and "Final" Reference Frames used in Heatmaps
         # Structure: { 'initial': DataFrame, 'final': DataFrame }
@@ -71,7 +72,8 @@ class TrjController(QObject):
             
             self.current_study = study
             self.current_system = system
-            self.timesteps = self.data_manager.get_timesteps(study, system)
+            self.full_timesteps = self.data_manager.get_timesteps(study, system)
+            self.timesteps = list(self.full_timesteps)
             
             # Reset Cache
             self._ref_cache = {}
@@ -117,6 +119,39 @@ class TrjController(QObject):
             # Reset view limits to auto only on system change if view is not locked
             if not self.view_config.get('view_lock', True):
                 self.plot_item.autoRange()
+
+    def set_timestep_range(self, min_val, max_val):
+        """
+        Updates the active subset of timesteps based on user-entered min/max.
+        Rounds to nearest available steps.
+        """
+        if not self.full_timesteps: return
+        
+        full_arr = np.array(self.full_timesteps)
+        idx_min = (np.abs(full_arr - min_val)).argmin()
+        idx_max = (np.abs(full_arr - max_val)).argmin()
+        
+        if idx_min > idx_max: idx_min, idx_max = idx_max, idx_min
+        
+        new_timesteps = self.full_timesteps[idx_min : idx_max + 1]
+        
+        if not new_timesteps:
+            new_timesteps = [self.full_timesteps[idx_min]]
+            
+        if new_timesteps != self.timesteps:
+            self.timesteps = new_timesteps
+            if self.current_timestep not in self.timesteps:
+                self.current_timestep = self.timesteps[0]
+            
+            # Cache Invalidation: Initial/Final frames might change if range shifts
+            # Actually, "Initial" usually refers to timesteps[0] of the ACTIVE range.
+            # So we should clear the cache to ensure get_frame uses the new start/end.
+            self._ref_cache = {}
+            
+            return self.timesteps
+            
+        # Even if unchanged, return current list to force UI refresh (revert invalid inputs)
+        return self.timesteps
 
     def get_available_timesteps(self):
         return self.timesteps

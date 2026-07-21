@@ -659,10 +659,13 @@ class DSDDataManager:
         # Map each virtual domain to its cache key and check if we have it
         domain_tasks = [] # (index_in_results, v_domain, identity_key)
         
+        # Identity depends on the ACTUAL list of timesteps (specifically the first one)
+        initial_step = timesteps[0] if timesteps else None
+
         # Pre-allocate results with cached data where available
         final_domains_data = []
         for i, (v_domain, name) in enumerate(virtual_domains):
-            ident = get_calc_identity(v_domain)
+            ident = (get_calc_identity(v_domain), initial_step)
             cached = self.strain_evolution_cache.get(ident)
             
             d_res = {

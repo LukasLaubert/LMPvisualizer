@@ -3,7 +3,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, 
     QSpinBox, QDoubleSpinBox, QDialog, QFormLayout, QDialogButtonBox,
-    QFrame, QStyle
+    QFrame, QStyle, QLineEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF
 from PyQt6.QtGui import QPainter, QBrush, QColor, QLinearGradient, QMouseEvent, QFont
@@ -604,11 +604,100 @@ class HeatmapBarWidget(QWidget):
         painter.drawRect(QRectF(bar_x, margin_top, bar_w, bar_h))
 
 
+class EditableLabel(QWidget):
+    """
+    A label that turns into a QLineEdit when clicked.
+    Emits valueChanged(text) when editing finishes (enter/loss of focus).
+    Reverts on Escape.
+    Supports a display prefix (e.g. "Step: ") that is hidden during editing.
+    """
+    valueChanged = pyqtSignal(str)
+
+    def __init__(self, text="", prefix="", parent=None):
+        super().__init__(parent)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+        self.layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.prefix = prefix
+        self.raw_value = text # The value without prefix
+        self.display_text = f"{self.prefix}{self.raw_value}"
+
+        self.label = QLabel(self.display_text)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        self.edit = QLineEdit(self.raw_value)
+        self.edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.edit.hide()
+        
+        # Install event filter or subclass? Subclassing QLineEdit is cleaner for key press
+        self.edit.installEventFilter(self)
+        self.edit.editingFinished.connect(self._on_editing_finished)
+
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.edit)
+        
+        # Prevent layout jump by enforcing minimum height based on the line edit
+        self.setMinimumHeight(self.edit.sizeHint().height())
+
+    def mousePressEvent(self, event):
+        if self.label.isVisible():
+            self._start_editing()
+
+    def eventFilter(self, obj, event):
+        if obj == self.edit and event.type() == event.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                self._cancel_editing()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _start_editing(self):
+        self.label.hide()
+        self.edit.show()
+        self.edit.setText(self.raw_value)
+        self.edit.selectAll()
+        self.edit.setFocus()
+
+    def _cancel_editing(self):
+        self.edit.hide()
+        self.label.show()
+        # Reset edit text to current valid value
+        self.edit.setText(self.raw_value)
+
+    def _on_editing_finished(self):
+        # If hidden, we probably cancelled already
+        if not self.edit.isVisible(): return
+        
+        new_val = self.edit.text()
+        self.edit.hide()
+        self.label.show()
+        
+        if new_val != self.raw_value:
+            self.raw_value = new_val
+            self.display_text = f"{self.prefix}{self.raw_value}"
+            self.label.setText(self.display_text)
+            self.valueChanged.emit(new_val)
+    
+    def setText(self, text):
+        self.raw_value = text
+        self.display_text = f"{self.prefix}{self.raw_value}"
+        self.label.setText(self.display_text)
+        self.edit.setText(text) # Prepare edit for next time
+    
+    @property
+    def text_value(self):
+        return self.raw_value
+
+
 class PlayerControlWidget(QWidget):
     stepChanged = pyqtSignal(int)
     playToggled = pyqtSignal(bool)
     fpsChanged = pyqtSignal(int)
     autoReplayToggled = pyqtSignal(bool)
+    rangeRequested = pyqtSignal(float, float)
+    jumpToStepRequested = pyqtSignal(float)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -672,8 +761,14 @@ class PlayerControlWidget(QWidget):
         row_layout = QHBoxLayout(slider_row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.min_lbl = QLabel("0")
-        self.max_lbl = QLabel("100")
+        self.min_lbl = EditableLabel("0")
+        self.min_lbl.setFixedWidth(60)
+        self.min_lbl.valueChanged.connect(self._on_range_edited)
+        
+        self.max_lbl = EditableLabel("100")
+        self.max_lbl.setFixedWidth(60)
+        self.max_lbl.valueChanged.connect(self._on_range_edited)
+        
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.valueChanged.connect(self._on_slider_change)
         
@@ -683,10 +778,25 @@ class PlayerControlWidget(QWidget):
         
         slider_layout.addWidget(slider_row)
         
-        self.step_lbl = QLabel("Step: N/A")
-        self.step_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.step_lbl.setStyleSheet("font-weight: bold; color: #444;")
-        slider_layout.addWidget(self.step_lbl)
+        # Step Label Container
+        # Simplified: Use a single EditableLabel with prefix
+        self.step_val_lbl = EditableLabel("N/A", prefix="Step: ")
+        self.step_val_lbl.label.setStyleSheet("font-weight: bold; color: #444;")
+        # No Fixed Width to allow centering, or fixed if we want stability
+        # The user complained about it jumping to right. 
+        # Using a layout with alignment center should keep it centered.
+        # But if we want it strictly centered under the slider, let's just add it to layout
+        # with center alignment.
+        self.step_val_lbl.setFixedWidth(120) # Enough for "Step: 1000000"
+        self.step_val_lbl.valueChanged.connect(self._on_step_val_edited)
+        
+        step_wrapper = QWidget()
+        step_wrap_layout = QHBoxLayout(step_wrapper)
+        step_wrap_layout.setContentsMargins(0,0,0,0)
+        step_wrap_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        step_wrap_layout.addWidget(self.step_val_lbl)
+        
+        slider_layout.addWidget(step_wrapper)
         
         main_layout.addWidget(slider_container, 1)
 
@@ -697,15 +807,38 @@ class PlayerControlWidget(QWidget):
         
         self.timesteps = []
 
+    def _on_range_edited(self, text):
+        try:
+            min_val = float(self.min_lbl.text_value)
+            max_val = float(self.max_lbl.text_value)
+            self.rangeRequested.emit(min_val, max_val)
+        except ValueError:
+            # Revert to current valid values
+            if self.timesteps:
+                self.min_lbl.setText(str(self.timesteps[0]))
+                self.max_lbl.setText(str(self.timesteps[-1]))
+
+    def _on_step_val_edited(self, text):
+        try:
+            val = float(text)
+            self.jumpToStepRequested.emit(val)
+        except ValueError:
+            # Revert to current slider value if invalid
+            self._update_step_label()
+
     def set_timesteps(self, steps: list):
         self.timesteps = steps
         if not steps:
             self.slider.setEnabled(False)
-            self.step_lbl.setText("Step: N/A")
+            self.step_val_lbl.setText("N/A")
             return
         
         self.slider.setEnabled(True)
         self.slider.setRange(0, len(steps) - 1)
+        
+        # Update text only if different to avoid loop if possible, 
+        # but EditableLabel.setText updates internal value too.
+        # This overwrites user input with valid ranges from controller.
         self.min_lbl.setText(str(steps[0]))
         self.max_lbl.setText(str(steps[-1]))
         
@@ -720,6 +853,8 @@ class PlayerControlWidget(QWidget):
         if not self.timesteps: return
         idx = max(0, min(idx, len(self.timesteps)-1))
         self.slider.setValue(idx)
+        # Force label update even if slider didn't move (e.g. reverting invalid text input)
+        self._update_step_label()
 
     def _on_first_clicked(self):
         if self.btn_play.isChecked():
@@ -739,7 +874,9 @@ class PlayerControlWidget(QWidget):
     def _update_step_label(self):
         if self.timesteps:
             val = self.timesteps[self.slider.value()]
-            self.step_lbl.setText(f"Step: {val}")
+            self.step_val_lbl.setText(f"{val}")
+        else:
+            self.step_val_lbl.setText("N/A")
 
     def _on_play_toggled(self, checked):
         # Allow jumping to start/end even while playing

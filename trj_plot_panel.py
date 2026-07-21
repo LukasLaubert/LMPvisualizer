@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QColor, QIntValidator
 import pyqtgraph as pg
+import numpy as np
 
 from trj_data_manager import TrjDataManager
 from trj_controller import TrjController
@@ -283,6 +284,8 @@ class TrjPlotPanel(QWidget):
         self.player_controls.playToggled.connect(lambda p: self.controller.play() if p else self.controller.pause())
         self.player_controls.fpsChanged.connect(self.controller.set_fps)
         self.player_controls.autoReplayToggled.connect(self.controller.set_auto_replay)
+        self.player_controls.rangeRequested.connect(self._on_range_requested)
+        self.player_controls.jumpToStepRequested.connect(self._on_jump_to_step)
         
         # Updated connection
         self.filter_bar.rangesChanged.connect(self._on_filter_bar_changed)
@@ -295,6 +298,15 @@ class TrjPlotPanel(QWidget):
         
         self.lock_axes_btn.toggled.connect(self._on_view_lock_toggled)
         self.lock_axes_btn.rightClicked.connect(self._on_view_sync_toggled)
+
+    def _on_jump_to_step(self, val):
+        if not self.controller.timesteps: return
+        arr = np.array(self.controller.timesteps)
+        idx = (np.abs(arr - val)).argmin()
+        
+        self.controller.set_timestep_index(idx)
+        self.player_controls.set_step_index(idx)
+        self._save_step_to_current_row(idx)
 
     def load_project(self, root_path, keywords, force_reload=False, keep_table=False, target_system=None):
         if not force_reload and self.loaded_path == root_path:
@@ -666,6 +678,38 @@ class TrjPlotPanel(QWidget):
     def _on_step_changed_by_user(self, step):
         self.controller.set_timestep_index(step)
         self._save_step_to_current_row(step)
+
+    def _on_range_requested(self, min_val, max_val):
+        new_timesteps = self.controller.set_timestep_range(min_val, max_val)
+        if new_timesteps:
+            self.player_controls.set_timesteps(new_timesteps)
+            
+            # Sync slider index to the controller's current timestep
+            curr_ts = self.controller.current_timestep
+            try:
+                new_idx = new_timesteps.index(curr_ts)
+                self.player_controls.set_step_index(new_idx)
+            except ValueError:
+                self.player_controls.set_step_index(0)
+            
+            # Refresh Limits if active (Initial/Final refs might have changed)
+            # Need to capture current state to know which cols are active
+            row = self.plot_table.currentRow()
+            if row >= 0:
+                item = self.plot_table.item(row, 1)
+                state = item.data(Qt.ItemDataRole.UserRole)
+                if state:
+                    study = state.get('study')
+                    system = state.get('system')
+                    
+                    # 1. Z-Filter
+                    z_col = state.get('z_col')
+                    if z_col and z_col != "No Z-Filter":
+                        z_ref = state.get('z_ref', 'Current')
+                        dmin, dmax = self.controller.get_scope_min_max(study, system, z_col, z_ref)
+                        self.filter_bar.set_data_range(dmin, dmax)
+                        
+            self.update_plot_from_selection()
 
     def _save_step_to_current_row(self, step):
         row = self.plot_table.currentRow()
