@@ -3,8 +3,9 @@
 from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget,
                              QDialogButtonBox, QHeaderView, QTableWidgetItem,
                              QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog,
-                             QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication, QStyledItemDelegate)
-from PyQt6.QtGui import QColor, QPalette
+                             QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication, 
+                             QStyledItemDelegate, QComboBox)
+from PyQt6.QtGui import QColor, QPalette, QFontMetrics
 from PyQt6.QtCore import pyqtSignal, Qt, QEvent
 
 class ColorButton(QPushButton):
@@ -26,10 +27,7 @@ class ColorButton(QPushButton):
         return self._color
 
     def on_click(self):
-        # Save the original style to restore if the dialog is cancelled
         original_style = self.styleSheet()
-        
-        # Temporarily clear style to prevent inheritance
         self.setStyleSheet("")
         
         dialog = QColorDialog(self)
@@ -39,13 +37,11 @@ class ColorButton(QPushButton):
         if dialog.exec():
             new_color = dialog.selectedColor()
             if new_color.isValid():
-                self.set_color(new_color)  # This sets the new color and style
+                self.set_color(new_color)
             else:
-                # If dialog was cancelled, restore the original color's style
-                self.setStyleSheet(f"background-color: {self._color.name()};")
+                self.setStyleSheet(original_style)
         else:
-            # If dialog was cancelled, restore the original color's style
-            self.setStyleSheet(f"background-color: {self._color.name()};")
+            self.setStyleSheet(original_style)
 
 class InconsistentDataDialog(QDialog):
     """Dialog to resolve averaging of data with different lengths."""
@@ -63,7 +59,6 @@ class InconsistentDataDialog(QDialog):
             "Please choose how to proceed with averaging."
         ))
         
-        # Table showing lengths
         self.table = QTableWidget(len(lengths), 3)
         self.table.setHorizontalHeaderLabels(["System", "Timesteps", "Exclude"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -77,7 +72,6 @@ class InconsistentDataDialog(QDialog):
         
         layout.addWidget(self.table)
         
-        # Truncation option
         form_layout = QFormLayout()
         self.truncate_box = QSpinBox()
         self.truncate_box.setRange(1, min_len)
@@ -85,14 +79,12 @@ class InconsistentDataDialog(QDialog):
         form_layout.addRow("Truncate all data to length:", self.truncate_box)
         layout.addLayout(form_layout)
         
-        # Dialog buttons
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
     def get_choices(self) -> dict:
-        """Returns the user's choices."""
         excluded = []
         for i in range(self.table.rowCount()):
             if self.table.cellWidget(i, 2).isChecked():
@@ -174,10 +166,8 @@ class ChipInputWidget(QWidget):
         self.layout.addWidget(self.input_line)
         self.layout.setStretchFactor(self.input_line, 1)
 
-        # Add default chips
         self.add_chip(".log")
         self.add_chip(".out")
-
 
     def eventFilter(self, source, event):
         if source is self.input_line and event.type() == QEvent.Type.KeyPress:
@@ -185,8 +175,8 @@ class ChipInputWidget(QWidget):
                 if self.input_line.text().strip():
                     self.add_chip_from_input()
                     if event.key() == Qt.Key.Key_Backtab:
-                        return False # Allow default Shift+Tab action
-                    return True # Event handled for Space and Tab
+                        return False 
+                    return True
         return super().eventFilter(source, event)
 
     def add_chip(self, text: str):
@@ -225,13 +215,8 @@ class ChipInputWidget(QWidget):
                 widget.set_bold(widget.text in successful_keywords)
 
     def set_chips(self, chips: list):
-        """Replaces all current chips with the provided list."""
-        # Remove all existing chips
         while self._chips:
-            # Remove the first chip repeatedly until empty
             self.remove_chip(self._chips[0])
-        
-        # Add new chips
         for chip in chips:
             self.add_chip(chip)
 
@@ -250,84 +235,53 @@ class DraggableTableWidget(QTableWidget):
         self.verticalHeader().setVisible(False)
 
     def dropEvent(self, event):
-        """Handle drop events to reorder rows."""
         if event.source() is self and event.dropAction() == Qt.DropAction.MoveAction:
-            # Get the drop position
             drop_position = event.position().toPoint()
             target_row = self.indexAt(drop_position).row()
 
-            # If not dropped on a valid row, determine position based on drop position
             if target_row == -1:
-                # Calculate which row to drop above based on Y coordinate
-                row_height = self.rowHeight(0) if self.rowCount() > 0 else self.rowHeight(self.currentRow())
-                if row_height == 0:
-                    row_height = 25  # Default row height
-
-                # Map Y position to approximate row index
+                row_height = self.rowHeight(0) if self.rowCount() > 0 else 25
                 header_height = self.horizontalHeader().height()
                 relative_y = drop_position.y() - header_height
                 target_row = max(0, min(self.rowCount(), int(relative_y // row_height)))
 
-            # Get the source row (the one being dragged)
             source_row = self.currentRow()
 
-            # Only proceed if we're moving to a different position
             if source_row != target_row and source_row != -1:
-                # Adjust target_row if dragging downwards
                 if source_row < target_row:
                     target_row -= 1
 
-                # Store all data from the source row
                 source_items = []
                 source_widgets = {}
 
-                # Store items (text data)
                 for col in range(self.columnCount()):
                     item = self.item(source_row, col)
-                    if item:
-                        source_items.append(item.clone())
-                    else:
-                        source_items.append(None)
-
-                # Store widgets (color buttons, combos, checkboxes, buttons)
-                for col in range(self.columnCount()):
+                    source_items.append(item.clone() if item else None)
                     widget = self.cellWidget(source_row, col)
                     if widget:
-                        # We need to reparent the widget to the new cell
                         source_widgets[col] = widget
 
-                # Remove the source row
                 self.removeRow(source_row)
 
-                # Adjust target_row if it was after the removed row
                 if source_row < target_row:
                     target_row -= 1
 
-                # Insert a new row at target position
                 self.insertRow(target_row)
 
-                # Add items to the new row
                 for col, item in enumerate(source_items):
                     if item:
                         self.setItem(target_row, col, item)
 
-                # Add widgets to the new row
                 for col, widget in source_widgets.items():
-                    # Important: Clear the widget's parent to avoid issues
+                    # Critical: Reparent widget to avoid C++ deletion issues
                     widget.setParent(None)
                     self.setCellWidget(target_row, col, widget)
 
-                # Select the moved row
                 self.selectRow(target_row)
-
-                # Emit signal that rows were reordered
                 self.rowsReordered.emit()
-
-                # Accept the drop event
                 event.acceptProposedAction()
                 return
 
-        # Call parent dropEvent if we didn't handle it
         super().dropEvent(event)
 
 class RightClickButton(QPushButton):
@@ -341,7 +295,33 @@ class RightClickButton(QPushButton):
                 super().mousePressEvent(event)
 
 class NoNewLineDelegate(QStyledItemDelegate):
-    """Helper to replace newlines with spaces in the dropdown list view."""
+    """
+    1. Replaces newlines with spaces in the collapsed view.
+    2. Ensures the dropdown popup is wide enough to show the full text of items.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._parent_combo = parent
+
     def displayText(self, value, locale):
         text = super().displayText(value, locale)
         return text.replace('\n', ' ')
+
+    def sizeHint(self, option, index):
+        # Calculate the width required for the full text
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+        if not text:
+            return super().sizeHint(option, index)
+            
+        font_metrics = option.fontMetrics
+        width = font_metrics.horizontalAdvance(text) + 20  # Padding
+        
+        # If attached to a combobox, ensure the popup is wide enough
+        if self._parent_combo and isinstance(self._parent_combo, QComboBox):
+            # We can't set popup width directly via delegate, 
+            # but we can update the view's minimum width if needed.
+            view = self._parent_combo.view()
+            if view and view.minimumWidth() < width:
+                view.setMinimumWidth(width)
+                
+        return super().sizeHint(option, index)

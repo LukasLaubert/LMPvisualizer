@@ -1,22 +1,27 @@
+# lmp_visualizer/main_window.py
+
 import sys
 import os
+import json
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QComboBox, QFrame, QGridLayout, QLabel, QSizePolicy, QStackedWidget, 
-    QFileDialog, QMessageBox
+    QFileDialog, QMessageBox, QTableWidgetItem
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 
-from ui_components import ChipInputWidget
+from ui_components import ChipInputWidget, NoNewLineDelegate, ColorButton
 from log_parser import LogParser
 from log_plot_panel import LogPlotPanel
 from trj_plot_panel import TrjPlotPanel
+from settings_manager import SettingsManager
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LAMMPS Log Visualizer")
+        self.setWindowTitle("LAMMPS Visualizer")
         self.setGeometry(100, 100, 1400, 800)
         self.setStyleSheet("QMainWindow { background-color: #f0f0f0; }")
 
@@ -26,7 +31,7 @@ class MainWindow(QMainWindow):
         # 0: Log Plot, 1: Trj Plot
         self.mode_keywords = {
             0: ['.log', '.out'],
-            1: ['.lammpstrj']
+            1: ['.lammpstrj', '.dump']
         }
         self.current_mode_index = 0
 
@@ -87,14 +92,13 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(top_controls_group)
 
         # --- Mode Selector (Floating) ---
-        from ui_components import NoNewLineDelegate
-        
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Log\nPlot")
         self.mode_combo.addItem("Trj\nPlot")
         self.mode_combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.mode_combo.setFixedWidth(75)
         
+        # Use Delegate to prevent newlines in the dropdown list
         delegate = NoNewLineDelegate(self.mode_combo)
         self.mode_combo.setItemDelegate(delegate)
         
@@ -111,11 +115,11 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.stacked_widget, 1)
 
         # Initialize chips for the default mode (Log Plot)
-        # We block signals to prevent triggering a load before the path is even set
         self.chip_input.blockSignals(True)
         self.chip_input.set_chips(self.mode_keywords[0])
         self.chip_input.blockSignals(False)
         
+        # Attach Mode Combo to the initial panel
         self.log_plot_panel.attach_mode_combo(self.mode_combo)
 
     def browse_for_path(self):
@@ -169,6 +173,7 @@ class MainWindow(QMainWindow):
              
         if path.is_dir():
             try:
+                 # Attempt to find root if inside a subdirectory
                  root = LogParser.find_project_root(path_str)
                  self.path_edit.setText(str(root))
                  path = root
@@ -187,10 +192,10 @@ class MainWindow(QMainWindow):
     def propagate_load(self, path, force_reload=False, keep_table=False):
         # Send load command to CURRENT panel
         current_panel = self.stacked_widget.currentWidget()
+        keywords = self.chip_input.get_chips()
+        
+        # Check if the panel accepts 'keep_table'
         if hasattr(current_panel, 'load_project'):
-            keywords = self.chip_input.get_chips()
-            
-            # Check if the panel accepts 'keep_table' (LogPlotPanel does, Trj might not yet)
             import inspect
             sig = inspect.signature(current_panel.load_project)
             if 'keep_table' in sig.parameters:
@@ -204,7 +209,6 @@ class MainWindow(QMainWindow):
         self.current_mode_index = index
         
         # 2. Load keywords for the *new* mode
-        # Block signals so we don't trigger 'on_keywords_changed' during the swap
         self.chip_input.blockSignals(True)
         self.chip_input.set_chips(self.mode_keywords[index])
         self.chip_input.blockSignals(False)
@@ -218,14 +222,132 @@ class MainWindow(QMainWindow):
         if hasattr(new_panel, 'attach_mode_combo'):
             new_panel.attach_mode_combo(self.mode_combo)
 
-        # 5. Load data if needed (Propagate load with new keywords)
+        # 5. Load data if path exists (Propagate load with new keywords)
         if self.current_project_path:
-             self.propagate_load(Path(self.current_project_path), force_reload=False)
+             self.propagate_load(Path(self.current_project_path), force_reload=False, keep_table=True)
 
     def load_state_on_startup(self):
-        self.log_plot_panel.load_state_on_startup()
+        """Loads autosave states for both panels if available."""
+        # 1. Log Plot Load
+        if hasattr(self.log_plot_panel, 'load_state_on_startup'):
+            self.log_plot_panel.load_state_on_startup()
+            
+        # 2. Trj Plot Load
+        config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
+        trj_path = os.path.join(config_dir, 'autosave_trj.json')
+        
+        if os.path.exists(trj_path):
+            data = SettingsManager.load_state(trj_path)
+            if data and data.get('type') == 'trj_plot':
+                # Restore Project
+                path = data.get('project_path', '')
+                keywords = data.get('keywords', [])
+                if path and os.path.exists(path):
+                    # Update global keywords if we are in Trj mode, or store them for later
+                    self.mode_keywords[1] = keywords
+                    
+                    # Trigger load
+                    self.trj_plot_panel.load_project(Path(path), keywords, force_reload=True)
+                    self.trj_plot_panel.global_label_map = data.get('global_label_map', {})
+                    
+                    # Restore Table Rows
+                    table = self.trj_plot_panel.plot_table
+                    table.setRowCount(0)
+                    
+                    for entry in data.get('rows', []):
+                        state = entry.get('state')
+                        visuals = entry.get('visuals', {})
+                        
+                        # Determine heatmap state (handle legacy "Select Heatmap" string if present)
+                        h_col = state.get('h_col', "No Heatmap")
+                        is_heatmap = (h_col != "No Heatmap" and h_col != "Select Heatmap")
+
+                        # Construct data dictionary for the panel's helper method
+                        row_data = {
+                            'state': state,
+                            'is_heatmap': is_heatmap,
+                            'color': visuals.get('color', '#000000'),
+                            'heatmap_grad': visuals.get('gradient'),
+                            'style': visuals.get('symbol', 'o'),
+                            'size': str(visuals.get('size', 5))
+                        }
+                        
+                        row = table.rowCount()
+                        table.insertRow(row)
+                        
+                        # Use the new helper method to populate the row correctly
+                        self.trj_plot_panel._populate_row_data(row, row_data)
+                    
+                    # Select first row if exists to trigger view update
+                    if table.rowCount() > 0:
+                        table.selectRow(0)
 
     def closeEvent(self, event):
+        """Handle application exit: Save state for both modes."""
+        
+        # 1. Save Log Plot State
         if hasattr(self.log_plot_panel, 'save_state_for_exit'):
             self.log_plot_panel.save_state_for_exit()
+            
+        # 2. Save Trj Plot State
+        try:
+            config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
+            os.makedirs(config_dir, exist_ok=True)
+            path = os.path.join(config_dir, 'autosave_trj.json')
+
+            # Determine path/keywords to save
+            # If Trj Panel has data loaded, use that path, otherwise current path
+            trj_path_val = self.trj_plot_panel.loaded_path or self.path_edit.text()
+            # Use current keywords if mode is Trj, else use stored keywords
+            trj_kw = self.chip_input.get_chips() if self.current_mode_index == 1 else self.mode_keywords[1]
+
+            session_data = {
+                'type': 'trj_plot',
+                'project_path': str(trj_path_val),
+                'keywords': trj_kw,
+                'rows': [],
+                'global_label_map': self.trj_plot_panel.global_label_map
+            }
+            
+            table = self.trj_plot_panel.plot_table
+            for row in range(table.rowCount()):
+                item = table.item(row, 1)
+                if not item: continue
+                state = item.data(Qt.ItemDataRole.UserRole)
+                
+                # Visuals
+                color_widget = table.cellWidget(row, 2)
+                style_widget = table.cellWidget(row, 3)
+                size_widget = table.cellWidget(row, 4)
+                
+                color_val = "#000000"
+                gradient_val = None
+                if isinstance(color_widget, ColorButton):
+                    color_val = color_widget.color().name()
+                elif isinstance(color_widget, QComboBox):
+                    gradient_val = color_widget.currentText()
+                
+                # Handle size widget type safety
+                size_val = 1
+                if hasattr(size_widget, 'value'):
+                    size_val = size_widget.value()
+                elif hasattr(size_widget, 'text'):
+                    try: size_val = int(size_widget.text())
+                    except: pass
+
+                row_data = {
+                    'state': state,
+                    'visuals': {
+                        'color': color_val,
+                        'gradient': gradient_val,
+                        'symbol': style_widget.currentText() if style_widget else 'o',
+                        'size': size_val
+                    }
+                }
+                session_data['rows'].append(row_data)
+            
+            SettingsManager.save_state(path, session_data)
+        except Exception as e:
+            print(f"Error autosaving Trj Plot state: {e}")
+
         super().closeEvent(event)

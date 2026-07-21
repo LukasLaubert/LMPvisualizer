@@ -1,3 +1,5 @@
+# lmp_visualizer/popout_window.py
+
 import sys
 import copy
 import shutil
@@ -7,11 +9,10 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QCheckBox, QComboBox, QSpinBox, 
                              QDoubleSpinBox, QGroupBox, QPushButton, QColorDialog, 
                              QFrame, QSizePolicy, QMessageBox, QToolBar)
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QAction, QIcon
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 
 import matplotlib
-# Ensure we use the Qt6 backend
 matplotlib.use('qtagg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -20,12 +21,14 @@ import matplotlib.pyplot as plt
 from ui_components import ColorButton
 
 class LinePropertiesWidget(QGroupBox):
-    """Widget to control properties of a single line series."""
+    """Widget to control properties of a single line or scatter series."""
     propertiesChanged = pyqtSignal()
 
     def __init__(self, series_id, initial_props, parent=None):
         super().__init__(initial_props['name'], parent)
         self.series_id = series_id
+        self.is_scatter = initial_props.get('mode') == 'scatter'
+        
         self.setCheckable(True)
         self.setChecked(initial_props.get('visible', True))
         self.toggled.connect(self.propertiesChanged)
@@ -40,93 +43,118 @@ class LinePropertiesWidget(QGroupBox):
         layout.addRow("Legend:", self.label_edit)
 
         # Color
-        self.color_btn = ColorButton(initial_props['color'])
-        self.color_btn.colorChanged.connect(lambda: self.propertiesChanged.emit())
-        layout.addRow("Color:", self.color_btn)
-
-        # Style
-        self.style_combo = QComboBox()
-        self.style_combo.addItems(['-', '--', ':', '-.'])
-        self.style_combo.setCurrentText(initial_props.get('linestyle', '-'))
-        self.style_combo.currentTextChanged.connect(self.propertiesChanged)
-        layout.addRow("Style:", self.style_combo)
-
-        # Width
-        self.width_spin = QDoubleSpinBox()
-        self.width_spin.setRange(0.1, 20.0)
-        self.width_spin.setSingleStep(0.5)
-        self.width_spin.setValue(initial_props.get('linewidth', 1.5))
-        self.width_spin.valueChanged.connect(self.propertiesChanged)
-        layout.addRow("Width:", self.width_spin)
-
-        # Marker
-        self.marker_combo = QComboBox()
-        self.marker_combo.addItems(['None', 'o', 's', '^', 'v', 'D', 'x', '+'])
-        current_marker = initial_props.get('marker', 'None')
-        if current_marker is None: current_marker = 'None'
-        self.marker_combo.setCurrentText(current_marker)
-        self.marker_combo.currentTextChanged.connect(self.propertiesChanged)
-        layout.addRow("Marker:", self.marker_combo)
+        # For scatter plots with individual colors (heatmaps), this override might not apply per-dot,
+        # but it's useful if the user wants to force a single color.
+        # Per feature request: do not show "Color" when Heatmap is activated.
         
-        # Error Band Toggle (if data available)
-        self.has_std = initial_props.get('has_std', False)
-        self.error_check = QCheckBox("Show Error Band")
-        if self.has_std:
-            self.error_check.setChecked(initial_props.get('show_std', True))
-            self.error_check.toggled.connect(self.propertiesChanged)
-            layout.addRow(self.error_check)
+        is_heatmap = self.is_scatter and 'colors' in initial_props and initial_props['colors'] is not None
+        
+        if not is_heatmap:
+            self.color_btn = ColorButton(initial_props['color'])
+            self.color_btn.colorChanged.connect(lambda: self.propertiesChanged.emit())
+            layout.addRow("Color:", self.color_btn)
+        else:
+            # Keep a reference even if not shown, to avoid attribute errors if used elsewhere
+            self.color_btn = ColorButton(initial_props['color'])
+
+        if self.is_scatter:
+            # Scatter specific controls
+            self.size_spin = QDoubleSpinBox()
+            self.size_spin.setRange(1.0, 200.0) # Increased range for scatter size
+            self.size_spin.setValue(float(initial_props.get('size', 10)))
+            self.size_spin.valueChanged.connect(self.propertiesChanged)
+            layout.addRow("Size:", self.size_spin)
+            
+            self.marker_combo = QComboBox()
+            # Matplotlib scatter markers
+            self.marker_combo.addItems(['o', 'x', '+', 'v', '^', '<', '>', 's', 'p', '*', 'h', 'H', 'D', 'd'])
+            self.marker_combo.setCurrentText(initial_props.get('marker', 'o'))
+            self.marker_combo.currentTextChanged.connect(self.propertiesChanged)
+            layout.addRow("Marker:", self.marker_combo)
+            
+            # Placeholders for line attributes to keep interface consistent in get_properties
+            self.style_combo = QComboBox() 
+            self.width_spin = QDoubleSpinBox() 
+            self.error_check = QCheckBox() 
+            
+        else:
+            # Line specific controls
+            self.style_combo = QComboBox()
+            self.style_combo.addItems(['-', '--', ':', '-.'])
+            self.style_combo.setCurrentText(initial_props.get('linestyle', '-'))
+            self.style_combo.currentTextChanged.connect(self.propertiesChanged)
+            layout.addRow("Style:", self.style_combo)
+
+            self.width_spin = QDoubleSpinBox()
+            self.width_spin.setRange(0.1, 20.0)
+            self.width_spin.setSingleStep(0.5)
+            self.width_spin.setValue(initial_props.get('linewidth', 1.5))
+            self.width_spin.valueChanged.connect(self.propertiesChanged)
+            layout.addRow("Width:", self.width_spin)
+
+            self.marker_combo = QComboBox()
+            self.marker_combo.addItems(['None', 'o', 's', '^', 'v', 'D', 'x', '+'])
+            current_marker = initial_props.get('marker', 'None')
+            if current_marker is None: current_marker = 'None'
+            self.marker_combo.setCurrentText(current_marker)
+            self.marker_combo.currentTextChanged.connect(self.propertiesChanged)
+            layout.addRow("Marker:", self.marker_combo)
+            
+            self.has_std = initial_props.get('has_std', False)
+            self.error_check = QCheckBox("Show Error Band")
+            if self.has_std:
+                self.error_check.setChecked(initial_props.get('show_std', True))
+                self.error_check.toggled.connect(self.propertiesChanged)
+                layout.addRow(self.error_check)
+            
+            self.size_spin = QDoubleSpinBox()
 
     def get_properties(self):
-        marker = self.marker_combo.currentText()
-        if marker == 'None': marker = None
-        
-        return {
+        props = {
             'visible': self.isChecked(),
             'label': self.label_edit.text(),
             'color': self.color_btn.color(),
-            'linestyle': self.style_combo.currentText(),
-            'linewidth': self.width_spin.value(),
-            'marker': marker,
-            'show_std': self.error_check.isChecked() if self.has_std else False
+            'marker': self.marker_combo.currentText()
         }
+        
+        if self.is_scatter:
+            props['size'] = self.size_spin.value()
+            props['linestyle'] = 'None' 
+            props['linewidth'] = 0
+            props['show_std'] = False
+        else:
+            m = self.marker_combo.currentText()
+            if m == 'None': m = None
+            props['marker'] = m
+            props['linestyle'] = self.style_combo.currentText()
+            props['linewidth'] = self.width_spin.value()
+            props['show_std'] = self.error_check.isChecked() if self.has_std else False
+            
+        return props
 
 class PopOutWindow(QMainWindow):
     def __init__(self, plot_state_data, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Plot Inspector")
-        
-        # Initial Window Size (includes dock and toolbar)
-        # We start a bit larger to ensure controls are visible, user can click "Set Size" to enforce 400x300 canvas
         self.resize(900, 600)
         
-        # Data storage
         self.plot_data = copy.deepcopy(plot_state_data)
         self.line_widgets = {} 
         
         self._init_ui()
         
-        # Hook up resize event for refreshing layout
         self.canvas.mpl_connect('resize_event', self.on_canvas_resize)
-        
         self.redraw_plot()
 
     def _init_ui(self):
-        # --- Central Widget: Matplotlib Canvas ---
-        # Default dpi is usually 100
         self.figure = Figure(dpi=100) 
         self.canvas = FigureCanvasQTAgg(self.figure)
-        
-        # Set Policy to Expanding to fill available space
         self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.canvas.updateGeometry()
-        
         self.setCentralWidget(self.canvas)
 
-        # --- Toolbar ---
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.addToolBar(self.toolbar)
 
-        # --- Dock Widget: Inspector ---
         self.dock = QDockWidget("Plot Settings", self)
         self.dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.dock_widget = QWidget()
@@ -138,27 +166,19 @@ class PopOutWindow(QMainWindow):
         self.scroll_content = QWidget()
         self.form_layout = QVBoxLayout(self.scroll_content)
         
-        # 1. Global Settings
         self._init_global_settings()
-        
-        # 2. Axis Settings
         self._init_axis_settings()
-
-        # 3. Legend Settings
         self._init_legend_settings()
 
-        # 4. Line List
         self.lines_group = QGroupBox("Series Properties")
         self.lines_layout = QVBoxLayout(self.lines_group)
         self.form_layout.addWidget(self.lines_group)
         
-        # Populate lines
         self._populate_line_widgets()
 
         self.form_layout.addStretch()
         self.scroll.setWidget(self.scroll_content)
         self.dock_layout.addWidget(self.scroll)
-        
         self.dock.setWidget(self.dock_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
 
@@ -166,34 +186,29 @@ class PopOutWindow(QMainWindow):
         group = QGroupBox("Global Settings")
         layout = QFormLayout(group)
 
-        # --- Canvas Size Control ---
+        # Size Controls
         size_layout = QHBoxLayout()
         size_layout.setContentsMargins(0, 0, 0, 0)
-        size_layout.setSpacing(2) # Very tight spacing
+        size_layout.setSpacing(2)
         
         self.width_spin = QDoubleSpinBox()
-        self.width_spin.setPrefix("W: ") # Put label inside to save space
+        self.width_spin.setPrefix("W: ")
         self.width_spin.setRange(10, 10000)
         self.width_spin.setDecimals(1)
-        self.width_spin.setToolTip("Canvas Width")
-        self.width_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
-        # Removed custom stylesheet to allow native OS vertical buttons to render correctly
         
         self.height_spin = QDoubleSpinBox()
-        self.height_spin.setPrefix("H: ") # Put label inside
+        self.height_spin.setPrefix("H: ")
         self.height_spin.setRange(10, 10000)
         self.height_spin.setDecimals(1)
-        self.height_spin.setToolTip("Canvas Height")
-        self.height_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
         
         self.unit_combo = QComboBox()
         self.unit_combo.addItems(['px', 'in', 'mm', 'cm'])
         self.unit_combo.setCurrentText('px')
         self.unit_combo.currentTextChanged.connect(self.update_size_display)
-        self.unit_combo.setFixedWidth(45) # Force narrow width
+        self.unit_combo.setFixedWidth(45)
         
-        set_size_btn = QPushButton("Set") # Shortened text
-        set_size_btn.setFixedWidth(40)    # Force narrow width
+        set_size_btn = QPushButton("Set")
+        set_size_btn.setFixedWidth(40)
         set_size_btn.clicked.connect(self.apply_canvas_size)
         
         size_layout.addWidget(self.width_spin)
@@ -203,26 +218,21 @@ class PopOutWindow(QMainWindow):
         
         layout.addRow("Size:", size_layout)
 
-        # --- Title ---
+        # Text props
         self.title_edit = QLineEdit(self.plot_data.get('title', ''))
-        self.title_edit.setPlaceholderText("Plot Title")
         self.title_edit.editingFinished.connect(self.redraw_plot)
         layout.addRow("Title:", self.title_edit)
 
-        # --- LaTeX ---
         self.latex_check = QCheckBox("Use LaTeX")
-        self.latex_check.setToolTip("Requires 'latex', 'dvipng', and 'ghostscript' in system PATH.")
         self.latex_check.toggled.connect(self.on_latex_toggled)
         layout.addRow(self.latex_check)
 
-        # --- Font Size ---
         self.font_size_spin = QSpinBox()
         self.font_size_spin.setRange(6, 48)
         self.font_size_spin.setValue(10)
         self.font_size_spin.valueChanged.connect(self.redraw_plot)
         layout.addRow("Font Size:", self.font_size_spin)
 
-        # --- Grid ---
         self.grid_check = QCheckBox("Show Grid")
         self.grid_check.setChecked(True)
         self.grid_check.toggled.connect(self.redraw_plot)
@@ -242,7 +252,6 @@ class PopOutWindow(QMainWindow):
         self.x_log_check.toggled.connect(self.redraw_plot)
         layout.addRow(self.x_log_check)
 
-        # Y Axes Configs
         self.y_configs = {}
         for y_col, axis_data in self.plot_data['y_axes'].items():
             lbl = QLabel(f"<b>Y-Axis: {y_col}</b>")
@@ -279,7 +288,7 @@ class PopOutWindow(QMainWindow):
         self.legend_frame.toggled.connect(self.redraw_plot)
         layout.addRow(self.legend_frame)
         
-        self.legend_draggable = QCheckBox("Draggable (Disable Zoom First!)")
+        self.legend_draggable = QCheckBox("Draggable")
         self.legend_draggable.setChecked(True)
         self.legend_draggable.toggled.connect(self.redraw_plot)
         layout.addRow(self.legend_draggable)
@@ -287,7 +296,6 @@ class PopOutWindow(QMainWindow):
         self.form_layout.addWidget(group)
 
     def _populate_line_widgets(self):
-        # Clear existing
         for i in reversed(range(self.lines_layout.count())): 
             self.lines_layout.itemAt(i).widget().setParent(None)
         self.line_widgets.clear()
@@ -295,16 +303,30 @@ class PopOutWindow(QMainWindow):
         for y_col, axis_data in self.plot_data['y_axes'].items():
             for series in axis_data['series']:
                 sid = series['id']
+                is_scatter = series.get('mode') == 'scatter'
                 
+                # If colors list provided, take the first one as the "override" button color
+                initial_color = series['color']
+                if series.get('colors'):
+                     # If we have per-dot colors, initial_color might be black (fallback),
+                     # so we try to grab the first one from the list if available
+                     try:
+                         initial_color = series['colors'][0]
+                     except IndexError:
+                         pass
+
                 initial_props = {
                     'name': series['name'],
                     'visible': True,
-                    'color': series['color'],
-                    'linestyle': series['linestyle_matlab'],
-                    'linewidth': series['width'],
-                    'marker': 'None',
+                    'color': initial_color,
+                    'linestyle': series.get('linestyle_matlab', '-'),
+                    'linewidth': series.get('width', 1.5),
+                    'marker': series.get('marker', 'None'),
                     'has_std': series['std'] is not None,
-                    'show_std': True
+                    'show_std': True,
+                    'mode': series.get('mode', 'line'),
+                    'size': series.get('size', 20) if is_scatter else 10,
+                    'colors': series.get('colors') # Pass colors to detect heatmap
                 }
                 
                 widget = LinePropertiesWidget(sid, initial_props)
@@ -313,13 +335,11 @@ class PopOutWindow(QMainWindow):
                 self.line_widgets[sid] = widget
 
     def apply_canvas_size(self):
-        """Resizes the main window so the canvas area matches the requested dimensions in the selected unit."""
         target_w = self.width_spin.value()
         target_h = self.height_spin.value()
         unit = self.unit_combo.currentText()
         dpi = self.figure.get_dpi()
         
-        # Convert everything to pixels for the window resize
         target_w_px = 0
         target_h_px = 0
         
@@ -336,9 +356,6 @@ class PopOutWindow(QMainWindow):
             target_w_px = int((target_w / 2.54) * dpi)
             target_h_px = int((target_h / 2.54) * dpi)
             
-        # --- Exact Sizing Logic ---
-        # Instead of guessing margins, calculate the current 'overhead' 
-        # (Toolbar + Dock + OS Borders) by comparing Window size vs Canvas size.
         current_win_w = self.width()
         current_win_h = self.height()
         current_canvas_w = self.canvas.width()
@@ -347,13 +364,11 @@ class PopOutWindow(QMainWindow):
         overhead_w = current_win_w - current_canvas_w
         overhead_h = current_win_h - current_canvas_h
         
-        # Calculate required total window size
         new_total_w = target_w_px + overhead_w
         new_total_h = target_h_px + overhead_h
         
         self.resize(new_total_w, new_total_h)
         
-        # Force Matplotlib update
         w_in = target_w_px / dpi
         h_in = target_h_px / dpi
         self.figure.set_size_inches(w_in, h_in)
@@ -361,29 +376,18 @@ class PopOutWindow(QMainWindow):
         self.canvas.draw()
 
     def on_canvas_resize(self, event):
-        """Ensures plot is re-laid out and UI numbers are updated when window is resized."""
         if self.figure:
             self.figure.tight_layout()
             self.canvas.draw_idle()
-            # Update the text boxes to show new dimensions
             self.update_size_display()
 
     def on_latex_toggled(self, checked):
         if checked:
-            # Pre-check for requirements to prevent freeze
-            reqs = ['latex', 'dvipng', 'gs'] # gs is ghostscript
+            reqs = ['latex', 'dvipng', 'gs']
             missing = [tool for tool in reqs if shutil.which(tool) is None]
-            
             if missing:
                 QMessageBox.warning(self, "LaTeX Requirements Missing", 
-                    f"Cannot enable LaTeX mode.\n\nMissing executables: {', '.join(missing)}\n\n"
-                    "To fix this:\n"
-                    "1. Install MiKTeX (Win) or TeX Live (Linux/Mac).\n"
-                    "2. Install Ghostscript.\n"
-                    "3. Add their bin/ folders to your System PATH.\n"
-                    "4. Restart this application.")
-                
-                # Reset checkbox safely
+                    f"Missing: {', '.join(missing)}\nInstall TeX Live/MiKTeX and Ghostscript.")
                 self.latex_check.blockSignals(True)
                 self.latex_check.setChecked(False)
                 self.latex_check.blockSignals(False)
@@ -403,16 +407,13 @@ class PopOutWindow(QMainWindow):
     def redraw_plot(self):
         self.figure.clear()
         
-        # Global Font Settings
         font_size = self.font_size_spin.value()
         plt.rcParams.update({'font.size': font_size})
         
-        # Setup Axes
         ax_primary = self.figure.add_subplot(111)
         ax_primary.set_title(self.title_edit.text())
         ax_primary.set_xlabel(self.x_label_edit.text())
         
-        # Apply X-Limits from state
         if 'x_limits' in self.plot_data:
             ax_primary.set_xlim(self.plot_data['x_limits'])
         
@@ -429,17 +430,13 @@ class PopOutWindow(QMainWindow):
 
         axes_map = {y_cols[0]: ax_primary}
         
-        # Configure Primary Axis
         config_prim = self.y_configs[y_cols[0]]
         ax_primary.set_ylabel(config_prim['label_edit'].text())
         if config_prim['log_check'].isChecked():
             ax_primary.set_yscale('log')
-            
-        # Apply Y-Limits for Primary
         if 'y_limits' in self.plot_data['y_axes'][y_cols[0]]:
             ax_primary.set_ylim(self.plot_data['y_axes'][y_cols[0]]['y_limits'])
         
-        # Configure Secondary Axes
         for i, y_col in enumerate(y_cols[1:], start=1):
             ax_new = ax_primary.twinx()
             if i > 1:
@@ -449,11 +446,8 @@ class PopOutWindow(QMainWindow):
             ax_new.set_ylabel(config['label_edit'].text())
             if config['log_check'].isChecked():
                 ax_new.set_yscale('log')
-                
-            # Apply Y-Limits for Secondary
             if 'y_limits' in self.plot_data['y_axes'][y_col]:
                 ax_new.set_ylim(self.plot_data['y_axes'][y_col]['y_limits'])
-                
             axes_map[y_col] = ax_new
 
         all_handles = []
@@ -468,49 +462,96 @@ class PopOutWindow(QMainWindow):
                 props = self.line_widgets[sid].get_properties()
                 if not props['visible']: continue
 
-                c = props['color']
-                color_tuple = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
+                if series.get('mode') == 'scatter':
+                    # Scatter Plot Logic
+                    
+                    # Determine Colors:
+                    # 1. Try individual colors list from series data (Heatmap case)
+                    # 2. Fallback to user-selected override color
+                    
+                    colors_to_use = None
+                    
+                    # Check if the user *changed* the color in the widget vs the initial one.
+                    # If the user explicitly picked a new color in the PopOut GUI, we should likely respect it 
+                    # (overriding the heatmap).
+                    # But determining "changed" is tricky.
+                    # Strategy: If 'colors' is present in data, use it by default.
+                    # Note: The widget initialized with the first color of the list.
+                    # If user changes it, widget.color_btn.color() will differ.
+                    
+                    # However, a simpler approach requested by user: "colors of each dot ... work fine"
+                    # We prioritize the individual colors if they exist.
+                    # If the user specifically wants to override a heatmap with a single flat color,
+                    # that functionality might need a "Use Single Color" checkbox, but for now
+                    # we prioritize the data fidelity (Heatmap).
+                    
+                    if series.get('colors') is not None:
+                        # Convert QColor list to RGBA for Matplotlib
+                        colors_to_use = []
+                        for c in series['colors']:
+                            colors_to_use.append((c.redF(), c.greenF(), c.blueF(), c.alphaF()))
+                    else:
+                        # Single color from widget
+                        c = props['color']
+                        colors_to_use = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
 
-                line, = ax.plot(series['x'], series['y'], 
-                                label=props['label'],
-                                color=color_tuple,
-                                linestyle=props['linestyle'],
-                                linewidth=props['linewidth'],
-                                marker=props['marker'])
-                
-                all_handles.append(line)
-                all_labels.append(props['label'])
+                    # Matplotlib 's' is area, so square the radius/size
+                    scatter_h = ax.scatter(
+                        series['x'], series['y'],
+                        label=props['label'],
+                        c=colors_to_use, 
+                        s=props['size']**2,
+                        marker=props['marker'],
+                        edgecolors='none'
+                    )
+                    
+                    # For legend, we need a proxy artist if colors are array
+                    all_handles.append(scatter_h)
+                    all_labels.append(props['label'])
 
-                if props['show_std'] and series['std'] is not None:
-                    try:
-                        lower = series['y'] - series['std']
-                        upper = series['y'] + series['std']
-                        ax.fill_between(series['x'], lower, upper, color=color_tuple, alpha=0.25, linewidth=0)
-                    except Exception as e:
-                        print(f"Error plotting std dev: {e}")
+                else:
+                    # Line Plot Logic
+                    c = props['color']
+                    color_tuple = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
+                    
+                    line, = ax.plot(
+                        series['x'], series['y'], 
+                        label=props['label'],
+                        color=color_tuple,
+                        linestyle=props['linestyle'],
+                        linewidth=props['linewidth'],
+                        marker=props['marker']
+                    )
+                    all_handles.append(line)
+                    all_labels.append(props['label'])
 
-        # Legend
+                    if props['show_std'] and series['std'] is not None:
+                        try:
+                            lower = series['y'] - series['std']
+                            upper = series['y'] + series['std']
+                            ax.fill_between(series['x'], lower, upper, color=color_tuple, alpha=0.25, linewidth=0)
+                        except Exception:
+                            pass
+
         if self.show_legend_check.isChecked() and all_handles:
             loc = self.legend_loc.currentText()
             frame = self.legend_frame.isChecked()
             draggable = self.legend_draggable.isChecked()
             
             leg = ax_primary.legend(all_handles, all_labels, loc=loc, frameon=frame)
+            
+            # CRITICAL: Exclude legend from layout calculations to prevent plot resizing
             leg.set_in_layout(False)
             
             if draggable:
                 leg.set_draggable(True)
         
-        # Force tight layout to calculate axes based on labels/titles, IGNORING the legend
         self.figure.tight_layout()
         self.canvas.draw()
 
     def update_size_display(self):
-        """Updates the spinboxes to reflect the current actual canvas size in the selected unit."""
         if not self.figure: return
         
-        # Get current size in pixels directly from the canvas widget
-        # We use the widget size because figure.bbox might lag slightly during resize events
         size = self.canvas.size()
         w_px = size.width()
         h_px = size.height()
@@ -539,7 +580,6 @@ class PopOutWindow(QMainWindow):
             self.width_spin.setDecimals(2)
             self.height_spin.setDecimals(2)
 
-        # Block signals to prevent feedback loops or unintended triggers
         self.width_spin.blockSignals(True)
         self.height_spin.blockSignals(True)
         self.width_spin.setValue(w_val)
