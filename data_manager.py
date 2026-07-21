@@ -16,38 +16,50 @@ class DataManager:
         from lammps_parser import LammpsParser # Local import
         self.data.clear()
         self.warnings = []
+        self.available_columns = []
         
-        all_cols = []
-        # Use a set for quick lookups of columns already added
-        seen_cols = set()
+        all_cols = set()
+        successful_keywords = set()
+
         for study_name, system_list in studies.items():
             self.data[study_name] = {}
             for system_name in system_list:
                 log_path = root_path / study_name / system_name
                 
+                # Determine the list of files to parse
                 log_files = []
                 if not log_keywords:
                     log_files = list(log_path.glob("log.lammps"))
                 else:
                     for keyword in log_keywords:
                         log_files.extend(log_path.glob(f"*{keyword}*"))
-                    log_files = sorted(list(set(log_files))) # sort for consistency
+                    log_files = sorted(list(set(log_files))) # Use set to get unique files
 
                 if not log_files:
                     self.warnings.append(f"No log files found for: {study_name}/{system_name}")
                     continue
                 
+                # Check which keywords were successful and parse data for the system
+                if log_keywords:
+                    for file_path in log_files:
+                        # This check is inefficient if done naively, but we need to see if a file is valid.
+                        # We can parse it once and if valid, credit all matching keywords.
+                        df_check = LammpsParser.extract_thermo_data(file_path)
+                        if df_check is not None and not df_check.empty:
+                            for keyword in log_keywords:
+                                if keyword in file_path.name:
+                                    successful_keywords.add(keyword)
+
                 df = LammpsParser.parse_multiple_logs(log_files)
+
                 if df is not None and not df.empty:
                     self.data[study_name][system_name] = df
-                    for col in df.columns:
-                        if col not in seen_cols:
-                            all_cols.append(col)
-                            seen_cols.add(col)
+                    all_cols.update(df.columns)
                 else:
                     self.warnings.append(f"Could not parse thermo data for: {study_name}/{system_name}")
         
-        self.available_columns = all_cols
+        self.available_columns = sorted(list(all_cols))
+        return self.warnings, successful_keywords
 
     def get_study_names(self) -> List[str]:
         return sorted(list(self.data.keys()))

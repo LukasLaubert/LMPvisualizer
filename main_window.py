@@ -219,9 +219,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Project Discovery Warning", "\n".join(warnings))
         
         keywords = self.chip_input.get_chips()
-        self.data_manager.load_project_data(studies, root_path, keywords)
-        if self.data_manager.warnings:
-            QMessageBox.warning(self, "Data Loading Warning", "\n".join(self.data_manager.warnings))
+        warnings, successful_keywords = self.data_manager.load_project_data(studies, root_path, keywords)
+        self.chip_input.update_chip_styles(successful_keywords)
+
+        if warnings:
+            QMessageBox.warning(self, "Data Loading Warning", "\n".join(warnings))
             
         self.studies_label.setText(f"Studies: {len(self.data_manager.get_study_names())}")
         

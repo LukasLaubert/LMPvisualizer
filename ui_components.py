@@ -131,8 +131,8 @@ class Chip(QFrame):
         layout.setContentsMargins(4, 1, 4, 1)
         layout.setSpacing(4)
 
-        label = QLabel(text)
-        layout.addWidget(label)
+        self.label = QLabel(text)
+        layout.addWidget(self.label)
 
         remove_button = QPushButton("x")
         remove_button.setFixedSize(14, 14)
@@ -142,6 +142,11 @@ class Chip(QFrame):
     def on_remove(self):
         self.removed.emit(self.text)
         self.deleteLater()
+
+    def set_bold(self, bold: bool):
+        font = self.label.font()
+        font.setBold(bold)
+        self.label.setFont(font)
 
 class ChipInputWidget(QWidget):
     """A widget for inputting text that becomes 'chips'."""
@@ -203,3 +208,9 @@ class ChipInputWidget(QWidget):
 
     def get_chips(self) -> list:
         return self._chips.copy()
+
+    def update_chip_styles(self, successful_keywords: set):
+        for i in range(self.chip_layout.count()):
+            widget = self.chip_layout.itemAt(i).widget()
+            if isinstance(widget, Chip):
+                widget.set_bold(widget.text in successful_keywords)
