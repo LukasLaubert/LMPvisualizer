@@ -1040,18 +1040,47 @@ class TrjPlotPanel(QWidget):
             height_in = self.plot_widget.height() / dpi
             self.controller.export_plot(path, figsize=(width_in, height_in))
 
-    def save_session(self):
-        self._save_current_row_state() # Capture latest state (e.g. view range)
-        path, _ = QFileDialog.getSaveFileName(self, "Save Trj Session", "", "JSON Files (*.json)")
-        if not path: return
+    def _is_session_valid(self):
+        """Checks if the current session contains meaningful data to save."""
+        if not self.main_window.path_edit.text():
+            return False
+
+        if self.plot_table.rowCount() == 0:
+            return False
+
+        # Check for at least one valid row
+        has_valid_row = False
+        for row in range(self.plot_table.rowCount()):
+            item = self.plot_table.item(row, 1)
+            if item:
+                state = item.data(Qt.ItemDataRole.UserRole)
+                if state:
+                    # Check if the row is still in "Select..." state
+                    s_study = state.get('study', '')
+                    s_system = state.get('system', '')
+                    if "Select" not in s_study and "Select" not in s_system:
+                        has_valid_row = True
+                        break
+        return has_valid_row
+
+    def save_session_to_file(self, path):
+        """Saves session to a specific file path."""
+        # Update current row state before saving to capture latest view changes
+        self._save_current_row_state()
+        
+        # Robustness check: Do not save if the state is empty/default
+        if not self._is_session_valid():
+             print(f"[System] Save aborted: Session contains no valid data.")
+             return False
         
         session_data = {
-            'type': 'trj_plot',
+            'type': 'trj_plot', 
             'project_path': self.main_window.path_edit.text(),
             'keywords': self.main_window.chip_input.get_chips(),
             'rows': [],
             'global_label_map': self.global_label_map
         }
+        
         for row in range(self.plot_table.rowCount()):
             data = self._extract_row_data(row)
             row_data = {
@@ -1065,40 +1094,104 @@ class TrjPlotPanel(QWidget):
             }
             session_data['rows'].append(row_data)
             
-        SettingsManager.save_state(path, session_data)
+        try:
+            success = SettingsManager.save_state(path, session_data)
+            if success:
+                print(f"[System] Saved session: {path} for mode Trajectory Plot")
+            else:
+                print(f"[System] Failed to save session: {path}")
+            return success
+        except Exception as e:
+            print(f"[System] Error saving session: {e}")
+            return False
+
+    def save_session(self):
+        """Opens file dialog to save session manually."""
+        path, _ = QFileDialog.getSaveFileName(self, "Save Trj Session", "", "JSON Files (*.json)")
+        if not path: return
+        self.save_session_to_file(path)
 
     def load_session(self):
+        """Opens file dialog to load session manually."""
         path, _ = QFileDialog.getOpenFileName(self, "Load Trj Session", "", "JSON Files (*.json)")
         if not path: return
-        
+        self.load_session_from_file(path)
+
+    def load_session_from_file(self, path: str):
+        """Loads a session from a file, handling mode mismatches and preventing UI reload triggers."""
+        if not path or not os.path.exists(path):
+            return
+            
         data = SettingsManager.load_state(path)
-        if not data or data.get('type') != 'trj_plot': return
+        if not data:
+            QMessageBox.critical(self, "Error", "Failed to load trj plot mode session file.")
+            return
         
+        # --- Mismatch Check ---
+        if data.get('type') != 'trj_plot':
+            msg = QMessageBox(self.main_window)
+            msg.setWindowTitle("Mode Mismatch")
+            msg.setText("Mode Mismatch. This is a Log Plot session.")
+            abort_btn = msg.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
+            switch_btn = msg.addButton("Switch to Log Plot", QMessageBox.ButtonRole.AcceptRole)
+            msg.exec()
+
+            if msg.clickedButton() == switch_btn:
+                # Save current (Trj) state
+                self.main_window.save_session_for_mode(self.main_window.MODE_TRJ)
+                # Set flag to skip orchestration's autoload
+                self.main_window._skip_next_orchestration = True
+                # Switch to Log Mode
+                self.main_window.switch_to_mode(self.main_window.MODE_LOG)
+                # Force load
+                self.main_window.log_plot_panel.load_session_from_file(path)
+            return
+
+        print(f"[System] Loading session: {path} for mode Trajectory Plot")
+
+        # --- Load Logic ---
         self.global_label_map = data.get('global_label_map', {})
-        self.load_project(Path(data['project_path']), data['keywords'], force_reload=True)
-        
-        self.plot_table.setRowCount(0)
-        for entry in data.get('rows', []):
-            state = entry.get('state')
-            visuals = entry.get('visuals', {})
+        project_path = data.get('project_path', '')
+        keywords = data.get('keywords', [])
+
+        # Prevent global widgets from triggering a reload during update
+        self.main_window.path_edit.blockSignals(True)
+        self.main_window.chip_input.blockSignals(True)
+
+        try:
+            if project_path:
+                self.main_window.path_edit.setText(project_path)
+                self.main_window.chip_input.set_chips(keywords)
+                
+                # Load project data (Force reload to ensure consistency)
+                self.load_project(Path(project_path), keywords, force_reload=True, keep_table=False)
             
-            if 'view_lock' not in state: state['view_lock'] = True
-            if 'view_sync' not in state: state['view_sync'] = True
-            
-            is_heatmap = state.get('h_col') != "No Heatmap"
-            
-            row_data = {
-                'state': state,
-                'is_heatmap': is_heatmap,
-                'color': visuals.get('color', '#000000'),
-                'heatmap_grad': visuals.get('gradient'),
-                'style': visuals.get('symbol', 'o'),
-                'size': str(visuals.get('size', 5))
-            }
-            
-            row = self.plot_table.rowCount()
-            self.plot_table.insertRow(row)
-            self._populate_row_data(row, row_data)
-            
-        if self.plot_table.rowCount() > 0:
-            self.plot_table.selectRow(0)
+            self.plot_table.setRowCount(0)
+            for entry in data.get('rows', []):
+                state = entry.get('state')
+                visuals = entry.get('visuals', {})
+                
+                if 'view_lock' not in state: state['view_lock'] = True
+                if 'view_sync' not in state: state['view_sync'] = True
+                
+                is_heatmap = state.get('h_col') != "No Heatmap"
+                
+                row_data = {
+                    'state': state,
+                    'is_heatmap': is_heatmap,
+                    'color': visuals.get('color', '#000000'),
+                    'heatmap_grad': visuals.get('gradient'),
+                    'style': visuals.get('symbol', 'o'),
+                    'size': str(visuals.get('size', 5))
+                }
+                
+                row = self.plot_table.rowCount()
+                self.plot_table.insertRow(row)
+                self._populate_row_data(row, row_data)
+                
+            if self.plot_table.rowCount() > 0:
+                self.plot_table.selectRow(0)
+
+        finally:
+            self.main_window.path_edit.blockSignals(False)
+            self.main_window.chip_input.blockSignals(False)

@@ -277,14 +277,16 @@ class FitFunctionDialog(QWidget):
             "Custom...": "",
             "Linear Line (a*x + b)": "a*x + b",
             "Quadratic Parabola (a*x^2 + b*x + c)": "a*x**2 + b*x + c",
+            "Cubic Polynomial (a*x^3 + b*x^2 + c*x + d)": "a*x**3 + b*x**2 + c*x + d",
+            "Quartic Polynomial (a*x^4 + b*x^3 + c*x^2 + d*x + f)": "a*x**4 + b*x**3 + c*x**2 + d*x + f",
             "Broken Rational ((a*x + b) / (x + c))": "(a*x + b) / (x + c)",
             "Hyperbola (a / (x + b) + c)": "a / (x + b) + c",
-            "Exponential Growth (a * exp(b*x))": "a * exp(b*x)",
-            "Power Law (a * x^b)": "a * x**b",
-            "Gaussian Bell": "a * exp(-((x-b)**2)/(2*c**2))",
-            "Sine Wave": "a * sin(b*x + c) + d",
-            "Sigmoid / Logistic": "a / (1 + exp(-b*(x-c)))",
-            "Logarithmic": "a * log(b*x) + c"
+            "Exponential Growth (a * exp(b*x) + c)": "a * exp(b*x) + c",
+            "Power Law (a * x^b + c)": "a * x**b + c",
+            "Gaussian Bell (a * exp(-((x-b)**2) / (2*c**2)))": "a * exp(-((x-b)**2)/(2*c**2))",
+            "Sine Wave (a * sin(b*x + c) + d)": "a * sin(b*x + c) + d",
+            "Sigmoid / Logistic (a / (1 + exp(-b*(x-c))))": "a / (1 + exp(-b*(x-c)))",
+            "Logarithmic (a * log(b*x) + c)": "a * log(b*x) + c"
         }
         self.preset_combo.addItems(self.presets.keys())
 

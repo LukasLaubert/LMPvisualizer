@@ -290,6 +290,9 @@ class LogPlotPanel(QWidget):
             
             if self.fit_table.rowCount() == 0:
                 self.add_fit_row()
+
+            # Update colors when showing fit table
+            self._update_fit_row_colors()
         else:
             self.show_fit_btn.show()
             self.add_fit_btn.hide()
@@ -615,6 +618,9 @@ class LogPlotPanel(QWidget):
                 combo.setCurrentIndex(target_index)
                 
             combo.blockSignals(False)
+        
+        # Update colors after repopulating
+        self._update_fit_row_colors()
 
     def _on_fit_fun_clicked(self):
         btn = self.sender()
@@ -1046,6 +1052,9 @@ class LogPlotPanel(QWidget):
 
                     new_name = f"{short_study} | {short_system} | {parts[2]} | {parts[3]}"
                     item.setText(new_name)
+
+        # Update fit colors after label changes
+        self._update_fit_row_colors()
 
     def _extract_row_data(self, row_index):
         data = {}
@@ -1645,9 +1654,22 @@ class LogPlotPanel(QWidget):
     def _update_ui_state(self, project_loaded: bool, keep_table: bool = False):
         # Only clear table/plots if we are NOT keeping the table (e.g., new path load)
         if not keep_table:
+            # 1. Clear Plot Table
             self.plot_table.setRowCount(0)
+            self.next_plot_id = 0  # Reset unique ID counter for plots
             self._update_move_buttons_visibility()
             self.plot_controller.clear_all_plots()
+
+            # 2. Clear Fit Table and Resources (Fix for dangling references)
+            self.fit_table.setRowCount(0)
+            
+            # Close any open fit configuration windows to prevent orphans
+            for dialog in self.fit_dialogs.values():
+                dialog.close()
+            
+            self.fit_dialogs.clear()
+            self.fit_results.clear()
+            self.next_fit_id = 0 # Reset unique ID counter for fits
 
         def reset_combo(combo, placeholder, items):
             combo.blockSignals(True)
@@ -2109,9 +2131,16 @@ class LogPlotPanel(QWidget):
                         dialog = self.fit_dialogs[fit_id]
                         data_changed = dialog.set_data(x_fit_src, y_fit_src)
                         
-                        # Auto-calculate if data changed and idle, BUT only if auto_trigger_fits is True
-                        if auto_trigger_fits and data_changed and dialog.current_worker is None:
+                        # MODIFIED: Don't auto-trigger during loading
+                        should_auto_trigger = (
+                            auto_trigger_fits and 
+                            not getattr(self, '_is_loading', False) and
+                            data_changed and 
+                            dialog.current_worker is None
+                        )
+                        if should_auto_trigger:
                             dialog.calculate_fit()
+                    
                     
                     # Plot Result
                     if fit_id in self.fit_results:
@@ -2207,6 +2236,10 @@ class LogPlotPanel(QWidget):
         """
         # First, apply synchronization logic. This will do nothing if the column isn't synced.
         self._update_sync_based_on_column(column, row)
+        
+        # If color changed (column 5), update fit row colors
+        if column == 5:
+            self._update_fit_row_colors()
         
         # Second, now that the entire table state is consistent, redraw the plot.
         self.update_plots()
@@ -2434,11 +2467,42 @@ class LogPlotPanel(QWidget):
                 max_width = width
         combo.view().setMinimumWidth(max_width + 30)
         return combo
+
+    def _update_fit_row_colors(self):
+        """Update the font colors in fit table source dropdowns to match their plot colors."""
+        if not self.fit_table_visible:
+            return
+        
+        # Build a map of display_name -> color from plot table
+        plot_color_map = {}
+        for r in range(self.plot_table.rowCount()):
+            display_name = self._get_row_display_name(r)
+            color_btn = self.plot_table.cellWidget(r, 5)
+            if color_btn:
+                plot_color_map[display_name] = color_btn.color()
+        
+        # Apply colors to fit table dropdowns
+        for r in range(self.fit_table.rowCount()):
+            combo = self.fit_table.cellWidget(r, 1)
+            if not combo:
+                continue
+            
+            # Update all items in the dropdown
+            for i in range(combo.count()):
+                item_text = combo.itemText(i)
+                if item_text in plot_color_map:
+                    color = plot_color_map[item_text]
+                    combo.setItemData(i, color, Qt.ItemDataRole.ForegroundRole)
+                else:
+                    # Reset to default if not found
+                    combo.setItemData(i, None, Qt.ItemDataRole.ForegroundRole)
         
     def _get_current_state_dict(self):
         """Helper to gather current state for saving."""
         config = {
+            'type': 'log_plot',  # Added type identifier
             'path': self.main_window.path_edit.text(),
+            'keywords': self.main_window.chip_input.get_chips(), # Added keywords
             'average_choices': self.average_user_choices,
             'running_mean_setting': self.running_mean_setting,
             'global_label_map': self.global_label_map,
@@ -2471,7 +2535,7 @@ class LogPlotPanel(QWidget):
 
         # Save Fits
         for row in range(self.fit_table.rowCount()):
-            item = self.fit_table.item(row, 0) # ID is here
+            item = self.fit_table.item(row, 0)
             if not item: continue
             fit_id = item.data(Qt.ItemDataRole.UserRole)
             
@@ -2488,6 +2552,48 @@ class LogPlotPanel(QWidget):
             
         return config
 
+    def _is_session_valid(self):
+        """Checks if the current session contains meaningful data to save."""
+        # 1. Check if a project path is set
+        if not self.main_window.path_edit.text():
+            return False
+            
+        # 2. Check if there are rows
+        if self.plot_table.rowCount() == 0:
+            return False
+            
+        # 3. Check if at least one row is valid (not just default "N/A")
+        has_valid_row = False
+        for row in range(self.plot_table.rowCount()):
+            item = self.plot_table.item(row, 1)
+            if item:
+                # Check UserRole data or text for default "N/A" components
+                name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+                # A default row usually looks like "N/A | N/A | N/A | N/A" or contains "Select"
+                if "N/A | N/A" not in name and "Select" not in name:
+                    has_valid_row = True
+                    break
+        
+        return has_valid_row
+
+    def save_session_to_file(self, path):
+        """Saves session to a specific file path."""
+        # Validate before saving to prevent overwriting good data with an empty state
+        if not self._is_session_valid():
+            print(f"[System] Save aborted: Session contains no valid data.")
+            return False
+
+        try:
+            success = SettingsManager.save_state(path, self._get_current_state_dict())
+            if success:
+                print(f"[System] Saved session: {path} for mode Log Plot")
+            else:
+                print(f"[System] Failed to save session: {path}")
+            return success
+        except Exception as e:
+            print(f"[System] Error saving session: {e}")
+            return False
+
     def _save_state_on_exit(self):
         config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
         os.makedirs(config_dir, exist_ok=True)
@@ -2495,11 +2601,12 @@ class LogPlotPanel(QWidget):
         SettingsManager.save_state(path, self._get_current_state_dict())
 
     def save_session(self):
+        """Opens file dialog to save session manually."""
         path, _ = QFileDialog.getSaveFileName(self, "Save Session", "", "JSON Files (*.json)")
         if not path:
             return
         
-        if SettingsManager.save_state(path, self._get_current_state_dict()):
+        if self.save_session_to_file(path):
             QMessageBox.information(self, "Success", "Session saved successfully.")
         else:
             QMessageBox.critical(self, "Error", "Failed to save session.")
@@ -2512,150 +2619,181 @@ class LogPlotPanel(QWidget):
             self.load_session_from_file(path)
 
     def load_session(self):
+        """Opens file dialog to load session manually."""
         path, _ = QFileDialog.getOpenFileName(self, "Load Session", "", "JSON Files (*.json)")
         if path:
             self.load_session_from_file(path)
 
     def load_session_from_file(self, path: str):
-        if not path:
+        """Loads a session from a file, handling mode mismatches and preventing UI reload triggers."""
+        if not path or not os.path.exists(path):
             return
 
-        config = SettingsManager.load_state(path)
-        if not config:
-            QMessageBox.critical(self, "Error", "Failed to load session file.")
+        data = SettingsManager.load_state(path)
+        if not data:
+            QMessageBox.critical(self, "Error", "Failed to load log plot mode session file.")
             return
 
-        self.average_user_choices = config.get('average_choices', {})
-        self.global_label_map = config.get('global_label_map', {})
-        self.custom_properties = config.get('custom_properties', {})
+        # --- Mismatch Check ---
+        if data.get('type') != 'log_plot':
+            msg = QMessageBox(self.main_window)
+            msg.setWindowTitle("Mode Mismatch")
+            msg.setText("Mode Mismatch. This is a Trajectory session.")
+            abort_btn = msg.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
+            switch_btn = msg.addButton("Switch to Trajectory Plot", QMessageBox.ButtonRole.AcceptRole)
+            msg.exec()
+
+            if msg.clickedButton() == switch_btn:
+                # Save current (Log) state before switching
+                self.main_window.save_session_for_mode(self.main_window.MODE_LOG)
+                # Set flag to skip orchestration's autoload
+                self.main_window._skip_next_orchestration = True
+                # Switch to Trj Mode - this will trigger autosave/autoload orchestration
+                self.main_window.switch_to_mode(self.main_window.MODE_TRJ)
+                # After mode switch completes, force load the file in the new mode
+                self.main_window.trj_plot_panel.load_session_from_file(path)
+            # If abort, do nothing - stay in current mode
+            return
+
+        print(f"[System] Loading session: {path} for mode Log Plot")
+
+
+        # --- Load Logic ---
+        self.average_user_choices = data.get('average_choices', {})
+        self.global_label_map = data.get('global_label_map', {})
+        self.custom_properties = data.get('custom_properties', {})
         self.data_manager.set_custom_properties(self.custom_properties)
 
-        project_path = config.get('path')
-        if project_path:
-            self.main_window.path_edit.setText(project_path)
-            try:
+        project_path = data.get('path')
+        keywords = data.get('keywords', [])
+
+        # Prevent global widgets from triggering a reload during update
+        self.main_window.path_edit.blockSignals(True)
+        self.main_window.chip_input.blockSignals(True)
+
+        try:
+            if project_path:
+                self.main_window.path_edit.setText(project_path)
+                self.main_window.chip_input.set_chips(keywords)
+                
                 root_path = Path(project_path)
-                if not root_path.exists():
-                    raise FileNotFoundError(f"Path from session file does not exist: {root_path}")
-                
-                # Get keywords from UI and pass them to load_project
-                keywords = self.main_window.chip_input.get_chips()
-                self.load_project(root_path, keywords, show_discovery_warnings=False)
-                
-                # Refresh combos to show loaded custom properties
-                self._refresh_axis_combos()
-                
-                # Load settings
-                self.running_mean_setting = config.get('running_mean_setting', 'symmetric_window')
-                self.scale_lock_enabled = config.get('scale_lock', False)
-                axes_locked = config.get('axes_lock', False)
-                self.lock_axes_btn.setChecked(axes_locked)
-                self.plot_controller.toggle_scale_lock(self.scale_lock_enabled)
-                self._update_lock_button_visuals()
+                if root_path.exists():
+                    # Internal load without UI warnings
+                    self.load_project(root_path, keywords, show_discovery_warnings=False, keep_table=False)
+                    # Refresh combos
+                    self._refresh_axis_combos()
+                else:
+                    print(f"[System] Warning: Path from session does not exist: {root_path}")
 
-                # Restore Plots
-                self.plot_table.setRowCount(0)
-                self.next_plot_id = 0
-                max_loaded_id = -1 # Track the highest ID found
-                for plot_info in config.get('plots', []):
-                    row = self.plot_table.rowCount()
-                    self.plot_table.insertRow(row)
+            # Restore Settings
+            self.running_mean_setting = data.get('running_mean_setting', 'symmetric_window')
+            self.scale_lock_enabled = data.get('scale_lock', False)
+            axes_locked = data.get('axes_lock', False)
+            self.lock_axes_btn.setChecked(axes_locked)
+            self.plot_controller.toggle_scale_lock(self.scale_lock_enabled)
+            self._update_lock_button_visuals()
+
+            # Restore Plots
+            self.plot_table.setRowCount(0)
+            self.next_plot_id = 0
+            max_loaded_id = -1
+            
+            for plot_info in data.get('plots', []):
+                row = self.plot_table.rowCount()
+                self.plot_table.insertRow(row)
+                
+                saved_id = plot_info.get('id', self.next_plot_id)
+                if isinstance(saved_id, int) and saved_id > max_loaded_id:
+                    max_loaded_id = saved_id
+                
+                plot_data = {
+                    'plot_name': plot_info.get('name', "N/A | N/A | N/A | N/A"),
+                    'show': plot_info.get('show', True),
+                    'mean': plot_info.get('mean', "0"),
+                    'std': plot_info.get('std', False),
+                    'color': plot_info.get('color', QColor("black").name()),
+                    'style': plot_info.get('style', "Solid"),
+                    'thickness': plot_info.get('thickness', "1"),
+                    'plot_id': saved_id
+                }
+                if 'id' not in plot_info:
+                    self.next_plot_id += 1
+                self._populate_row_data(row, plot_data)
+            
+            if self.plot_table.rowCount() > 0:
+                self.plot_table.selectRow(0)
+                
+            self.next_plot_id = max(self.next_plot_id, max_loaded_id + 1)
+            self._update_all_row_displays()
+            self._update_move_buttons_visibility()
+            self._update_plot_labels()
+            
+            # Restore Selection
+            saved_row = data.get('selected_row', 0)
+            if saved_row >= 0 and saved_row < self.plot_table.rowCount():
+                self.plot_table.selectRow(saved_row)
+
+            # Restore Fits
+            self._is_loading = True
+            self.fit_table.setRowCount(0)
+            
+            # Close old dialogs before clearing the dict
+            for dialog in self.fit_dialogs.values():
+                dialog.close()
+
+            self.fit_dialogs = {}
+            self.fit_results = {}
+            self.next_fit_id = 0
+            
+            saved_fits = data.get('fits', [])
+            if saved_fits:
+                max_id = 0
+                for fit_info in saved_fits:
+                    saved_id = fit_info['id']
+                    if saved_id >= max_id: max_id = saved_id
                     
-                    # Use saved ID or fallback to current counter
-                    saved_id = plot_info.get('id', self.next_plot_id)
+                    self.add_fit_row(target_fit_id=saved_id)
+                    row = self.fit_table.rowCount() - 1
                     
-                    # Update max tracker
-                    if isinstance(saved_id, int) and saved_id > max_loaded_id:
-                        max_loaded_id = saved_id
+                    self.fit_table.cellWidget(row, 1).setCurrentText(fit_info.get('source', ''))
+                    self.fit_table.cellWidget(row, 2).setCurrentText(fit_info.get('type', 'Orig'))
+                    self.fit_table.cellWidget(row, 5).set_color(QColor(fit_info.get('color', 'gray')))
+                    self.fit_table.cellWidget(row, 6).setCurrentText(fit_info.get('style', 'Dash'))
+                    self.fit_table.cellWidget(row, 7).findChild(QLineEdit).setText(fit_info.get('thickness', '1'))
                     
-                    plot_data = {
-                        'plot_name': plot_info.get('name', "N/A | N/A | N/A | N/A"),
-                        'show': plot_info.get('show', True),
-                        'mean': plot_info.get('mean', "0"),
-                        'std': plot_info.get('std', False),
-                        'color': plot_info.get('color', QColor("black").name()),
-                        'style': plot_info.get('style', "Solid"),
-                        'thickness': plot_info.get('thickness', "1"),
-                        'plot_id': self.next_plot_id,
-                        'plot_id': saved_id # <--- Use the determined ID
-                    }
-                    # Only increment local counter if we fell back to it
-                    if 'id' not in plot_info:
-                        self.next_plot_id += 1
-                    self._populate_row_data(row, plot_data)
-                
-                if self.plot_table.rowCount() > 0:
-                    self.plot_table.selectRow(0)
-                    
-                # Ensure future IDs don't collide
-                self.next_plot_id = max(self.next_plot_id, max_loaded_id + 1)
+                    if saved_id in self.fit_dialogs:
+                        dialog = self.fit_dialogs[saved_id]
+                        dialog.set_state(fit_info.get('dialog_state'))
+                        func_str = dialog.func_input.text()
+                        display_text = (func_str[:10] + "...") if len(func_str) > 10 else func_str
+                        self.fit_table.cellWidget(row, 3).setText(display_text)
 
-                self._update_all_row_displays()
-                self._update_move_buttons_visibility()
-                self._update_plot_labels()
-                
-                # Restore Selection
-                saved_row = config.get('selected_row', 0)
-                if saved_row >= 0 and saved_row < self.plot_table.rowCount():
-                    self.plot_table.selectRow(saved_row)
-                elif self.plot_table.rowCount() > 0:
-                    self.plot_table.selectRow(0)
-                
-                # Restore Fits
-                # First clear existing fits and reset state
-                self.fit_table.setRowCount(0)
-                self.fit_dialogs = {}
-                self.fit_results = {}
-                self.next_fit_id = 0
-                
-                saved_fits = config.get('fits', [])
-                if saved_fits:
-                    max_id = 0
-                    for fit_info in saved_fits:
-                        saved_id = fit_info['id']
-                        if saved_id >= max_id: max_id = saved_id
-                        
-                        # 1. Create Row with the EXACT Saved ID
-                        # This ensures signals are connected to 'saved_id' from the start
-                        self.add_fit_row(target_fit_id=saved_id)
-                        
-                        row = self.fit_table.rowCount() - 1
-                        
-                        # 2. Restore Widget Values
-                        # (Note: IDs on widgets are already correct due to add_fit_row)
-                        self.fit_table.cellWidget(row, 1).setCurrentText(fit_info.get('source', ''))
-                        self.fit_table.cellWidget(row, 2).setCurrentText(fit_info.get('type', 'Orig'))
-                        self.fit_table.cellWidget(row, 5).set_color(QColor(fit_info.get('color', 'gray')))
-                        self.fit_table.cellWidget(row, 6).setCurrentText(fit_info.get('style', 'Dash'))
-                        self.fit_table.cellWidget(row, 7).findChild(QLineEdit).setText(fit_info.get('thickness', '1'))
-                        
-                        # 3. Restore Dialog State
-                        if saved_id in self.fit_dialogs:
-                            dialog = self.fit_dialogs[saved_id]
-                            dialog.set_state(fit_info.get('dialog_state'))
-                            
-                            # Update Function Button Text
-                            func_str = dialog.func_input.text()
-                            display_text = (func_str[:10] + "...") if len(func_str) > 10 else func_str
-                            self.fit_table.cellWidget(row, 3).setText(display_text)
+                self.next_fit_id = max_id + 1
 
-                    # Ensure future IDs don't collide
-                    self.next_fit_id = max_id + 1
+            # Restore Fit Table Visibility
+            fit_visible = data.get('fit_table_visible', False)
+            if fit_visible != self.fit_table_visible:
+                self._toggle_fit_ui()
+            
+            self._is_loading = False  # Clear flag before update
+            self.update_plots() # Trigger update with recalculation
+            
+            # Update fit row colors after everything is loaded
+            self._update_fit_row_colors()
+            
+            # Trigger fit calculations after state is fully restored
+            if saved_fits:
+                for fit_info in saved_fits:
+                    fit_id = fit_info['id']
+                    if fit_id in self.fit_dialogs:
+                        dialog = self.fit_dialogs[fit_id]
+                        # Force recalculation with restored function
+                        if dialog.current_worker is None:  # Only if not already calculating
+                            dialog.calculate_fit()
 
-                # Restore Visibility
-                fit_visible = config.get('fit_table_visible', False)
-                if fit_visible != self.fit_table_visible:
-                    self._toggle_fit_ui() # This calls update_plots internally
-                
-                # Explicit update if fit visibility didn't trigger it
-                if not fit_visible:
-                    self.update_plots()
-
-            except FileNotFoundError as e:
-                QMessageBox.critical(self, "Error", f"Could not find project path from session file:\n{e}")
-        
-        # Synchronize the current path state after a successful session load
-        self.main_window.current_project_path = self.main_window.path_edit.text()
+        finally:
+            self.main_window.path_edit.blockSignals(False)
+            self.main_window.chip_input.blockSignals(False)
 
     def export_plot(self):
         filters = (

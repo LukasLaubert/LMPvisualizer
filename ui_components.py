@@ -4,9 +4,73 @@ from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget,
                              QDialogButtonBox, QHeaderView, QTableWidgetItem,
                              QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog,
                              QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication, 
-                             QStyledItemDelegate, QComboBox)
-from PyQt6.QtGui import QColor, QPalette, QFontMetrics
+                             QStyledItemDelegate, QComboBox, QSizePolicy)
+from PyQt6.QtGui import QColor, QPalette, QFontMetrics, QFont
 from PyQt6.QtCore import pyqtSignal, Qt, QEvent
+
+class NeutralPanel(QWidget):
+    """
+    The Neutral 'Boot' Panel displayed when no mode is selected.
+    Allows user to choose mode and toggle session loading.
+    """
+    modeSelected = pyqtSignal(str) # 'log' or 'trj'
+    autoloadToggled = pyqtSignal(bool) # True = Autoload On (Checkbox Unchecked)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(30)
+
+        # Title
+        title = QLabel("Boot Mode Selection")
+        font = title.font()
+        font.setPointSize(16)
+        font.setBold(True)
+        title.setFont(font)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        # Buttons Container
+        btn_container = QWidget()
+        btn_layout = QHBoxLayout(btn_container)
+        btn_layout.setSpacing(20)
+
+        # Log Plot Button
+        self.btn_log = QPushButton("Log Plot")
+        self.btn_log.setMinimumSize(150, 100)
+        self.btn_log.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self.btn_log.clicked.connect(lambda: self.modeSelected.emit('log'))
+        btn_layout.addWidget(self.btn_log)
+
+        # Trj Plot Button
+        self.btn_trj = QPushButton("Trajectory Plot")
+        self.btn_trj.setMinimumSize(150, 100)
+        self.btn_trj.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self.btn_trj.clicked.connect(lambda: self.modeSelected.emit('trj'))
+        btn_layout.addWidget(self.btn_trj)
+
+        layout.addWidget(btn_container)
+
+        # Autoload Checkbox (Logic inverted: Checkbox = Disable loading)
+        self.chk_disable_load = QCheckBox("Disable session file loading")
+        self.chk_disable_load.setStyleSheet("font-size: 12px;")
+        self.chk_disable_load.toggled.connect(self._on_check_toggled)
+        layout.addWidget(self.chk_disable_load, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def _on_check_toggled(self, checked):
+        # If checked (Disable), autoload is False
+        # If unchecked (Enable), autoload is True
+        self.autoloadToggled.emit(not checked)
+
+    def set_autoload_state(self, enabled):
+        # If enabled is True, checkbox should be Unchecked
+        self.chk_disable_load.setChecked(not enabled)
+
+# --- Existing Components ---
 
 class ColorButton(QPushButton):
     """A button that displays a color and opens a color dialog on click."""

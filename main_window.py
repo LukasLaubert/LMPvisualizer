@@ -12,29 +12,52 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
-from ui_components import ChipInputWidget, NoNewLineDelegate, ColorButton
+from ui_components import ChipInputWidget, NoNewLineDelegate, ColorButton, NeutralPanel
 from log_parser import LogParser
 from log_plot_panel import LogPlotPanel
 from trj_plot_panel import TrjPlotPanel
 from settings_manager import SettingsManager
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    # Constants for Mode Management
+    MODE_NEUTRAL = -1
+    MODE_LOG = 0
+    MODE_TRJ = 1
+    
+    AUTOSAVE_FILES = {
+        MODE_LOG: 'autosave_log.json',
+        MODE_TRJ: 'autosave_trj.json'
+    }
+
+    def __init__(self, startup_mode=None, startup_autoload=True):
         super().__init__()
         self.setWindowTitle("LAMMPS Visualizer")
         self.setGeometry(100, 100, 1400, 800)
         self.setStyleSheet("QMainWindow { background-color: #f0f0f0; }")
 
         self.current_project_path = ""
-
+        self.autoload_enabled = startup_autoload
+        self._skip_next_orchestration = False
+        
         # Keyword Storage for Modes
         # 0: Log Plot, 1: Trj Plot
         self.mode_keywords = {
-            0: ['.log', '.out'],
-            1: ['.lammpstrj', '.dump']
+            self.MODE_LOG: ['.log', '.out'],
+            self.MODE_TRJ: ['.lammpstrj', '.dump']
         }
-        self.current_mode_index = 0
+        self.current_mode_index = self.MODE_NEUTRAL
 
+        self._init_ui()
+        
+        # Handle Startup Mode
+        if startup_mode == 'log':
+            self.switch_to_mode(self.MODE_LOG)
+        elif startup_mode == 'trj':
+            self.switch_to_mode(self.MODE_TRJ)
+        else:
+            self.switch_to_neutral()
+
+    def _init_ui(self):
         # Central Container
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -43,35 +66,37 @@ class MainWindow(QMainWindow):
         # --- Top Controls Group (Shared) ---
         top_controls_group = QFrame()
         top_controls_group.setFrameShape(QFrame.Shape.StyledPanel)
-        top_controls_layout = QGridLayout(top_controls_group)
-        top_controls_layout.setContentsMargins(5, 5, 5, 5)
-        top_controls_layout.setHorizontalSpacing(10)
+        
+        # Save as class attribute for access in switch_to_neutral
+        self.top_controls_layout = QGridLayout(top_controls_group)
+        self.top_controls_layout.setContentsMargins(5, 5, 5, 5)
+        self.top_controls_layout.setHorizontalSpacing(10)
 
         # Row 0: Path and Browse
         path_lbl = QLabel("Path:")
         path_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-        top_controls_layout.addWidget(path_lbl, 0, 0)
+        self.top_controls_layout.addWidget(path_lbl, 0, 0)
         
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText("Select Project Root Directory...")
         self.path_edit.editingFinished.connect(self.on_path_entered)
-        top_controls_layout.addWidget(self.path_edit, 0, 1)
+        self.top_controls_layout.addWidget(self.path_edit, 0, 1)
         
         self.browse_btn = QPushButton("Browse...")
         self.browse_btn.setFixedWidth(80)
         self.browse_btn.clicked.connect(self.browse_for_path)
-        top_controls_layout.addWidget(self.browse_btn, 0, 2)
+        self.top_controls_layout.addWidget(self.browse_btn, 0, 2)
 
         self.refresh_btn = QPushButton("⟳")
         self.refresh_btn.setFixedWidth(30)
         self.refresh_btn.setToolTip("Reload Path")
         self.refresh_btn.clicked.connect(self.on_refresh_clicked)
-        top_controls_layout.addWidget(self.refresh_btn, 0, 3)
+        self.top_controls_layout.addWidget(self.refresh_btn, 0, 3)
 
         # Row 1: Keywords and Info
         kw_lbl = QLabel("Keywords:")
         kw_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-        top_controls_layout.addWidget(kw_lbl, 1, 0)
+        self.top_controls_layout.addWidget(kw_lbl, 1, 0)
         
         row1_container = QHBoxLayout()
         row1_container.setContentsMargins(0, 0, 0, 0)
@@ -93,7 +118,7 @@ class MainWindow(QMainWindow):
             info_layout.addWidget(lbl)
         
         row1_container.addLayout(info_layout)
-        top_controls_layout.addLayout(row1_container, 1, 1, 1, 3)
+        self.top_controls_layout.addLayout(row1_container, 1, 1, 1, 3)
 
         main_layout.addWidget(top_controls_group)
 
@@ -108,25 +133,200 @@ class MainWindow(QMainWindow):
         delegate = NoNewLineDelegate(self.mode_combo)
         self.mode_combo.setItemDelegate(delegate)
         
-        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
+        # Connect signal but block it initially until fully setup
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_combo_changed)
 
         # --- Stacked Panels ---
         self.stacked_widget = QStackedWidget()
-        self.log_plot_panel = LogPlotPanel(self)
-        self.trj_plot_panel = TrjPlotPanel(self)
         
+        # Index 0: Log Panel
+        self.log_plot_panel = LogPlotPanel(self)
         self.stacked_widget.addWidget(self.log_plot_panel)
+        
+        # Index 1: Trj Panel
+        self.trj_plot_panel = TrjPlotPanel(self)
         self.stacked_widget.addWidget(self.trj_plot_panel)
+        
+        # Index 2: Neutral Panel
+        self.neutral_panel = NeutralPanel(self)
+        self.neutral_panel.modeSelected.connect(self.on_neutral_mode_selected)
+        self.neutral_panel.autoloadToggled.connect(self.on_autoload_toggled)
+        self.stacked_widget.addWidget(self.neutral_panel)
 
         main_layout.addWidget(self.stacked_widget, 1)
 
-        # Initialize chips for the default mode (Log Plot)
-        self.chip_input.blockSignals(True)
-        self.chip_input.set_chips(self.mode_keywords[0])
-        self.chip_input.blockSignals(False)
+    # --- Mode Switching Logic ---
+
+    def switch_to_neutral(self):
+        """Switches to the Neutral 'Boot' Mode."""
+        self.current_mode_index = self.MODE_NEUTRAL
         
-        # Attach Mode Combo to the initial panel
-        self.log_plot_panel.attach_mode_combo(self.mode_combo)
+        # Switch View
+        self.stacked_widget.setCurrentWidget(self.neutral_panel)
+        self.neutral_panel.set_autoload_state(self.autoload_enabled)
+        
+        # Reset Top Controls
+        self.path_edit.clear()
+        self.chip_input.blockSignals(True)
+        self.chip_input.set_chips([])
+        self.chip_input.blockSignals(False)
+        self.studies_label.setText("Studies: 0")
+        self.systems_label.setText("Systems: 0")
+        self.units_label.setText("Unit: N/A")
+        self.timestep_label.setText("Timestep: N/A")
+        
+        # Disable Interface
+        self.set_interface_locked(True)
+        
+        # Reset Dropdown to "Select Mode..." state visually by disabling it
+        # We also remove it from any panel layout if attached
+        self.mode_combo.setParent(None)
+        
+        # Re-attach to the Top Controls Layout (now accessed directly)
+        # Note: addWidget automatically reparents the widget
+        self.top_controls_layout.addWidget(self.mode_combo, 0, 0, 2, 1)
+            
+        self.mode_combo.setEnabled(False)
+        
+        # Critical Fix: Block signals to prevent triggering load logic with index -1
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(-1)
+        self.mode_combo.blockSignals(False)
+
+    def switch_to_mode(self, mode_index):
+        """Switches to a specific active mode (Log/Trj)."""
+        previous_index = self.current_mode_index
+        self.current_mode_index = mode_index
+        
+        # 1. Unlock Interface
+        self.set_interface_locked(False)
+        
+        # 2. Update Dropdown
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setEnabled(True)
+        self.mode_combo.setCurrentIndex(mode_index)
+        self.mode_combo.blockSignals(False)
+        
+        # 3. Handle Keywords
+        self.chip_input.blockSignals(True)
+        self.chip_input.set_chips(self.mode_keywords[mode_index])
+        self.chip_input.blockSignals(False)
+
+        # 4. Switch Stack
+        self.stacked_widget.setCurrentIndex(mode_index)
+        new_panel = self.stacked_widget.currentWidget()
+        
+        # 5. Reparent Mode Combo
+        self.mode_combo.setParent(None)
+        if hasattr(new_panel, 'attach_mode_combo'):
+            new_panel.attach_mode_combo(self.mode_combo)
+            
+        # 6. Load Session (Orchestration)
+        self.orchestrate_load(mode_index, previous_index)
+
+    def set_interface_locked(self, locked: bool):
+        """Locks or unlocks the top controls."""
+        self.path_edit.setEnabled(not locked)
+        self.browse_btn.setEnabled(not locked)
+        self.refresh_btn.setEnabled(not locked)
+        self.chip_input.setEnabled(not locked)
+        self.mode_combo.setEnabled(not locked)
+
+    def on_neutral_mode_selected(self, mode_str):
+        if mode_str == 'log':
+            self.switch_to_mode(self.MODE_LOG)
+        elif mode_str == 'trj':
+            self.switch_to_mode(self.MODE_TRJ)
+
+    def on_autoload_toggled(self, enabled):
+        self.autoload_enabled = enabled
+
+    def on_mode_combo_changed(self, index):
+        """Handles user changing mode via dropdown."""
+        # 1. Save Old Mode State
+        self.save_session_for_mode(self.current_mode_index)
+        
+        # 2. Save Keywords for Old Mode
+        self.mode_keywords[self.current_mode_index] = self.chip_input.get_chips()
+        
+        # 3. Switch to New Mode
+        self.switch_to_mode(index)
+
+    # --- Session Orchestration ---
+
+    def orchestrate_load(self, new_mode_index, previous_mode_index):
+        """Handles loading the session based on autoload settings."""
+        # Check if we should skip orchestration (e.g., manual file load in progress)
+        if self._skip_next_orchestration:
+            self._skip_next_orchestration = False
+            return
+
+        mode_name = "Log Plot" if new_mode_index == self.MODE_LOG else "Trajectory Plot"
+        
+        should_load = False
+        if self.autoload_enabled:
+            should_load = True
+        elif previous_mode_index != self.MODE_NEUTRAL:
+            # Runtime switch: Ask user
+            reply = QMessageBox.question(
+                self, 
+                "Load Session?", 
+                f"Do you want to load the previous session for {mode_name}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                should_load = True
+        
+        if should_load:
+            self.load_session_for_mode(new_mode_index)
+        else:
+            print(f"[System] Switching to {mode_name}. Loading skipped.")
+
+    def save_session_for_mode(self, mode_index):
+        """Saves the session state for the given mode index."""
+        if mode_index == self.MODE_NEUTRAL:
+            return
+
+        panel = None
+        if mode_index == self.MODE_LOG:
+            panel = self.log_plot_panel
+        elif mode_index == self.MODE_TRJ:
+            panel = self.trj_plot_panel
+            
+        filename = self.AUTOSAVE_FILES.get(mode_index)
+        
+        if panel and filename:
+             config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
+             os.makedirs(config_dir, exist_ok=True)
+             path = os.path.join(config_dir, filename)
+             
+             # Actual save call using the methods added to panels
+             if hasattr(panel, 'save_session_to_file'):
+                 panel.save_session_to_file(path)
+
+    def load_session_for_mode(self, mode_index):
+        """Loads the session state for the given mode index."""
+        mode_str = "Log Plot" if mode_index == self.MODE_LOG else "Trajectory Plot"
+        filename = self.AUTOSAVE_FILES.get(mode_index)
+        if not filename: return
+
+        config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
+        path = os.path.join(config_dir, filename)
+        
+        if os.path.exists(path):
+            panel = None
+            if mode_index == self.MODE_LOG:
+                panel = self.log_plot_panel
+            elif mode_index == self.MODE_TRJ:
+                panel = self.trj_plot_panel
+            
+            # Actual load call
+            if panel and hasattr(panel, 'load_session_from_file'):
+                panel.load_session_from_file(path)
+        else:
+             print(f"[System] No autosave found for {mode_str}.")
+
+    # --- Existing Functionality ---
 
     def browse_for_path(self):
         self.chip_input.add_chip_from_input()
@@ -223,151 +423,8 @@ class MainWindow(QMainWindow):
             else:
                 current_panel.load_project(path, keywords, force_reload=force_reload)
 
-    def on_mode_changed(self, index):
-        # 1. Save keywords of the *previous* mode
-        self.mode_keywords[self.current_mode_index] = self.chip_input.get_chips()
-        self.current_mode_index = index
-        
-        # 2. Load keywords for the *new* mode
-        self.chip_input.blockSignals(True)
-        self.chip_input.set_chips(self.mode_keywords[index])
-        self.chip_input.blockSignals(False)
-
-        # 3. Switch Panel
-        self.stacked_widget.setCurrentIndex(index)
-        new_panel = self.stacked_widget.currentWidget()
-        
-        # 4. Reparent the Mode Combo
-        self.mode_combo.setParent(None) 
-        if hasattr(new_panel, 'attach_mode_combo'):
-            new_panel.attach_mode_combo(self.mode_combo)
-
-        # 5. Load data if path exists (Propagate load with new keywords)
-        if self.current_project_path:
-             self.propagate_load(Path(self.current_project_path), force_reload=False, keep_table=True)
-
-    def load_state_on_startup(self):
-        """Loads autosave states for both panels if available."""
-        # 1. Log Plot Load
-        if hasattr(self.log_plot_panel, 'load_state_on_startup'):
-            self.log_plot_panel.load_state_on_startup()
-            
-        # 2. Trj Plot Load
-        config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
-        trj_path = os.path.join(config_dir, 'autosave_trj.json')
-        
-        if os.path.exists(trj_path):
-            data = SettingsManager.load_state(trj_path)
-            if data and data.get('type') == 'trj_plot':
-                # Restore Project
-                path = data.get('project_path', '')
-                keywords = data.get('keywords', [])
-                if path and os.path.exists(path):
-                    # Update global keywords if we are in Trj mode, or store them for later
-                    self.mode_keywords[1] = keywords
-                    
-                    # Trigger load
-                    self.trj_plot_panel.load_project(Path(path), keywords, force_reload=True)
-                    self.trj_plot_panel.global_label_map = data.get('global_label_map', {})
-                    
-                    # Restore Table Rows
-                    table = self.trj_plot_panel.plot_table
-                    table.setRowCount(0)
-                    
-                    for entry in data.get('rows', []):
-                        state = entry.get('state')
-                        visuals = entry.get('visuals', {})
-                        
-                        # Determine heatmap state (handle legacy "Select Heatmap" string if present)
-                        h_col = state.get('h_col', "No Heatmap")
-                        is_heatmap = (h_col != "No Heatmap" and h_col != "Select Heatmap")
-
-                        # Construct data dictionary for the panel's helper method
-                        row_data = {
-                            'state': state,
-                            'is_heatmap': is_heatmap,
-                            'color': visuals.get('color', '#000000'),
-                            'heatmap_grad': visuals.get('gradient'),
-                            'style': visuals.get('symbol', 'o'),
-                            'size': str(visuals.get('size', 5))
-                        }
-                        
-                        row = table.rowCount()
-                        table.insertRow(row)
-                        
-                        # Use the new helper method to populate the row correctly
-                        self.trj_plot_panel._populate_row_data(row, row_data)
-                    
-                    # Select first row if exists to trigger view update
-                    if table.rowCount() > 0:
-                        table.selectRow(0)
-
     def closeEvent(self, event):
-        """Handle application exit: Save state for both modes."""
-        
-        # 1. Save Log Plot State
-        if hasattr(self.log_plot_panel, 'save_state_for_exit'):
-            self.log_plot_panel.save_state_for_exit()
-            
-        # 2. Save Trj Plot State
-        try:
-            config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
-            os.makedirs(config_dir, exist_ok=True)
-            path = os.path.join(config_dir, 'autosave_trj.json')
-
-            # Determine path/keywords to save
-            # If Trj Panel has data loaded, use that path, otherwise current path
-            trj_path_val = self.trj_plot_panel.loaded_path or self.path_edit.text()
-            # Use current keywords if mode is Trj, else use stored keywords
-            trj_kw = self.chip_input.get_chips() if self.current_mode_index == 1 else self.mode_keywords[1]
-
-            session_data = {
-                'type': 'trj_plot',
-                'project_path': str(trj_path_val),
-                'keywords': trj_kw,
-                'rows': [],
-                'global_label_map': self.trj_plot_panel.global_label_map
-            }
-            
-            table = self.trj_plot_panel.plot_table
-            for row in range(table.rowCount()):
-                item = table.item(row, 1)
-                if not item: continue
-                state = item.data(Qt.ItemDataRole.UserRole)
-                
-                # Visuals
-                color_widget = table.cellWidget(row, 2)
-                style_widget = table.cellWidget(row, 3)
-                size_widget = table.cellWidget(row, 4)
-                
-                color_val = "#000000"
-                gradient_val = None
-                if isinstance(color_widget, ColorButton):
-                    color_val = color_widget.color().name()
-                elif isinstance(color_widget, QComboBox):
-                    gradient_val = color_widget.currentText()
-                
-                # Handle size widget type safety
-                size_val = 1
-                if hasattr(size_widget, 'value'):
-                    size_val = size_widget.value()
-                elif hasattr(size_widget, 'text'):
-                    try: size_val = int(size_widget.text())
-                    except: pass
-
-                row_data = {
-                    'state': state,
-                    'visuals': {
-                        'color': color_val,
-                        'gradient': gradient_val,
-                        'symbol': style_widget.currentText() if style_widget else 'o',
-                        'size': size_val
-                    }
-                }
-                session_data['rows'].append(row_data)
-            
-            SettingsManager.save_state(path, session_data)
-        except Exception as e:
-            print(f"Error autosaving Trj Plot state: {e}")
-
+        """Handle application exit: Save state for current mode."""
+        if self.current_mode_index != self.MODE_NEUTRAL:
+            self.save_session_for_mode(self.current_mode_index)
         super().closeEvent(event)
