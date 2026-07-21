@@ -1323,7 +1323,7 @@ class LogPlotPanel(QWidget):
                         std_color.setHsv(std_color.hue(), int(std_color.saturation() * 0.66), int(std_color.value() * 0.5), int(std_color.alpha() * 0.5))
                         self.plot_controller.add_or_update_plot_with_custom_colors(
                             legend_name + "_running_mean_std", std_data, std_color, 
-                            plot_info['style'], layer_priority=1 + z_offset
+                            Qt.PenStyle.NoPen, layer_priority=1 + z_offset
                         )
                 
                 # Only draw the mean line if the window is > 0
@@ -1690,7 +1690,10 @@ class LogPlotPanel(QWidget):
     def export_plot(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Plot", "", "SVG Files (*.svg);;PDF Files (*.pdf)")
         if path:
-            self.plot_controller.export_plot(path)
+            dpi = self.logicalDpiX()
+            width_in = self.plot_widget.width() / dpi
+            height_in = self.plot_widget.height() / dpi
+            self.plot_controller.export_plot(path, figsize=(width_in, height_in))
 
     def launch_popout_window(self):
         """Creates a new independent window with the current plot data."""
@@ -1709,7 +1712,11 @@ class LogPlotPanel(QWidget):
             QMessageBox.information(self, "Info", "No visible data to display in Pop Out.")
             return
 
-        popout = PopOutWindow(plot_state)
+        dpi = self.logicalDpiX()
+        w_in = self.plot_widget.width() / dpi
+        h_in = self.plot_widget.height() / dpi
+        
+        popout = PopOutWindow(plot_state, figsize=(w_in, h_in))
         popout.show()
         
         # Keep reference to prevent GC

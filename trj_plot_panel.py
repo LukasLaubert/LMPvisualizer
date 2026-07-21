@@ -951,6 +951,8 @@ class TrjPlotPanel(QWidget):
             'system': state['system'],
             'x_col': x_ax,
             'y_col': y_ax,
+            'x_label': x_label,
+            'y_label': y_label,
             'z_filter_col': z_col,
             'z_filter_ref': state.get('z_ref'),
             'z_range': (cur_min, cur_max),
@@ -1011,13 +1013,21 @@ class TrjPlotPanel(QWidget):
         if not state or not state.get('y_axes'): 
             QMessageBox.information(self, "Info", "No valid data to pop out.")
             return
-        self.pop_win = PopOutWindow(state)
+            
+        dpi = self.logicalDpiX()
+        w_in = self.plot_widget.width() / dpi
+        h_in = self.plot_widget.height() / dpi
+        
+        self.pop_win = PopOutWindow(state, figsize=(w_in, h_in))
         self.pop_win.show()
 
     def quick_export(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Plot", "", "PDF Files (*.pdf);;SVG Files (*.svg);;PNG Files (*.png)")
         if path:
-            self.controller.export_plot(path)
+            dpi = self.logicalDpiX()
+            width_in = self.plot_widget.width() / dpi
+            height_in = self.plot_widget.height() / dpi
+            self.controller.export_plot(path, figsize=(width_in, height_in))
 
     def save_session(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Trj Session", "", "JSON Files (*.json)")

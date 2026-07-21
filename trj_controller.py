@@ -298,8 +298,10 @@ class TrjController(QObject):
             pen=None
         )
         
-        self.plot_item.setLabel('bottom', x_col)
-        self.plot_item.setLabel('left', y_col)
+        x_lbl = self.view_config.get('x_label', x_col)
+        y_lbl = self.view_config.get('y_label', y_col)
+        self.plot_item.setLabel('bottom', x_lbl)
+        self.plot_item.setLabel('left', y_lbl)
 
         # 6. Auto-Fit Logic
         # If view_lock is TRUE, we do NOT touch the range.
@@ -393,24 +395,37 @@ class TrjController(QObject):
     def get_data_min_max(self, study, system, col):
         return self.data_manager.get_global_min_max(study, system, col)
 
-    def export_plot(self, filename: str):
+    def export_plot(self, filename: str, figsize=None):
         try:
             import matplotlib.pyplot as plt
-            fig, ax = plt.subplots()
+            fig, ax = plt.subplots(figsize=figsize if figsize else (10, 6))
             x_data = self.scatter.data['x']
             y_data = self.scatter.data['y']
             if len(x_data) == 0: return
+            
             colors = []
             for b in self.last_render_brushes:
                 c = b.color()
                 colors.append((c.redF(), c.greenF(), c.blueF(), c.alphaF()))
+            
             size = self.view_config.get('size', 5)
-            ax.scatter(x_data, y_data, c=colors, s=size**2, edgecolors='none')
+            
+            # Get symbol and translate to marker
+            pg_symbol = self.view_config.get('symbol', 'o')
+            mpl_marker = self._get_mpl_marker(pg_symbol)
+            
+            ax.scatter(x_data, y_data, c=colors, s=size**2, 
+                       marker=mpl_marker, edgecolors='none')
+            
             vb = self.plot_item.getViewBox()
             ax.set_xlim(vb.viewRange()[0])
             ax.set_ylim(vb.viewRange()[1])
-            ax.set_xlabel(self.view_config.get('x_col', ''))
-            ax.set_ylabel(self.view_config.get('y_col', ''))
+            
+            x_lbl = self.view_config.get('x_label', self.view_config.get('x_col', ''))
+            y_lbl = self.view_config.get('y_label', self.view_config.get('y_col', ''))
+            ax.set_xlabel(x_lbl)
+            ax.set_ylabel(y_lbl)
+            
             fig.savefig(filename, dpi=300, bbox_inches='tight')
             plt.close(fig)
             print(f"Exported to {filename}")
@@ -423,13 +438,21 @@ class TrjController(QObject):
         colors_list = []
         for b in self.last_render_brushes:
             colors_list.append(b.color())
+            
+        x_lbl = self.view_config.get('x_label', self.view_config.get('x_col', ''))
+        y_lbl = self.view_config.get('y_label', self.view_config.get('y_col', ''))
+        
+        # Translate symbol
+        pg_symbol = self.view_config.get('symbol', 'o')
+        mpl_marker = self._get_mpl_marker(pg_symbol)
+            
         state = {
             'title': f"{self.current_study} | {self.current_system}",
-            'x_label': self.view_config.get('x_col', ''),
+            'x_label': x_lbl,
             'x_limits': self.plot_item.getViewBox().viewRange()[0],
             'y_axes': {
                 'primary': {
-                    'label': self.view_config.get('y_col', ''),
+                    'label': y_lbl,
                     'y_limits': self.plot_item.getViewBox().viewRange()[1],
                     'series': [{
                         'id': 'trj_scatter',
@@ -439,6 +462,7 @@ class TrjController(QObject):
                         'y': self.scatter.data['y'],
                         'colors': colors_list,
                         'size': self.view_config.get('size', 5),
+                        'marker': mpl_marker, # Pass translated marker
                         'std': None,
                         'color': QColor('black')
                     }]
@@ -446,3 +470,23 @@ class TrjController(QObject):
             }
         }
         return state
+
+    def _get_mpl_marker(self, pg_symbol):
+        """Maps PyQtGraph symbols to Matplotlib marker strings."""
+        # PyQtGraph symbols: o, s, t, t1, t2, t3, d, +, x, p, h, star
+        # 't' is usually triangle down (v) in pg, 't1' is up (^)
+        mapping = {
+            'o': 'o', 
+            's': 's', 
+            't': 'v',  # Triangle Down
+            't1': '^', # Triangle Up
+            't2': '>', # Triangle Right
+            't3': '<', # Triangle Left
+            'd': 'D',  # Diamond (Standard)
+            '+': '+', 
+            'x': 'x',
+            'p': 'p',  # Pentagon
+            'h': 'h',  # Hexagon
+            'star': '*'
+        }
+        return mapping.get(pg_symbol, 'o')

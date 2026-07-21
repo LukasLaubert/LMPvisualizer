@@ -43,10 +43,6 @@ class LinePropertiesWidget(QGroupBox):
         layout.addRow("Legend:", self.label_edit)
 
         # Color
-        # For scatter plots with individual colors (heatmaps), this override might not apply per-dot,
-        # but it's useful if the user wants to force a single color.
-        # Per feature request: do not show "Color" when Heatmap is activated.
-        
         is_heatmap = self.is_scatter and 'colors' in initial_props and initial_props['colors'] is not None
         
         if not is_heatmap:
@@ -54,31 +50,26 @@ class LinePropertiesWidget(QGroupBox):
             self.color_btn.colorChanged.connect(lambda: self.propertiesChanged.emit())
             layout.addRow("Color:", self.color_btn)
         else:
-            # Keep a reference even if not shown, to avoid attribute errors if used elsewhere
             self.color_btn = ColorButton(initial_props['color'])
 
         if self.is_scatter:
-            # Scatter specific controls
             self.size_spin = QDoubleSpinBox()
-            self.size_spin.setRange(1.0, 200.0) # Increased range for scatter size
+            self.size_spin.setRange(1.0, 200.0)
             self.size_spin.setValue(float(initial_props.get('size', 10)))
             self.size_spin.valueChanged.connect(self.propertiesChanged)
             layout.addRow("Size:", self.size_spin)
             
             self.marker_combo = QComboBox()
-            # Matplotlib scatter markers
             self.marker_combo.addItems(['o', 'x', '+', 'v', '^', '<', '>', 's', 'p', '*', 'h', 'H', 'D', 'd'])
             self.marker_combo.setCurrentText(initial_props.get('marker', 'o'))
             self.marker_combo.currentTextChanged.connect(self.propertiesChanged)
             layout.addRow("Marker:", self.marker_combo)
             
-            # Placeholders for line attributes to keep interface consistent in get_properties
             self.style_combo = QComboBox() 
             self.width_spin = QDoubleSpinBox() 
             self.error_check = QCheckBox() 
             
         else:
-            # Line specific controls
             self.style_combo = QComboBox()
             self.style_combo.addItems(['-', '--', ':', '-.'])
             self.style_combo.setCurrentText(initial_props.get('linestyle', '-'))
@@ -133,18 +124,24 @@ class LinePropertiesWidget(QGroupBox):
         return props
 
 class PopOutWindow(QMainWindow):
-    def __init__(self, plot_state_data, parent=None):
+    def __init__(self, plot_state_data, parent=None, figsize=None):
         super().__init__(parent)
         self.setWindowTitle("Plot Inspector")
-        self.resize(900, 600)
+        self.resize(1100, 650) # Slightly wider default
         
         self.plot_data = copy.deepcopy(plot_state_data)
         self.line_widgets = {} 
+        self.initial_figsize = figsize # Tuple (width_in, height_in)
         
         self._init_ui()
         
         self.canvas.mpl_connect('resize_event', self.on_canvas_resize)
-        self.redraw_plot()
+        
+        # If initial size provided, apply it immediately
+        if self.initial_figsize:
+            self._apply_initial_figsize(self.initial_figsize)
+        else:
+            self.redraw_plot()
 
     def _init_ui(self):
         self.figure = Figure(dpi=100) 
@@ -167,6 +164,7 @@ class PopOutWindow(QMainWindow):
         self.form_layout = QVBoxLayout(self.scroll_content)
         
         self._init_global_settings()
+        self._init_font_settings()
         self._init_axis_settings()
         self._init_legend_settings()
 
@@ -195,11 +193,15 @@ class PopOutWindow(QMainWindow):
         self.width_spin.setPrefix("W: ")
         self.width_spin.setRange(10, 10000)
         self.width_spin.setDecimals(1)
+        # FIX: Connect Enter key / Focus loss to apply function
+        self.width_spin.editingFinished.connect(self.apply_canvas_size)
         
         self.height_spin = QDoubleSpinBox()
         self.height_spin.setPrefix("H: ")
         self.height_spin.setRange(10, 10000)
         self.height_spin.setDecimals(1)
+        # FIX: Connect Enter key / Focus loss to apply function
+        self.height_spin.editingFinished.connect(self.apply_canvas_size)
         
         self.unit_combo = QComboBox()
         self.unit_combo.addItems(['px', 'in', 'mm', 'cm'])
@@ -227,12 +229,6 @@ class PopOutWindow(QMainWindow):
         self.latex_check.toggled.connect(self.on_latex_toggled)
         layout.addRow(self.latex_check)
 
-        self.font_size_spin = QSpinBox()
-        self.font_size_spin.setRange(6, 48)
-        self.font_size_spin.setValue(10)
-        self.font_size_spin.valueChanged.connect(self.redraw_plot)
-        layout.addRow("Font Size:", self.font_size_spin)
-
         self.grid_check = QCheckBox("Show Grid")
         self.grid_check.setChecked(True)
         self.grid_check.toggled.connect(self.redraw_plot)
@@ -240,11 +236,43 @@ class PopOutWindow(QMainWindow):
 
         self.form_layout.addWidget(group)
 
+    def _init_font_settings(self):
+        group = QGroupBox("Font Sizes")
+        layout = QFormLayout(group)
+
+        self.font_title_spin = QSpinBox()
+        self.font_title_spin.setRange(6, 72)
+        self.font_title_spin.setValue(12)
+        self.font_title_spin.valueChanged.connect(self.redraw_plot)
+        layout.addRow("Title:", self.font_title_spin)
+
+        self.font_label_spin = QSpinBox()
+        self.font_label_spin.setRange(6, 72)
+        self.font_label_spin.setValue(10)
+        self.font_label_spin.valueChanged.connect(self.redraw_plot)
+        layout.addRow("Axis Labels:", self.font_label_spin)
+
+        self.font_tick_spin = QSpinBox()
+        self.font_tick_spin.setRange(6, 72)
+        self.font_tick_spin.setValue(10)
+        self.font_tick_spin.valueChanged.connect(self.redraw_plot)
+        layout.addRow("Tick Labels:", self.font_tick_spin)
+
+        self.font_legend_spin = QSpinBox()
+        self.font_legend_spin.setRange(6, 72)
+        self.font_legend_spin.setValue(10)
+        self.font_legend_spin.valueChanged.connect(self.redraw_plot)
+        layout.addRow("Legend:", self.font_legend_spin)
+
+        self.form_layout.addWidget(group)
+
     def _init_axis_settings(self):
         group = QGroupBox("Axes")
         layout = QFormLayout(group)
 
-        self.x_label_edit = QLineEdit(self.plot_data.get('x_label', ''))
+        # Use the custom global label passed from controller if available
+        default_x = self.plot_data.get('x_label', '')
+        self.x_label_edit = QLineEdit(default_x)
         self.x_label_edit.editingFinished.connect(self.redraw_plot)
         layout.addRow("X Label:", self.x_label_edit)
         
@@ -257,7 +285,9 @@ class PopOutWindow(QMainWindow):
             lbl = QLabel(f"<b>Y-Axis: {y_col}</b>")
             layout.addRow(lbl)
             
-            label_edit = QLineEdit(axis_data.get('label', y_col))
+            # Use the custom global label passed from controller if available
+            default_y = axis_data.get('label', y_col)
+            label_edit = QLineEdit(default_y)
             label_edit.editingFinished.connect(self.redraw_plot)
             layout.addRow("Label:", label_edit)
             
@@ -305,11 +335,8 @@ class PopOutWindow(QMainWindow):
                 sid = series['id']
                 is_scatter = series.get('mode') == 'scatter'
                 
-                # If colors list provided, take the first one as the "override" button color
                 initial_color = series['color']
                 if series.get('colors'):
-                     # If we have per-dot colors, initial_color might be black (fallback),
-                     # so we try to grab the first one from the list if available
                      try:
                          initial_color = series['colors'][0]
                      except IndexError:
@@ -326,13 +353,47 @@ class PopOutWindow(QMainWindow):
                     'show_std': True,
                     'mode': series.get('mode', 'line'),
                     'size': series.get('size', 20) if is_scatter else 10,
-                    'colors': series.get('colors') # Pass colors to detect heatmap
+                    'colors': series.get('colors')
                 }
                 
                 widget = LinePropertiesWidget(sid, initial_props)
                 widget.propertiesChanged.connect(self.redraw_plot)
                 self.lines_layout.addWidget(widget)
                 self.line_widgets[sid] = widget
+
+    def _apply_initial_figsize(self, figsize):
+        """
+        Resize the window so the matplotlib CANVAS matches figsize (in inches),
+        accounting for the dock, toolbar, and window borders (overhead).
+        """
+        w_in, h_in = figsize
+        dpi = self.figure.get_dpi()
+        
+        target_canvas_w = int(w_in * dpi)
+        target_canvas_h = int(h_in * dpi)
+        
+        # 1. Force a show and layout update to ensure widgets report correct sizes
+        self.show() 
+        
+        # Process events to ensures Qt has calculated layout geometries
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+        
+        # 2. Calculate the UI Overhead (Window Size - Canvas Size)
+        current_win_size = self.size()
+        current_canvas_size = self.canvas.size()
+        
+        w_overhead = current_win_size.width() - current_canvas_size.width()
+        h_overhead = current_win_size.height() - current_canvas_size.height()
+        
+        # 3. Apply new size
+        new_total_w = target_canvas_w + w_overhead
+        new_total_h = target_canvas_h + h_overhead
+        
+        self.resize(new_total_w, new_total_h)
+        
+        # 4. FIX: Explicitly redraw the plot content so it isn't white
+        self.redraw_plot()
 
     def apply_canvas_size(self):
         target_w = self.width_spin.value()
@@ -369,9 +430,7 @@ class PopOutWindow(QMainWindow):
         
         self.resize(new_total_w, new_total_h)
         
-        w_in = target_w_px / dpi
-        h_in = target_h_px / dpi
-        self.figure.set_size_inches(w_in, h_in)
+        # Force matplotlib update
         self.figure.tight_layout()
         self.canvas.draw()
 
@@ -407,12 +466,16 @@ class PopOutWindow(QMainWindow):
     def redraw_plot(self):
         self.figure.clear()
         
-        font_size = self.font_size_spin.value()
-        plt.rcParams.update({'font.size': font_size})
+        # Get separate font sizes
+        font_title = self.font_title_spin.value()
+        font_label = self.font_label_spin.value()
+        font_tick = self.font_tick_spin.value()
+        font_legend = self.font_legend_spin.value()
         
         ax_primary = self.figure.add_subplot(111)
-        ax_primary.set_title(self.title_edit.text())
-        ax_primary.set_xlabel(self.x_label_edit.text())
+        ax_primary.set_title(self.title_edit.text(), fontsize=font_title)
+        ax_primary.set_xlabel(self.x_label_edit.text(), fontsize=font_label)
+        ax_primary.tick_params(axis='both', labelsize=font_tick)
         
         if 'x_limits' in self.plot_data:
             ax_primary.set_xlim(self.plot_data['x_limits'])
@@ -430,31 +493,71 @@ class PopOutWindow(QMainWindow):
 
         axes_map = {y_cols[0]: ax_primary}
         
+        # Configure Primary Y-Axis
         config_prim = self.y_configs[y_cols[0]]
-        ax_primary.set_ylabel(config_prim['label_edit'].text())
+        ax_primary.set_ylabel(config_prim['label_edit'].text(), fontsize=font_label)
         if config_prim['log_check'].isChecked():
             ax_primary.set_yscale('log')
         if 'y_limits' in self.plot_data['y_axes'][y_cols[0]]:
             ax_primary.set_ylim(self.plot_data['y_axes'][y_cols[0]]['y_limits'])
-        
+            
+        # Apply Axis Colors (Primary)
+        y_data_prim = self.plot_data['y_axes'][y_cols[0]]
+        if 'color' in y_data_prim:
+            col = y_data_prim['color']
+            rgb = (col.redF(), col.greenF(), col.blueF())
+            ax_primary.yaxis.label.set_color(rgb)
+            ax_primary.tick_params(axis='y', colors=rgb)
+            # Primary left spine
+            ax_primary.spines['left'].set_color(rgb)
+            
+            # X-axis color is usually black, but we can keep it standard
+            ax_primary.xaxis.label.set_color('black')
+            ax_primary.tick_params(axis='x', colors='black')
+            ax_primary.spines['bottom'].set_color('black')
+            ax_primary.spines['top'].set_visible(False)
+            ax_primary.spines['right'].set_visible(False)
+
+        # Configure Secondary Y-Axes
         for i, y_col in enumerate(y_cols[1:], start=1):
             ax_new = ax_primary.twinx()
+            ax_new.spines['top'].set_visible(False)
+            ax_new.spines['left'].set_visible(False)
+            
             if i > 1:
                 ax_new.spines['right'].set_position(('outward', 60 * (i - 1)))
             
             config = self.y_configs[y_col]
-            ax_new.set_ylabel(config['label_edit'].text())
+            ax_new.set_ylabel(config['label_edit'].text(), fontsize=font_label)
+            ax_new.tick_params(axis='y', labelsize=font_tick)
+            
             if config['log_check'].isChecked():
                 ax_new.set_yscale('log')
             if 'y_limits' in self.plot_data['y_axes'][y_col]:
                 ax_new.set_ylim(self.plot_data['y_axes'][y_col]['y_limits'])
+            
+            # Apply Axis Colors (Secondary)
+            y_data_sec = self.plot_data['y_axes'][y_col]
+            if 'color' in y_data_sec:
+                col = y_data_sec['color']
+                rgb = (col.redF(), col.greenF(), col.blueF())
+                ax_new.yaxis.label.set_color(rgb)
+                ax_new.tick_params(axis='y', colors=rgb)
+                ax_new.spines['right'].set_color(rgb)
+            
             axes_map[y_col] = ax_new
 
         all_handles = []
         all_labels = []
         
+        # Iterate axes
         for y_col, axis_data in self.plot_data['y_axes'].items():
             ax = axes_map[y_col]
+            
+            # Sort series if controller didn't, but LogController already sorts by layer_priority. 
+            # TrjController has one series. 
+            # We rely on the list order provided.
+            
             for series in axis_data['series']:
                 sid = series['id']
                 if sid not in self.line_widgets: continue
@@ -463,39 +566,15 @@ class PopOutWindow(QMainWindow):
                 if not props['visible']: continue
 
                 if series.get('mode') == 'scatter':
-                    # Scatter Plot Logic
-                    
-                    # Determine Colors:
-                    # 1. Try individual colors list from series data (Heatmap case)
-                    # 2. Fallback to user-selected override color
-                    
                     colors_to_use = None
-                    
-                    # Check if the user *changed* the color in the widget vs the initial one.
-                    # If the user explicitly picked a new color in the PopOut GUI, we should likely respect it 
-                    # (overriding the heatmap).
-                    # But determining "changed" is tricky.
-                    # Strategy: If 'colors' is present in data, use it by default.
-                    # Note: The widget initialized with the first color of the list.
-                    # If user changes it, widget.color_btn.color() will differ.
-                    
-                    # However, a simpler approach requested by user: "colors of each dot ... work fine"
-                    # We prioritize the individual colors if they exist.
-                    # If the user specifically wants to override a heatmap with a single flat color,
-                    # that functionality might need a "Use Single Color" checkbox, but for now
-                    # we prioritize the data fidelity (Heatmap).
-                    
                     if series.get('colors') is not None:
-                        # Convert QColor list to RGBA for Matplotlib
                         colors_to_use = []
                         for c in series['colors']:
                             colors_to_use.append((c.redF(), c.greenF(), c.blueF(), c.alphaF()))
                     else:
-                        # Single color from widget
                         c = props['color']
                         colors_to_use = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
 
-                    # Matplotlib 's' is area, so square the radius/size
                     scatter_h = ax.scatter(
                         series['x'], series['y'],
                         label=props['label'],
@@ -505,44 +584,52 @@ class PopOutWindow(QMainWindow):
                         edgecolors='none'
                     )
                     
-                    # For legend, we need a proxy artist if colors are array
-                    all_handles.append(scatter_h)
-                    all_labels.append(props['label'])
+                    if props['label']: # Only add to legend if label is not empty
+                        all_handles.append(scatter_h)
+                        all_labels.append(props['label'])
 
                 else:
-                    # Line Plot Logic
                     c = props['color']
                     color_tuple = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
                     
-                    line, = ax.plot(
-                        series['x'], series['y'], 
-                        label=props['label'],
-                        color=color_tuple,
-                        linestyle=props['linestyle'],
-                        linewidth=props['linewidth'],
-                        marker=props['marker']
-                    )
-                    all_handles.append(line)
-                    all_labels.append(props['label'])
-
-                    if props['show_std'] and series['std'] is not None:
+                    # Check if this series has std data and should show error band
+                    has_error_band = props['show_std'] and series['std'] is not None
+                    
+                    if has_error_band:
+                        # ONLY plot the error band, skip the line entirely
                         try:
                             lower = series['y'] - series['std']
                             upper = series['y'] + series['std']
-                            ax.fill_between(series['x'], lower, upper, color=color_tuple, alpha=0.25, linewidth=0)
+                            fill = ax.fill_between(series['x'], lower, upper, color=color_tuple, alpha=0.25, linewidth=0, label=props['label'])
+                            
+                            if props['label']:
+                                all_handles.append(fill)
+                                all_labels.append(props['label'])
                         except Exception:
                             pass
+                    else:
+                        # Plot normal line (no error band)
+                        line, = ax.plot(
+                            series['x'], series['y'], 
+                            label=props['label'],
+                            color=color_tuple,
+                            linestyle=props['linestyle'],
+                            linewidth=props['linewidth'],
+                            marker=props['marker']
+                        )
+                        
+                        if props['label']:
+                            all_handles.append(line)
+                            all_labels.append(props['label'])
 
         if self.show_legend_check.isChecked() and all_handles:
             loc = self.legend_loc.currentText()
             frame = self.legend_frame.isChecked()
             draggable = self.legend_draggable.isChecked()
             
-            leg = ax_primary.legend(all_handles, all_labels, loc=loc, frameon=frame)
+            leg = ax_primary.legend(all_handles, all_labels, loc=loc, frameon=frame, fontsize=font_legend)
             
-            # CRITICAL: Exclude legend from layout calculations to prevent plot resizing
             leg.set_in_layout(False)
-            
             if draggable:
                 leg.set_draggable(True)
         
