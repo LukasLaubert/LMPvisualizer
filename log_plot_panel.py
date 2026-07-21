@@ -189,7 +189,7 @@ class LogPlotPanel(QWidget):
         
         self.add_fit_btn = QPushButton("Add Fit")
         self.add_fit_btn.clicked.connect(self.add_fit_row)
-        self.hide_fit_btn = QPushButton("Hide Fitting")
+        self.hide_fit_btn = QPushButton("Hide Fitting Table")
         self.hide_fit_btn.clicked.connect(self._toggle_fit_ui)
         
         self.add_fit_btn.hide()
@@ -452,9 +452,10 @@ class LogPlotPanel(QWidget):
                 self.swap_fit_rows(row, row + 1)
 
     def swap_fit_rows(self, r1, r2):
+        # 1. Block Table Signals generally
         self.fit_table.blockSignals(True)
         
-        # 1. Swap ID Items (The Data)
+        # 2. Swap ID Items (The Data Source of Truth)
         item1 = self.fit_table.item(r1, 0)
         item2 = self.fit_table.item(r2, 0)
         id1 = item1.data(Qt.ItemDataRole.UserRole)
@@ -462,57 +463,109 @@ class LogPlotPanel(QWidget):
         item1.setData(Qt.ItemDataRole.UserRole, id2)
         item2.setData(Qt.ItemDataRole.UserRole, id1)
 
-        # 2. Update Widget Properties (The Signals)
+        # 3. Update Widget Properties (The Tags used for signal routing)
         # We must re-tag the widgets so they point to their new location's ID
         for r, fid in [(r1, id2), (r2, id1)]:
-            self.fit_table.cellWidget(r, 2).setProperty("fit_id", fid) # Type
-            self.fit_table.cellWidget(r, 3).setProperty("fit_id", fid) # Fun Btn
-            self.fit_table.cellWidget(r, 4).setProperty("fit_id", fid) # Err Lbl
-            # Del Btn is inside a container
+            # Type Combo
+            w_type = self.fit_table.cellWidget(r, 2)
+            if w_type: w_type.setProperty("fit_id", fid)
+            
+            # Fun Btn
+            w_fun = self.fit_table.cellWidget(r, 3)
+            if w_fun: w_fun.setProperty("fit_id", fid)
+            
+            # Err Lbl
+            w_err = self.fit_table.cellWidget(r, 4)
+            if w_err: w_err.setProperty("fit_id", fid)
+            
+            # Del Btn (inside container)
             container = self.fit_table.cellWidget(r, 8)
             if container:
                 btn = container.findChild(QPushButton)
                 if btn: btn.setProperty("fit_id", fid)
 
-        # 3. Swap Visual Values
-        def swap_combo(c):
-            w1 = self.fit_table.cellWidget(r1, c)
-            w2 = self.fit_table.cellWidget(r2, c)
+        # 4. Swap Visual Values with Signal Blocking
+        def safe_swap_combo(col_idx):
+            w1 = self.fit_table.cellWidget(r1, col_idx)
+            w2 = self.fit_table.cellWidget(r2, col_idx)
+            if not w1 or not w2: return
+            
             t1, t2 = w1.currentText(), w2.currentText()
+            
+            w1.blockSignals(True)
+            w2.blockSignals(True)
             w1.setCurrentText(t2)
             w2.setCurrentText(t1)
+            w1.blockSignals(False)
+            w2.blockSignals(False)
+
+        safe_swap_combo(1) # Plot Combo (Source)
         
-        swap_combo(1) # Plot Combo
-        swap_combo(2) # Type Combo
-        swap_combo(6) # Style Combo
+        # Type Combo Swap with Safety Check
+        w_type1 = self.fit_table.cellWidget(r1, 2)
+        w_type2 = self.fit_table.cellWidget(r2, 2)
+        if w_type1 and w_type2:
+            t1, t2 = w_type1.currentText(), w_type2.currentText()
+            
+            w_type1.blockSignals(True)
+            w_type2.blockSignals(True)
+            
+            # Ensure target combos HAVE the item we are about to set.
+            # If we swap "Mean" into a combo that only has ["Off", "Orig"], setCurrentText fails.
+            # We add it temporarily; update_plots will clean it up immediately after.
+            if w_type1.findText(t2) == -1: w_type1.addItem(t2)
+            if w_type2.findText(t1) == -1: w_type2.addItem(t1)
+            
+            w_type1.setCurrentText(t2)
+            w_type2.setCurrentText(t1)
+            
+            w_type1.blockSignals(False)
+            w_type2.blockSignals(False)
+
+        safe_swap_combo(6) # Style Combo
         
         # Swap Button Text
         btn1 = self.fit_table.cellWidget(r1, 3)
         btn2 = self.fit_table.cellWidget(r2, 3)
-        txt1, txt2 = btn1.text(), btn2.text()
-        btn1.setText(txt2)
-        btn2.setText(txt1)
+        if btn1 and btn2:
+            txt1, txt2 = btn1.text(), btn2.text()
+            btn1.setText(txt2)
+            btn2.setText(txt1)
         
         # Swap Error Label Text
         lbl1 = self.fit_table.cellWidget(r1, 4)
         lbl2 = self.fit_table.cellWidget(r2, 4)
-        txt1, txt2 = lbl1.text(), lbl2.text()
-        lbl1.setText(txt2)
-        lbl2.setText(txt1)
+        if lbl1 and lbl2:
+            txt1, txt2 = lbl1.text(), lbl2.text()
+            lbl1.setText(txt2)
+            lbl2.setText(txt1)
         
         # Swap Colors
         col1 = self.fit_table.cellWidget(r1, 5)
         col2 = self.fit_table.cellWidget(r2, 5)
-        c1, c2 = col1.color(), col2.color()
-        col1.set_color(c2)
-        col2.set_color(c1)
+        if col1 and col2:
+            c1, c2 = col1.color(), col2.color()
+            col1.blockSignals(True)
+            col2.blockSignals(True)
+            col1.set_color(c2)
+            col2.set_color(c1)
+            col1.blockSignals(False)
+            col2.blockSignals(False)
         
         # Swap Thickness
-        thk1 = self.fit_table.cellWidget(r1, 7).findChild(QLineEdit)
-        thk2 = self.fit_table.cellWidget(r2, 7).findChild(QLineEdit)
-        v1, v2 = thk1.text(), thk2.text()
-        thk1.setText(v2)
-        thk2.setText(v1)
+        thk1_w = self.fit_table.cellWidget(r1, 7)
+        thk2_w = self.fit_table.cellWidget(r2, 7)
+        if thk1_w and thk2_w:
+            le1 = thk1_w.findChild(QLineEdit)
+            le2 = thk2_w.findChild(QLineEdit)
+            if le1 and le2:
+                v1, v2 = le1.text(), le2.text()
+                le1.blockSignals(True)
+                le2.blockSignals(True)
+                le1.setText(v2)
+                le2.setText(v1)
+                le1.blockSignals(False)
+                le2.blockSignals(False)
 
         self.fit_table.blockSignals(False)
         self.update_plots()
@@ -2256,6 +2309,37 @@ class LogPlotPanel(QWidget):
         if row_to_delete < 0:
             return
 
+        # Detach Fits
+        # 1. Get the ID of the plot being deleted
+        item = self.plot_table.item(row_to_delete, 1)
+        # We need the ID (UserRole + 1) to reliably identify the plot
+        deleted_plot_id = item.data(Qt.ItemDataRole.UserRole + 1) if item else None
+
+        # 2. Update Fit Table: Detach any fit using this Source ID
+        if deleted_plot_id is not None and self.fit_table.rowCount() > 0:
+            for r in range(self.fit_table.rowCount()):
+                source_combo = self.fit_table.cellWidget(r, 1)
+                if not source_combo: continue
+                
+                # The combo holds the plot_id in the UserRole data
+                current_source_id = source_combo.currentData() 
+                
+                if current_source_id == deleted_plot_id:
+                    # Turn Fit Type to "Off"
+                    type_combo = self.fit_table.cellWidget(r, 2)
+                    if type_combo:
+                        type_combo.blockSignals(True)
+                        type_combo.setCurrentText("Off")
+                        type_combo.blockSignals(False)
+                    
+                    # Detach (Clear selection visually)
+                    # When update_plots runs later, this item will naturally disappear 
+                    # from the dropdown because it's removed from options, 
+                    # but setting index -1 ensures it's clean immediately.
+                    source_combo.blockSignals(True)
+                    source_combo.setCurrentIndex(-1) 
+                    source_combo.blockSignals(False)
+
         self.plot_table.removeRow(row_to_delete)
 
         # After removing, if the table is now empty, add a new default row.
@@ -2363,6 +2447,7 @@ class LogPlotPanel(QWidget):
             'axes_lock': self.lock_axes_btn.isChecked(),
             'view_ranges': self.plot_controller.get_view_ranges(),
             'fit_table_visible': self.fit_table_visible,
+            'selected_row': self.plot_table.currentRow(),
             'plots': [],
             'fits': []
         }
@@ -2373,6 +2458,7 @@ class LogPlotPanel(QWidget):
             if item:
                 full_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
                 plot_info = {
+                    'id': item.data(Qt.ItemDataRole.UserRole + 1),
                     'name': full_name,
                     'show': self.plot_table.cellWidget(row, 2).findChild(QCheckBox).isChecked(),
                     'mean': self.plot_table.cellWidget(row, 3).findChild(QLineEdit).text(),
@@ -2470,9 +2556,17 @@ class LogPlotPanel(QWidget):
                 # Restore Plots
                 self.plot_table.setRowCount(0)
                 self.next_plot_id = 0
+                max_loaded_id = -1 # Track the highest ID found
                 for plot_info in config.get('plots', []):
                     row = self.plot_table.rowCount()
                     self.plot_table.insertRow(row)
+                    
+                    # Use saved ID or fallback to current counter
+                    saved_id = plot_info.get('id', self.next_plot_id)
+                    
+                    # Update max tracker
+                    if isinstance(saved_id, int) and saved_id > max_loaded_id:
+                        max_loaded_id = saved_id
                     
                     plot_data = {
                         'plot_name': plot_info.get('name', "N/A | N/A | N/A | N/A"),
@@ -2482,17 +2576,30 @@ class LogPlotPanel(QWidget):
                         'color': plot_info.get('color', QColor("black").name()),
                         'style': plot_info.get('style', "Solid"),
                         'thickness': plot_info.get('thickness', "1"),
-                        'plot_id': self.next_plot_id
+                        'plot_id': self.next_plot_id,
+                        'plot_id': saved_id # <--- Use the determined ID
                     }
-                    self.next_plot_id += 1
+                    # Only increment local counter if we fell back to it
+                    if 'id' not in plot_info:
+                        self.next_plot_id += 1
                     self._populate_row_data(row, plot_data)
                 
                 if self.plot_table.rowCount() > 0:
                     self.plot_table.selectRow(0)
+                    
+                # Ensure future IDs don't collide
+                self.next_plot_id = max(self.next_plot_id, max_loaded_id + 1)
 
                 self._update_all_row_displays()
                 self._update_move_buttons_visibility()
                 self._update_plot_labels()
+                
+                # Restore Selection
+                saved_row = config.get('selected_row', 0)
+                if saved_row >= 0 and saved_row < self.plot_table.rowCount():
+                    self.plot_table.selectRow(saved_row)
+                elif self.plot_table.rowCount() > 0:
+                    self.plot_table.selectRow(0)
                 
                 # Restore Fits
                 # First clear existing fits and reset state

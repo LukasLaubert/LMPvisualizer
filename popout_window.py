@@ -1,14 +1,17 @@
 # lmp_visualizer/popout_window.py
 
+import os
 import sys
 import copy
+import json
 import shutil
 import numpy as np
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QDockWidget, QScrollArea, QFormLayout, QLabel, 
                              QLineEdit, QCheckBox, QComboBox, QSpinBox, 
                              QDoubleSpinBox, QGroupBox, QPushButton, QColorDialog, 
-                             QFrame, QSizePolicy, QMessageBox, QToolBar)
+                             QFrame, QSizePolicy, QMessageBox, QToolBar,
+                             QDialog, QDialogButtonBox, QFileDialog)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics
 
@@ -138,20 +141,23 @@ class LinePropertiesWidget(QGroupBox):
         return props
 
 class PopOutWindow(QMainWindow):
+    # Static class variable to store LaTeX state across different popout instances
+    # within the same application session. Resets to False when app restarts.
+    _session_latex_enabled = False
+
     def __init__(self, plot_state_data, parent=None, figsize=None):
         super().__init__(parent)
         self.setWindowTitle("Plot Inspector")
-        self.resize(1100, 650) # Slightly wider default
+        self.resize(1100, 650) 
         
         self.plot_data = copy.deepcopy(plot_state_data)
         self.line_widgets = {} 
-        self.initial_figsize = figsize # Tuple (width_in, height_in)
+        self.initial_figsize = figsize 
         
         self._init_ui()
         
         self.canvas.mpl_connect('resize_event', self.on_canvas_resize)
         
-        # If initial size provided, apply it immediately
         if self.initial_figsize:
             self._apply_initial_figsize(self.initial_figsize)
         else:
@@ -177,6 +183,7 @@ class PopOutWindow(QMainWindow):
         self.scroll_content = QWidget()
         self.form_layout = QVBoxLayout(self.scroll_content)
         
+        # UI Setup
         self._init_global_settings()
         self._init_font_settings()
         self._init_axis_settings()
@@ -193,6 +200,10 @@ class PopOutWindow(QMainWindow):
         self.dock_layout.addWidget(self.scroll)
         self.dock.setWidget(self.dock_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
+
+        # Apply session state LAST, after all widgets (like font_title_spin) exist.
+        # This triggers on_latex_toggled -> redraw_plot safely.
+        self.latex_check.setChecked(PopOutWindow._session_latex_enabled)
 
     def _init_global_settings(self):
         group = QGroupBox("Global Settings")
@@ -240,7 +251,7 @@ class PopOutWindow(QMainWindow):
         self.title_edit.setMaximumWidth(160)
         layout.addRow("Title:", self.title_edit)
 
-        self.latex_check = QCheckBox("Use LaTeX")
+        self.latex_check = QCheckBox("Use LaTeX (slow...)")
         self.latex_check.toggled.connect(self.on_latex_toggled)
         layout.addRow(self.latex_check)
 
@@ -264,14 +275,14 @@ class PopOutWindow(QMainWindow):
 
         self.font_label_spin = QSpinBox()
         self.font_label_spin.setRange(6, 72)
-        self.font_label_spin.setValue(10)
+        self.font_label_spin.setValue(11)
         self.font_label_spin.valueChanged.connect(self.redraw_plot)
         self.font_label_spin.setFixedWidth(70)
         layout.addRow("Axis Labels:", self.font_label_spin)
 
         self.font_tick_spin = QSpinBox()
         self.font_tick_spin.setRange(6, 72)
-        self.font_tick_spin.setValue(10)
+        self.font_tick_spin.setValue(11)
         self.font_tick_spin.valueChanged.connect(self.redraw_plot)
         self.font_tick_spin.setFixedWidth(70)
         layout.addRow("Tick Labels:", self.font_tick_spin)
@@ -462,27 +473,145 @@ class PopOutWindow(QMainWindow):
             self.canvas.draw_idle()
             self.update_size_display()
 
+    def _get_global_config_path(self):
+        """Returns path to the global configuration JSON."""
+        config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
+        os.makedirs(config_dir, exist_ok=True)
+        return os.path.join(config_dir, 'global_config.json')
+
+    def _load_latex_paths(self):
+        """Loads latex paths from global config."""
+        path = self._get_global_config_path()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    return data.get('tex_path', ''), data.get('gs_path', '')
+            except:
+                pass
+        return "", ""
+
+    def _save_latex_paths(self, tex_path, gs_path):
+        """Saves latex paths to global config."""
+        config_path = self._get_global_config_path()
+        data = {}
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    data = json.load(f)
+            except:
+                pass
+        
+        data['tex_path'] = tex_path
+        data['gs_path'] = gs_path
+        
+        with open(config_path, 'w') as f:
+            json.dump(data, f, indent=4)
+
+    def _update_system_path(self, tex_path, gs_path):
+        """Temporarily updates os.environ['PATH'] for this process."""
+        current_path = os.environ['PATH']
+        paths_to_add = []
+        
+        if tex_path and tex_path not in current_path:
+            paths_to_add.append(tex_path)
+        if gs_path and gs_path not in current_path:
+            paths_to_add.append(gs_path)
+            
+        if paths_to_add:
+            # Prepend to ensure our custom paths take precedence
+            os.environ['PATH'] = os.pathsep.join(paths_to_add + [current_path])
+
+    def check_requirements(self):
+        """Checks if latex, dvipng, and gs are available."""
+        # Note: We check specifically for what matplotlib typically needs
+        # On Windows, gs might be gswin64c, but shutil.which('gs') often fails if not aliased.
+        # However, Matplotlib handles the internal name check if the DIR is in path.
+        reqs = ['latex', 'dvipng', 'gs']
+        
+        # If on windows, ghostscript might be strictly named gswin64c or gswin32c
+        if sys.platform.startswith('win'):
+            # This is a loose check. If the GS folder is in path, we assume it's good.
+            # Matplotlib internals are complex here, but checking for latex is the main gatekeeper.
+            if shutil.which('gswin64c') or shutil.which('gswin32c'):
+                reqs.remove('gs')
+                
+        missing = [tool for tool in reqs if shutil.which(tool) is None]
+        return missing
+
     def on_latex_toggled(self, checked):
-        if checked:
-            reqs = ['latex', 'dvipng', 'gs']
-            missing = [tool for tool in reqs if shutil.which(tool) is None]
-            if missing:
-                QMessageBox.warning(self, "LaTeX Requirements Missing", 
-                    f"Missing: {', '.join(missing)}\nInstall TeX Live/MiKTeX and Ghostscript.")
+        # Update session state for future windows
+        PopOutWindow._session_latex_enabled = checked
+
+        if not checked:
+            # Disable LaTeX and revert to standard Matplotlib sans-serif font
+            plt.rcParams['text.usetex'] = False
+            plt.rcParams['font.family'] = 'sans-serif'
+            plt.rcParams['font.serif'] = ['DejaVu Serif']
+            plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+            self.redraw_plot()
+            return
+
+        # 1. Load saved paths and apply them to environment
+        saved_tex, saved_gs = self._load_latex_paths()
+        self._update_system_path(saved_tex, saved_gs)
+
+        # 2. Check availability
+        missing = self.check_requirements()
+
+        # 3. If missing, prompt user
+        if missing:
+            dialog = LatexConfigDialog(self, saved_tex, saved_gs)
+            if dialog.exec():
+                new_tex, new_gs = dialog.get_paths()
+                
+                # Update Environment immediately
+                self._update_system_path(new_tex, new_gs)
+                
+                # Save for future
+                self._save_latex_paths(new_tex, new_gs)
+                
+                # Check again
+                missing_retry = self.check_requirements()
+                if missing_retry:
+                    QMessageBox.warning(self, "Still Missing Requirements", 
+                        f"Could not find: {', '.join(missing_retry)}\n"
+                        "Please ensure the directories point to the folder containing the executables.")
+                    self.latex_check.blockSignals(True)
+                    self.latex_check.setChecked(False)
+                    self.latex_check.blockSignals(False)
+                    PopOutWindow._session_latex_enabled = False
+                    return
+            else:
+                # User cancelled dialog
                 self.latex_check.blockSignals(True)
                 self.latex_check.setChecked(False)
                 self.latex_check.blockSignals(False)
+                PopOutWindow._session_latex_enabled = False
                 return
 
+        # 4. Try enabling Matplotlib LaTeX with Computer Modern Fonts
         try:
-            plt.rcParams['text.usetex'] = checked
+            plt.rcParams['text.usetex'] = True
+            
+            # FORCE FONT TO SERIF (Computer Modern Roman)
+            plt.rcParams['font.family'] = 'serif'
+            plt.rcParams['font.serif'] = ['Computer Modern Roman']
+            
+            # Optional: If you want sans-serif to also look 'Latexy' (Computer Modern Sans)
+            # plt.rcParams['font.sans-serif'] = ['Computer Modern Sans serif']
+            
             self.redraw_plot()
         except Exception as e:
-            QMessageBox.warning(self, "LaTeX Error", f"Error enabling LaTeX:\n{e}")
+            QMessageBox.warning(self, "LaTeX Error", f"Error enabling LaTeX:\n{e}\n\nMake sure Ghostscript and MikTeX/TeXLive are installed correctly.")
             self.latex_check.blockSignals(True)
             self.latex_check.setChecked(False)
             self.latex_check.blockSignals(False)
+            
+            # Revert settings on error
+            PopOutWindow._session_latex_enabled = False
             plt.rcParams['text.usetex'] = False
+            plt.rcParams['font.family'] = 'sans-serif'
             self.redraw_plot()
 
     def redraw_plot(self):
@@ -713,3 +842,59 @@ class PopOutWindow(QMainWindow):
         self.height_spin.setValue(h_val)
         self.width_spin.blockSignals(False)
         self.height_spin.blockSignals(False)
+
+class LatexConfigDialog(QDialog):
+    def __init__(self, parent=None, current_tex="", current_gs=""):
+        super().__init__(parent)
+        self.setWindowTitle("LaTeX Configuration")
+        self.resize(500, 200)
+        
+        layout = QVBoxLayout(self)
+        
+        info_label = QLabel(
+            "LaTeX or Ghostscript binaries were not found in your PATH.\n"
+            "Please specify the <b>directories</b> containing the executables."
+        )
+        layout.addWidget(info_label)
+        
+        # Form Layout for inputs
+        form_layout = QFormLayout()
+        
+        # LaTeX Path
+        self.tex_edit = QLineEdit(current_tex)
+        self.tex_btn = QPushButton("Browse")
+        self.tex_btn.clicked.connect(lambda: self.browse_folder(self.tex_edit))
+        tex_box = QHBoxLayout()
+        tex_box.addWidget(self.tex_edit)
+        tex_box.addWidget(self.tex_btn)
+        form_layout.addRow("TeX/LaTeX Bin Folder:", tex_box)
+        
+        # Ghostscript Path
+        self.gs_edit = QLineEdit(current_gs)
+        self.gs_btn = QPushButton("Browse")
+        self.gs_btn.clicked.connect(lambda: self.browse_folder(self.gs_edit))
+        gs_box = QHBoxLayout()
+        gs_box.addWidget(self.gs_edit)
+        gs_box.addWidget(self.gs_btn)
+        form_layout.addRow("Ghostscript Bin Folder:", gs_box)
+        
+        layout.addLayout(form_layout)
+        
+        # Note
+        note = QLabel("<i>Note: Point to the folder containing 'latex.exe' or 'gswin64c.exe'.</i>")
+        note.setStyleSheet("color: #666;")
+        layout.addWidget(note)
+        
+        # Buttons
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def browse_folder(self, line_edit):
+        folder = QFileDialog.getExistingDirectory(self, "Select Binary Directory", line_edit.text())
+        if folder:
+            line_edit.setText(folder)
+
+    def get_paths(self):
+        return self.tex_edit.text().strip(), self.gs_edit.text().strip()
