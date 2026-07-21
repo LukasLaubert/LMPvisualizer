@@ -106,6 +106,26 @@ class MainWindow(QMainWindow):
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         
+        # Add the new horizontal layout for the three checkmarks and number field
+        processing_options_layout = QHBoxLayout()
+        
+        self.original_values_checkbox = QCheckBox("Original values")
+        self.original_values_checkbox.setChecked(True)  # Default to checked
+        processing_options_layout.addWidget(self.original_values_checkbox)
+        
+        self.running_mean_checkbox = QCheckBox("Running mean")
+        processing_options_layout.addWidget(self.running_mean_checkbox)
+        
+        self.running_mean_field = QLineEdit("100")
+        self.running_mean_field.setMaximumWidth(60)
+        processing_options_layout.addWidget(self.running_mean_field)
+        
+        self.running_mean_std_checkbox = QCheckBox("Running mean std")
+        processing_options_layout.addWidget(self.running_mean_std_checkbox)
+        
+        processing_options_layout.addStretch()  # Add stretch to fill remaining space
+        right_layout.addLayout(processing_options_layout)
+        
         self.std_checkbox = QCheckBox("Compute std")
         right_layout.addWidget(self.std_checkbox)
 
@@ -149,6 +169,10 @@ class MainWindow(QMainWindow):
         self.xaxis_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
         self.yaxis_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
         
+        self.original_values_checkbox.stateChanged.connect(self.update_plots)
+        self.running_mean_checkbox.stateChanged.connect(self.update_plots)
+        self.running_mean_field.textChanged.connect(self.update_plots)
+        self.running_mean_std_checkbox.stateChanged.connect(self.update_plots)
         self.std_checkbox.stateChanged.connect(self.update_plots)
         self.add_btn.clicked.connect(self.add_new_plot_row)
         self.save_btn.clicked.connect(self.save_session)
@@ -407,6 +431,8 @@ class MainWindow(QMainWindow):
                 continue
 
         # Step 2: Create all plots and their axes
+        # First, collect all the original plot data and add original plots
+        processed_plot_data = []
         for plot_info in visible_plots_info:
             user_choices = None
             if plot_info['system'] == 'average':
@@ -425,10 +451,144 @@ class MainWindow(QMainWindow):
             
             if data:
                 data['y_col'] = plot_info['y_ax']
-                self.plot_controller.add_or_update_plot(plot_info['plot_name'], data, plot_info['color'], plot_info['style'])
+                
+                # Process data based on new checkboxes
+                # Get the running mean window size from the field
+                try:
+                    running_mean_window = int(self.running_mean_field.text())
+                    if running_mean_window <= 0:
+                        running_mean_window = 1  # Minimum window size
+                except ValueError:
+                    running_mean_window = 100  # Default value if conversion fails
+                
+                # Create a copy of original data for processing
+                original_x = data['x'].copy() if hasattr(data['x'], 'copy') else data['x']
+                original_y = data['y'].copy() if hasattr(data['y'], 'copy') else data['y']
+                
+                # Add original values if checkbox is checked
+                if self.original_values_checkbox.isChecked():
+                    self.plot_controller.add_or_update_plot(plot_info['plot_name'], data, plot_info['color'], plot_info['style'])
+                
+                # Store processed data for running mean and running mean std calculation if needed
+                if self.running_mean_checkbox.isChecked() or self.running_mean_std_checkbox.isChecked():
+                    running_mean_y = self._calculate_running_mean(original_y, running_mean_window)
+                    running_mean_x = original_x[:len(running_mean_y)]  # Adjust x to match new y length
+                    running_std = self._calculate_running_std(original_y, running_mean_window) if self.running_mean_std_checkbox.isChecked() else None
+                    
+                    processed_plot_data.append({
+                        'plot_info': plot_info,
+                        'running_mean_x': running_mean_x,
+                        'running_mean_y': running_mean_y,
+                        'running_std': running_std,
+                        'original_color': plot_info['color']
+                    })
+
+        # After all original plots are added, add running mean std plots (in front of originals but behind running mean)
+        for plot_data in processed_plot_data:
+            plot_info = plot_data['plot_info']
+            running_mean_x = plot_data['running_mean_x']
+            running_mean_y = plot_data['running_mean_y']
+            running_std = plot_data['running_std']
+            original_color = plot_data['original_color']
+            
+            # Add running mean std if checkbox is checked
+            if self.running_mean_std_checkbox.isChecked() and running_std is not None:
+                running_mean_std_data = {
+                    'x': running_mean_x,
+                    'y': running_mean_y,
+                    'std': running_std[:len(running_mean_y)],
+                    'y_col': plot_info['y_ax']
+                }
+                
+                # Set std band color to 2/3 saturation with 50% opacity and 50% value
+                std_color = QColor(original_color)
+                h, s, v, a = std_color.getHsv()
+                std_color.setHsv(h, int(s * (2.0/3.0)), int(v * 0.5), int(a * 0.5))  # 2/3 saturation, 50% value, 50% opacity
+                
+                self.plot_controller.add_or_update_plot_with_custom_colors(
+                    plot_info['plot_name'] + "_running_mean_std", 
+                    running_mean_std_data, 
+                    std_color, 
+                    plot_info['style'],
+                    layer_priority=1  # In front of original values but behind running mean
+                )
+        
+        # Finally, add running mean plots (in front of everything else)
+        for plot_data in processed_plot_data:
+            plot_info = plot_data['plot_info']
+            running_mean_x = plot_data['running_mean_x']
+            running_mean_y = plot_data['running_mean_y']
+            original_color = plot_data['original_color']
+            
+            # Add running mean curve if checkbox is checked
+            if self.running_mean_checkbox.isChecked():
+                # Create data for running mean with half the value of original color
+                mean_color = QColor(original_color)
+                mean_color.setHsvF(
+                    mean_color.hueF(), 
+                    mean_color.saturationF(), 
+                    mean_color.valueF() * 0.5,  # Half the value (brightness)
+                    mean_color.alphaF()
+                )
+                
+                running_mean_data = {
+                    'x': running_mean_x,
+                    'y': running_mean_y,
+                    'std': None,  # std will be handled by std band if needed
+                    'y_col': plot_info['y_ax']
+                }
+                
+                # Add running mean curve in front of original and std band
+                self.plot_controller.add_or_update_plot_with_custom_colors(
+                    plot_info['plot_name'] + "_running_mean", 
+                    running_mean_data, 
+                    mean_color, 
+                    plot_info['style'],
+                    layer_priority=2  # In front of both original and std band
+                )
 
         # Step 3: Update axis labels and apply conditional coloring
         self._update_axis_properties(visible_plots_info)
+
+
+    def _calculate_running_mean(self, data, window_size):
+        """Calculate the running mean of data with specified window size using centered average."""
+        if len(data) == 0:
+            return data
+        
+        import numpy as np
+        data = np.array(data)
+        result = np.zeros_like(data, dtype=float)
+        
+        # Use a centered average approach: average from [i - window_size//2, i + window_size//2] for each position i
+        half_window = window_size // 2
+        
+        for i in range(len(data)):
+            start_idx = max(0, i - half_window)
+            end_idx = min(len(data), i + half_window + 1)  # +1 because slicing is exclusive on the right
+            result[i] = np.mean(data[start_idx:end_idx])
+        
+        return result
+
+
+    def _calculate_running_std(self, data, window_size):
+        """Calculate the running standard deviation of data with specified window size using centered approach."""
+        if len(data) == 0:
+            return data
+        
+        import numpy as np
+        data = np.array(data)
+        result = np.zeros_like(data, dtype=float)
+        
+        # Use a centered standard deviation approach: std from [i - window_size//2, i + window_size//2] for each position i
+        half_window = window_size // 2
+        
+        for i in range(len(data)):
+            start_idx = max(0, i - half_window)
+            end_idx = min(len(data), i + half_window + 1)  # +1 because slicing is exclusive on the right
+            result[i] = np.std(data[start_idx:end_idx])
+        
+        return result
 
     def _update_axis_properties(self, visible_plots_info):
         x_label = ""

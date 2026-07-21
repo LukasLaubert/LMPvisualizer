@@ -25,21 +25,26 @@ class ColorButton(QPushButton):
         return self._color
 
     def on_click(self):
+        # Save the original style to restore if the dialog is cancelled
         original_style = self.styleSheet()
-        try:
-            self.setStyleSheet("") # Temporarily clear style to prevent inheritance
-            
-            dialog = QColorDialog(self)
-            dialog.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
-            dialog.setCurrentColor(self._color)
-            
-            if dialog.exec():
-                new_color = dialog.selectedColor()
-                if new_color.isValid():
-                    self.set_color(new_color)
-        finally:
-            # Always restore the original style
-            self.setStyleSheet(original_style)
+        
+        # Temporarily clear style to prevent inheritance
+        self.setStyleSheet("")
+        
+        dialog = QColorDialog(self)
+        dialog.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+        dialog.setCurrentColor(self._color)
+        
+        if dialog.exec():
+            new_color = dialog.selectedColor()
+            if new_color.isValid():
+                self.set_color(new_color)  # This sets the new color and style
+            else:
+                # If dialog was cancelled, restore the original color's style
+                self.setStyleSheet(f"background-color: {self._color.name()};")
+        else:
+            # If dialog was cancelled, restore the original color's style
+            self.setStyleSheet(f"background-color: {self._color.name()};")
 
 class InconsistentDataDialog(QDialog):
     """Dialog to resolve averaging of data with different lengths."""

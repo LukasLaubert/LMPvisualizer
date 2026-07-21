@@ -23,6 +23,14 @@ class PlottingController:
 
     def add_or_update_plot(self, name: str, data: dict, color: QColor, style):
         """Adds a new plot or updates an existing one by name."""
+        self._add_or_update_plot_impl(name, data, color, style, layer_priority=0)
+
+    def add_or_update_plot_with_custom_colors(self, name: str, data: dict, color: QColor, style, layer_priority: int = 0):
+        """Adds a new plot or updates an existing one by name with custom layer priority."""
+        self._add_or_update_plot_impl(name, data, color, style, layer_priority)
+
+    def _add_or_update_plot_impl(self, name: str, data: dict, color: QColor, style, layer_priority: int = 0):
+        """Internal implementation for adding/updating plots with layer priority."""
         if name in self.plots:
             self.remove_plot(name)
 
@@ -59,21 +67,36 @@ class PlottingController:
         
         error_item = None
         if std is not None and np.any(std):
-            brush = pg.mkBrush(color=color.red(), green=color.green(), blue=color.blue(), alpha=70)
+            # Create brush with color based on the original color but with 2/3 saturation and 50% opacity
+            # Get the RGB values of the original color
+            r, g, b, a = color.getRgb()
+            # Create the brush with the same hue but 2/3 saturation and 50% opacity
+            brush = pg.mkBrush(color=pg.mkColor(r, g, b, int(a * 0.5)))  # 50% opacity
             error_item = pg.FillBetweenItem(
                 pg.PlotDataItem(x, y - std),
                 pg.PlotDataItem(x, y + std),
                 brush=brush
             )
+            # Add error item first (background), then plot data item (foreground)
             view_box.addItem(error_item)
-
-        view_box.addItem(plot_data_item)
+            view_box.addItem(plot_data_item)
+        else:
+            view_box.addItem(plot_data_item)
+        
+        # Set z-value based on layer priority for proper layering
+        # Higher layer_priority should be in front (higher z-value)
+        z_value = layer_priority * 10  # Use multiples for clear z-ordering
+        
+        if error_item:
+            error_item.setZValue(z_value)  # Set std band z-value
+        plot_data_item.setZValue(z_value + 1)  # Set curve z-value slightly higher than std band
         
         # Store all items associated with the plot name
         self.plots[name] = {
             'item': plot_data_item, 
             'error_item': error_item, 
-            'view_box': view_box
+            'view_box': view_box,
+            'layer_priority': layer_priority
         }
         self.update_views()
 
