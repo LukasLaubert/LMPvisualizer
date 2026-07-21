@@ -677,10 +677,10 @@ class DSDTableWidget(QTableWidget):
     def __init__(self, panel_ref=None, parent=None):
         super().__init__(parent)
         self.panel = panel_ref 
-        self.setColumnCount(6)
+        self.setColumnCount(7)
         
         # Bold Header
-        header_labels = ["↕", "Plot", "Color", "Style", "Size", "Del"]
+        header_labels = ["↕", "Plot", "✅", "Color", "Style", "Size", "Del"]
         self.setHorizontalHeaderLabels(header_labels) 
         
         font = self.horizontalHeader().font()
@@ -691,16 +691,18 @@ class DSDTableWidget(QTableWidget):
         # Matched to LogPlotPanel style
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed) # Arrows
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch) # Plot Name
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed) # Color
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed) # Style
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed) # Size
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed) # Del
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed) # Show
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed) # Color
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed) # Style
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed) # Size
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed) # Del
         
         self.setColumnWidth(0, 25)
-        self.setColumnWidth(2, 50)
-        self.setColumnWidth(3, 50) 
-        self.setColumnWidth(4, 35)
-        self.setColumnWidth(5, 30)
+        self.setColumnWidth(2, 25)
+        self.setColumnWidth(3, 35) 
+        self.setColumnWidth(4, 50) 
+        self.setColumnWidth(5, 35)
+        self.setColumnWidth(6, 30)
         
         self.verticalHeader().hide()
         self.opt_line_row = -1 # Track optimal line position
@@ -757,27 +759,42 @@ class DSDTableWidget(QTableWidget):
             btn = QPushButton(name)
             btn.clicked.connect(lambda: self._handle_edit_click(btn))
             self.setCellWidget(row, 1, btn)
+
+        # Col 2: Show Checkbox
+        chk_show = QCheckBox()
+        # Explicitly center the checkbox
+        chk_show.setStyleSheet("margin-left: 5px; margin-right: 5px;")
+        chk_show.setChecked(settings.get('show', True))
+        chk_show.toggled.connect(lambda checked: self._on_show_toggled(chk_show, checked))
+        
+        # Container to center it nicely
+        chk_container = QWidget()
+        chk_layout = QHBoxLayout(chk_container)
+        chk_layout.setContentsMargins(0,0,0,0)
+        chk_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        chk_layout.addWidget(chk_show)
+        self.setCellWidget(row, 2, chk_container)
             
-        # Col 2: Color
+        # Col 3: Color
         color_btn = ColorButton(QColor(settings.get('color', 'black')))
         color_btn.colorChanged.connect(lambda: self._on_color_changed(color_btn))
-        self.setCellWidget(row, 2, color_btn)
+        self.setCellWidget(row, 3, color_btn)
         
-        # Col 3: Style
+        # Col 4: Style
         style_combo = QComboBox()
         style_combo.addItems(["Dots", "o", "x", "+", "d", "s", "t", "p", "h", "star", "-", "--", ".-"])
         style_combo.setCurrentText(settings.get('style', 'Dots'))
         style_combo.currentTextChanged.connect(lambda t: self._on_style_changed(style_combo, t))
-        self.setCellWidget(row, 3, style_combo)
+        self.setCellWidget(row, 4, style_combo)
         
-        # Col 4: Size
+        # Col 5: Size
         size_edit = QLineEdit(str(settings.get('size', '3')))
         size_edit.setValidator(QIntValidator(1, 100))
         size_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         size_edit.textChanged.connect(lambda t: self._on_size_changed(size_edit, t))
-        self.setCellWidget(row, 4, size_edit)
+        self.setCellWidget(row, 5, size_edit)
         
-        # Col 5: Del
+        # Col 6: Del
         del_btn = QPushButton("X")
         del_btn.setStyleSheet("color: red; font-weight: bold;")
         del_btn.clicked.connect(lambda: self._delete_row(del_btn))
@@ -787,10 +804,11 @@ class DSDTableWidget(QTableWidget):
         del_layout.setContentsMargins(0,0,0,0)
         del_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         del_layout.addWidget(del_btn)
-        self.setCellWidget(row, 5, del_container)
+        self.setCellWidget(row, 6, del_container)
         
         # Store settings in hidden item 0
         settings['is_optimal_line'] = is_optimal_line
+        settings['show'] = settings.get('show', True) # Ensure 'show' is present
         dummy = QTableWidgetItem()
         dummy.setData(Qt.ItemDataRole.UserRole, settings)
         self.setItem(row, 0, dummy)
@@ -842,65 +860,98 @@ class DSDTableWidget(QTableWidget):
         if r1 == self.opt_line_row or r2 == self.opt_line_row:
             return
             
-        # 1. Swap Data
-        item1 = self.item(r1, 0)
-        item2 = self.item(r2, 0)
-        data1 = item1.data(Qt.ItemDataRole.UserRole)
-        data2 = item2.data(Qt.ItemDataRole.UserRole)
-        item1.setData(Qt.ItemDataRole.UserRole, data2)
-        item2.setData(Qt.ItemDataRole.UserRole, data1)
-        
-        # 2. Swap Widgets
-        # Name/Edit (Col 1)
-        w1 = self.cellWidget(r1, 1)
-        w2 = self.cellWidget(r2, 1)
-        
-        if isinstance(w1, QPushButton) and isinstance(w2, QPushButton):
-            t1 = w1.text()
-            w1.setText(w2.text())
-            w2.setText(t1)
+        was_blocked = self.blockSignals(True)
+        try:
+            # 1. Swap Data
+            item1 = self.item(r1, 0)
+            item2 = self.item(r2, 0)
+            data1 = item1.data(Qt.ItemDataRole.UserRole)
+            data2 = item2.data(Qt.ItemDataRole.UserRole)
+            item1.setData(Qt.ItemDataRole.UserRole, data2)
+            item2.setData(Qt.ItemDataRole.UserRole, data1)
             
-        # Color (Col 2)
-        c1 = self.cellWidget(r1, 2)
-        c2 = self.cellWidget(r2, 2)
-        col1 = c1.color()
-        col2 = c2.color()
-        c1.blockSignals(True)
-        c2.blockSignals(True)
-        c1.set_color(col2)
-        c2.set_color(col1)
-        c1.blockSignals(False)
-        c2.blockSignals(False)
-        
-        # Style (Col 3)
-        s1 = self.cellWidget(r1, 3)
-        s2 = self.cellWidget(r2, 3)
-        st1 = s1.currentText()
-        st2 = s2.currentText()
-        s1.blockSignals(True)
-        s2.blockSignals(True)
-        s1.setCurrentText(st2)
-        s2.setCurrentText(st1)
-        s1.blockSignals(False)
-        s2.blockSignals(False)
-        
-        # Size (Col 4)
-        sz1 = self.cellWidget(r1, 4)
-        sz2 = self.cellWidget(r2, 4)
-        siz1 = sz1.text()
-        siz2 = sz2.text()
-        sz1.blockSignals(True)
-        sz2.blockSignals(True)
-        sz1.setText(siz2)
-        sz2.setText(siz1)
-        sz1.blockSignals(False)
-        sz2.blockSignals(False)
+            # 2. Swap Widgets
+            # Name/Edit (Col 1)
+            w1 = self.cellWidget(r1, 1)
+            w2 = self.cellWidget(r2, 1)
+            
+            if isinstance(w1, QPushButton) and isinstance(w2, QPushButton):
+                t1 = w1.text()
+                w1.setText(w2.text())
+                w2.setText(t1)
+
+            # Show (Col 2)
+            c1_container = self.cellWidget(r1, 2)
+            c2_container = self.cellWidget(r2, 2)
+            chk1 = c1_container.findChild(QCheckBox)
+            chk2 = c2_container.findChild(QCheckBox)
+            if chk1 and chk2:
+                 state1 = chk1.isChecked()
+                 state2 = chk2.isChecked()
+                 chk1.blockSignals(True)
+                 chk2.blockSignals(True)
+                 chk1.setChecked(state2)
+                 chk2.setChecked(state1)
+                 chk1.blockSignals(False)
+                 chk2.blockSignals(False)
+                
+            # Color (Col 3)
+            c1 = self.cellWidget(r1, 3)
+            c2 = self.cellWidget(r2, 3)
+            col1 = c1.color()
+            col2 = c2.color()
+            c1.blockSignals(True)
+            c2.blockSignals(True)
+            c1.set_color(col2)
+            c2.set_color(col1)
+            c1.blockSignals(False)
+            c2.blockSignals(False)
+            
+            # Style (Col 4)
+            s1 = self.cellWidget(r1, 4)
+            s2 = self.cellWidget(r2, 4)
+            st1 = s1.currentText()
+            st2 = s2.currentText()
+            s1.blockSignals(True)
+            s2.blockSignals(True)
+            s1.setCurrentText(st2)
+            s2.setCurrentText(st1)
+            s1.blockSignals(False)
+            s2.blockSignals(False)
+            
+            # Size (Col 5)
+            sz1 = self.cellWidget(r1, 5)
+            sz2 = self.cellWidget(r2, 5)
+            siz1 = sz1.text()
+            siz2 = sz2.text()
+            sz1.blockSignals(True)
+            sz2.blockSignals(True)
+            sz1.setText(siz2)
+            sz2.setText(siz1)
+            sz1.blockSignals(False)
+            sz2.blockSignals(False)
+        finally:
+            self.blockSignals(was_blocked)
         
         self.rowMoved.emit(r1, r2) 
 
+    def _on_show_toggled(self, chk, checked):
+        row = -1
+        for r in range(self.rowCount()):
+             cw = self.cellWidget(r, 2)
+             if cw and cw.findChild(QCheckBox) == chk:
+                 row = r; break
+        if row != -1:
+             item = self.item(row, 0)
+             if item:
+                 settings = item.data(Qt.ItemDataRole.UserRole)
+                 settings['show'] = checked
+                 item.setData(Qt.ItemDataRole.UserRole, settings)
+                 self.domainEdited.emit(row, settings) 
+
     def _delete_row(self, btn):
         for r in range(self.rowCount()):
-            cw = self.cellWidget(r, 5) 
+            cw = self.cellWidget(r, 6) 
             if cw:
                 child = cw.findChild(QPushButton)
                 if child == btn:
@@ -920,7 +971,7 @@ class DSDTableWidget(QTableWidget):
     def _on_style_changed(self, combo, text):
         row = -1
         for r in range(self.rowCount()):
-            if self.cellWidget(r, 3) == combo:
+            if self.cellWidget(r, 4) == combo:
                 row = r; break
         if row != -1:
             item = self.item(row, 0)
@@ -933,7 +984,7 @@ class DSDTableWidget(QTableWidget):
     def _on_size_changed(self, edit, text):
         row = -1
         for r in range(self.rowCount()):
-            if self.cellWidget(r, 4) == edit:
+            if self.cellWidget(r, 5) == edit:
                 row = r; break
         if row != -1:
             item = self.item(row, 0)
@@ -957,13 +1008,13 @@ class DSDTableWidget(QTableWidget):
         
         # Sync current state of widgets into settings before editing
         # This ensures persistence of changes made directly in table
-        color_btn = self.cellWidget(row, 2)
+        color_btn = self.cellWidget(row, 3)
         if color_btn: settings['color'] = color_btn.color().name()
         
-        style_combo = self.cellWidget(row, 3)
+        style_combo = self.cellWidget(row, 4)
         if style_combo: settings['style'] = style_combo.currentText()
         
-        size_edit = self.cellWidget(row, 4)
+        size_edit = self.cellWidget(row, 5)
         if size_edit: settings['size'] = size_edit.text()
 
         # Context
@@ -989,10 +1040,11 @@ class DSDTableWidget(QTableWidget):
         if dlg.exec():
             new_data = dlg.get_data()
             self.cellWidget(row, 1).setText(new_data['name'])
-            self.cellWidget(row, 2).set_color(QColor(new_data['color']))
-            self.cellWidget(row, 3).setCurrentText(new_data['style'])
+            self.cellWidget(row, 3).set_color(QColor(new_data['color']))
+            self.cellWidget(row, 4).setCurrentText(new_data['style'])
             # Size is not edited in dialog, preserve it
             new_data['size'] = settings.get('size', '3')
+            new_data['show'] = settings.get('show', True) # Preserve show status
             
             item.setData(Qt.ItemDataRole.UserRole, new_data)
             self.domainEdited.emit(row, new_data)
@@ -1000,7 +1052,7 @@ class DSDTableWidget(QTableWidget):
     def _on_color_changed(self, btn):
         row = -1
         for r in range(self.rowCount()):
-            if self.cellWidget(r, 2) == btn:
+            if self.cellWidget(r, 3) == btn:
                 row = r; break
         if row != -1:
             item = self.item(row, 0)

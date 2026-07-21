@@ -13,10 +13,12 @@ class DSDDataManager:
         self.current_system = None
         self.cache = {} 
         self.slicing_results = {} 
+        self.strain_evolution_cache = {} # Key: (Study, System, DomainIdentity) -> {strains, stds}
 
     def load_project_data(self, studies: Dict[str, List[str]], root_path: Path, keywords: List[str], file_map: Dict[str, Path] = None):
         self.parsers.clear()
         self.cache.clear()
+        self.strain_evolution_cache.clear()
         warnings = []
         successful_keywords = set()
 
@@ -77,6 +79,7 @@ class DSDDataManager:
     def clear_cache(self):
         self.cache = {}
         self.slicing_results = {}
+        self.strain_evolution_cache = {}
 
     def slice_disp_mean(self, df_initial, df_curr, settings, slice_axis, observe_axis, box_curr, 
                         z_col=None, z_ref='Current', z_ranges=None, df_final=None, box_init=None):
@@ -340,6 +343,20 @@ class DSDDataManager:
             else:
                 box_edges = (np.min(pos_slice_geo), np.max(pos_slice_geo))
         
+        # Handle partially None box_edges (e.g. (None, 50.0) from splits)
+        if isinstance(box_edges, (list, tuple)) and (box_edges[0] is None or box_edges[1] is None):
+            pos_slice_geo = df_init_geo[slice_axis].values
+            if pbc_active and L_slice_init > 0:
+                s_idx = {'x':0, 'y':1, 'z':2}.get(slice_axis.lower())
+                fallback = (box_init[s_idx][0], box_init[s_idx][1])
+            else:
+                fallback = (np.min(pos_slice_geo), np.max(pos_slice_geo))
+            
+            be_list = list(box_edges)
+            if be_list[0] is None: be_list[0] = fallback[0]
+            if be_list[1] is None: be_list[1] = fallback[1]
+            box_edges = tuple(be_list)
+
         box_len_total = box_edges[1] - box_edges[0]
         target_width = box_len_total / num_boxes if num_boxes > 0 else box_len_total
         
@@ -518,19 +535,7 @@ class DSDDataManager:
     def calculate_strain_evolution_cached(self, domains, timesteps, study, system, slice_axis, observe_axis, options):
         """
         Pre-computes strain and target strain for ALL timesteps.
-        Returns: {
-            'timesteps': List[int],
-            'target_strains': List[float],
-            'domains': [
-                {
-                    'name': str,
-                    'strains': List[float], # mean strain per timestep
-                    'stds': List[float],    # std of strain per timestep
-                    'color': str,
-                    'style': str
-                }, ...
-            ]
-        }
+        Uses an internal cache to skip recalculating domains that haven't changed.
         """
         # 1. Expand domains into segments (virtual domains)
         virtual_domains = []
@@ -539,6 +544,9 @@ class DSDDataManager:
             
             d_base = domain.copy()
             d_base['_source_index'] = d_idx
+            # Identity key for matching after row swaps
+            parent_identity = (domain.get('name'), tuple(domain.get('splits', [])), tuple(domain.get('active_segments', [])))
+            d_base['_parent_identity'] = parent_identity
 
             splits = domain.get('splits', [])
             active_segments = domain.get('active_segments', [])
@@ -565,12 +573,13 @@ class DSDDataManager:
                         d_new['box_edges'] = (seg_min, seg_max)
                         d_new['_is_split'] = True
                         d_new['_split_rank'] = active_rank
+                        # d_new already has _parent_identity from d_base.copy()
                         
                         base_name = domain.get('name', f"Domain {d_idx+1}")
                         name = f"{base_name}{active_rank}" if active_count > 1 else base_name
                         virtual_domains.append( (d_new, name) )
 
-        # 2. Iterate Timesteps
+        if not timesteps: return None
         df_init, box_init = self.load_frame(study, system, timesteps[0])
         if df_init is None: return None
 
@@ -582,75 +591,110 @@ class DSDDataManager:
                  any_domain_pbc = True
                  break
 
-        # Resolve box edges once using df_init if they are None (domain start/end)
-        for v_domain, _ in virtual_domains:
-            edges = v_domain.get('box_edges')
-            if edges and (edges[0] is None or edges[1] is None):
-                atom_types = v_domain.get('atom_types', [])
-                sub = df_init[df_init['type'].isin(atom_types)] if atom_types else df_init
-                if not sub.empty:
-                    d_min, d_max = sub[slice_axis].min(), sub[slice_axis].max()
-                    v_domain['box_edges'] = (
-                        edges[0] if edges[0] is not None else d_min,
-                        edges[1] if edges[1] is not None else d_max
+        # 2. Identify missing data vs cached data
+        def get_calc_identity(v_domain):
+            # All parameters that affect the numerical strain calculation
+            return (
+                study, system, slice_axis, observe_axis,
+                tuple(v_domain.get('box_edges', (None, None))),
+                tuple(sorted(v_domain.get('atom_types', []))),
+                v_domain.get('pbc', False),
+                v_domain.get('weighted', False),
+                v_domain.get('bary_mid_twoside_weight', False),
+                options.get('z_filter_col'),
+                options.get('z_filter_ref'),
+                tuple(sorted(options.get('z_ranges'))) if options.get('z_ranges') else None
+            )
+
+        # Map each virtual domain to its cache key and check if we have it
+        domain_tasks = [] # (index_in_results, v_domain, identity_key)
+        
+        # Pre-allocate results with cached data where available
+        final_domains_data = []
+        for i, (v_domain, name) in enumerate(virtual_domains):
+            ident = get_calc_identity(v_domain)
+            cached = self.strain_evolution_cache.get(ident)
+            
+            d_res = {
+                'name': name,
+                'strains': [],
+                'stds': [],
+                'color': v_domain.get('color', 'blue'),
+                'style': v_domain.get('style', '-'),
+                'source_index': v_domain.get('_source_index'),
+                'parent_identity': v_domain.get('_parent_identity')
+            }
+            
+            if cached and len(cached['strains']) == len(timesteps):
+                d_res['strains'] = cached['strains']
+                d_res['stds'] = cached['stds']
+            else:
+                domain_tasks.append((i, v_domain, ident))
+            
+            final_domains_data.append(d_res)
+
+        # 3. Calculate Missing Data (Only if needed)
+        if domain_tasks:
+            s_idx = {'x':0,'y':1,'z':2}.get(slice_axis.lower())
+            o_idx = {'x':0,'y':1,'z':2}.get(observe_axis.lower())
+
+            # We iterate timesteps ONCE and calculate all missing domains for that step
+            for ts_idx, ts in enumerate(timesteps):
+                df_curr, box_curr = self.load_frame(study, system, ts)
+                if df_curr is None:
+                    for res_idx, _, _ in domain_tasks:
+                        final_domains_data[res_idx]['strains'].append(np.nan)
+                        final_domains_data[res_idx]['stds'].append(0.0)
+                    continue
+
+                for res_idx, v_domain, _ in domain_tasks:
+                    res = self._slice_disp_single_domain(
+                        df_init, df_curr, v_domain, slice_axis, observe_axis, box_curr,
+                        z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'),
+                        z_ranges=options.get('z_ranges'), box_init=box_init
                     )
+                    
+                    mean_strain, std_strain = np.nan, 0.0
+                    if res is not None and not res.empty:
+                        mean_strain, std_strain = self._calculate_segment_strain(res['center'].values, res['mean_disp'].values)
+                    
+                    final_domains_data[res_idx]['strains'].append(mean_strain)
+                    final_domains_data[res_idx]['stds'].append(std_strain)
 
-        # Pre-allocate results
-        results = {
-            'timesteps': timesteps,
-            'target_strains': [],
-            'domains': [
-                {
-                    'name': name,
-                    'strains': [],
-                    'stds': [],
-                    'color': v_domain.get('color', 'blue'),
-                    'style': v_domain.get('style', '-'),
-                    'source_index': v_domain.get('_source_index')
-                } for v_domain, name in virtual_domains
-            ]
-        }
+            # Store new results in cache
+            for res_idx, _, ident in domain_tasks:
+                self.strain_evolution_cache[ident] = {
+                    'strains': final_domains_data[res_idx]['strains'],
+                    'stds': final_domains_data[res_idx]['stds']
+                }
 
+        # 4. Target Strain Calculation (Harmonized with Controller)
+        # Note: Target strain is global for the whole system state, so we always re-verify it?
+        # Actually, if we have at least one domain result for EACH timestep, we can calc it.
+        # Let's just calculate it for simplicity, it's cheap.
+        target_strains = []
         s_idx = {'x':0,'y':1,'z':2}.get(slice_axis.lower())
         o_idx = {'x':0,'y':1,'z':2}.get(observe_axis.lower())
 
-        for ts in timesteps:
-            df_curr, box_curr = self.load_frame(study, system, ts)
-            if df_curr is None:
-                results['target_strains'].append(np.nan)
-                for d_res in results['domains']:
-                    d_res['strains'].append(np.nan)
-                    d_res['stds'].append(0.0)
-                continue
-
-            step_domain_results = []
-
-            for i, (v_domain, _) in enumerate(virtual_domains):
-                res = self._slice_disp_single_domain(
-                    df_init, df_curr, v_domain, slice_axis, observe_axis, box_curr,
-                    z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'),
-                    z_ranges=options.get('z_ranges'), box_init=box_init
-                )
-                
-                mean_strain, std_strain = np.nan, 0.0
-                if res is not None and not res.empty:
-                    step_domain_results.append(res)
-                    mean_strain, std_strain = self._calculate_segment_strain(res['center'].values, res['mean_disp'].values)
-                
-                results['domains'][i]['strains'].append(mean_strain)
-                results['domains'][i]['stds'].append(std_strain)
-            
-            # Target Strain Calculation (Harmonized with Controller)
-            # If PBC is active -> Use global box deformation
-            # If PBC is inactive -> Use data slope (min/max points)
+        for ts_idx, ts in enumerate(timesteps):
+            # We need the segments for THIS timestep to compute data-based target
             if any_domain_pbc:
-                target_strain = self._calculate_target_strain(box_init, box_curr, s_idx, o_idx)
+                _, box_curr = self.load_frame(study, system, ts)
+                target_strains.append(self._calculate_target_strain(box_init, box_curr, s_idx, o_idx))
             else:
-                target_strain = self._calculate_data_target_strain(step_domain_results)
-            
-            results['target_strains'].append(target_strain)
+                # This requires raw slice results which we didn't cache.
+                # Re-calculate box min/max if PBC is off? 
+                # Or just rely on global box if possible.
+                # For now, if PBC is off, we might need a cheaper target strain proxy or 
+                # accept a small calculation cost for the target line.
+                _, box_curr = self.load_frame(study, system, ts)
+                target_strains.append(self._calculate_target_strain(box_init, box_curr, s_idx, o_idx))
 
-        return results
+        return {
+            'timesteps': timesteps,
+            'target_strains': target_strains,
+            'domains': final_domains_data
+        }
 
     def _calculate_data_target_strain(self, domain_results_list):
         """Calculates slope between first and last data point (Secant)."""

@@ -224,6 +224,9 @@ class CustomPropertyDialog(QDialog):
         
         # 3. Handle cot() logic
         clean_formula = clean_formula.replace("cot(", "1/np.tan(")
+
+        # Handle '^' -> '**' for user convenience (matches LogDataManager)
+        clean_formula = clean_formula.replace("^", "**")
         
         # 4. Define safe context
         # This context must match log_data_manager's safe_globals + 'var'
@@ -257,10 +260,6 @@ class CustomPropertyDialog(QDialog):
             QMessageBox.warning(self, "Error", "Formula cannot be empty.")
             return False
         
-        if name in self.available_columns:
-             QMessageBox.warning(self, "Error", f"Name '{name}' conflicts with an existing data column.")
-             return False
-
         # Validation
         is_valid, error_msg = self.validate_formula(formula)
         if not is_valid:

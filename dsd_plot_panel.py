@@ -240,7 +240,6 @@ class DSDPlotPanel(QWidget):
         self.opts_config = [
             ('disp_std', "Show displacement standard deviation"),
             ('strain_std', "Strain standard deviation"),
-            ('opt_line', "Show optimal line"),
             ('total_count', "Show total box particle numbers"),
             ('weighted_count', "Show weighted box particle numbers"),
         ]
@@ -269,10 +268,7 @@ class DSDPlotPanel(QWidget):
         else:
             self.options_menu.addAction(self.opt_actions['strain_std'])
             
-        # 2. Optimal Line
-        self.options_menu.addAction(self.opt_actions['opt_line'])
-        
-        # 3. Particle Counts (only for Displacement plot)
+        # 2. Particle Counts (only for Displacement plot)
         if not is_strain_plot:
             self.options_menu.addSeparator()
             self.options_menu.addAction(self.opt_actions['total_count'])
@@ -284,11 +280,8 @@ class DSDPlotPanel(QWidget):
             pass
         
     def on_opt_line_deleted(self):
-        # Called only when explicit user action disables it
-        if 'opt_line' in self.opt_actions:
-            self.opt_actions['opt_line'].setChecked(False)
-            self.current_options['opt_line'] = False
-            self.update_plot()
+        # Deprecated: Optimal line visibility is now controlled via table checkbox
+        self.update_plot()
 
     def _on_option_toggled(self, key):
         if key == 'total_count' and self.opt_actions['total_count'].isChecked():
@@ -300,17 +293,6 @@ class DSDPlotPanel(QWidget):
             self.current_options['total_count'] = False
 
         self.current_options[key] = self.opt_actions[key].isChecked()
-
-        if key == 'opt_line':
-            if self.current_options['opt_line']:
-                # If enabled, verify logic adds it in update_plot if needed
-                pass
-            else:
-                # If disabled, remove row if exists
-                if self.plot_table.opt_line_row != -1:
-                    self.plot_table.removeRow(self.plot_table.opt_line_row)
-                    self.plot_table.opt_line_row = -1
-                    
         self.update_plot()
 
     def set_options(self, options):
@@ -322,7 +304,7 @@ class DSDPlotPanel(QWidget):
              self.current_options['total_count'] = False
              
         for key, action in self.opt_actions.items():
-            if key in self.current_options:
+            if key in self.current_options and key in self.opt_actions:
                 action.setChecked(self.current_options.get(key, False))
         self.update_plot()
 
@@ -374,6 +356,9 @@ class DSDPlotPanel(QWidget):
         
         # Trigger font size adjustment when the splitter divider is moved
         self.main_splitter.splitterMoved.connect(self._adjust_display_font_size)
+        
+        # Table Signals
+        self.plot_table.rowMoved.connect(self.update_plot)
 
     def _on_stats_updated(self, data):
         self.stats_table.setRowCount(0)
@@ -717,43 +702,26 @@ class DSDPlotPanel(QWidget):
             self.update_plot()
 
     def _on_row_removed(self, row):
-        # Was the removed row the Optimal Line?
-        was_optimal = (row == self.plot_table.opt_line_row)
-        
-        # If the user explicitly deleted the optimal line row, disable the option
-        if was_optimal:
-            if 'opt_line' in self.opt_actions:
-                 # Only if it was removed by user action (checking signals context is hard, 
-                 # but usually on_row_removed triggers after removal)
-                 # Wait: if we removed it automatically in update_plot, this triggers too.
-                 # We need to distinguish.
-                 # However, update_plot sets opt_line_row to -1 BEFORE removing?
-                 # If opt_line_row was not -1 and equals row, it's a deletion.
-                 
-                 # Check if option is currently ON. If ON, and row removed, check if it was auto-removal.
-                 # Auto-removal happens if no real domains exist.
-                 
-                 real_domains = [d for d in self.plot_table.get_domains() if not d.get('is_optimal_line')]
-                 
-                 if not real_domains:
-                     # This might be auto-removal (last real domain deleted -> opt line auto removed)
-                     # In this case, we WANT to keep option ON.
-                     pass
-                 else:
-                     # Real domains exist, but Opt Line row was removed -> User must have deleted it.
-                     # Turn option OFF.
-                     self.on_opt_line_deleted()
-        
-        # Adjust opt_line_row if a row above it was deleted
-        if self.plot_table.opt_line_row != -1:
-            if row < self.plot_table.opt_line_row:
-                self.plot_table.opt_line_row -= 1
+        # Note: DSDTableWidget handles opt_line_row adjustments and on_opt_line_deleted triggers internally.
+        # We only need to check for auto-removal of the optimal line if it's the last thing standing.
         
         # Trigger cleanup or update
         real_domains = [d for d in self.plot_table.get_domains() if not d.get('is_optimal_line')]
         if not real_domains and self.plot_table.opt_line_row != -1:
-            # Auto-remove the opt line row visually, but KEEP option True
+            # Auto-remove the opt line row visually, but KEEP option True (so next add brings it back)
+            # We must be careful not to trigger recursive deletion loops if we are not careful,
+            # but removeRow triggers rowRemoved which calls this again.
+            # However, opt_line_row will be updated by widget before we get here?
+            # Actually, we should just remove it.
             self.plot_table.removeRow(self.plot_table.opt_line_row)
+            # Widget will handle opt_line_row update to -1 via its internal logic or we force it?
+            # removeRow triggers _delete_row in widget logic? No, removeRow is QTableWidget method.
+            # We rely on widget's rowRemoved signal? 
+            # DSDTableWidget overrides nothing relevant to removeRow call itself, 
+            # but _delete_row CALLS removeRow.
+            # Calling removeRow directly from here will NOT trigger _delete_row logic (which updates opt_line).
+            # So we must manually update opt_line_row or call a safe delete method.
+            
             self.plot_table.opt_line_row = -1
             
         self._sync_lock_visibility()
@@ -874,6 +842,11 @@ class DSDPlotPanel(QWidget):
             
             # 2. Establish System Selection
             g_opts = data.get('global_options', {})
+            
+            # Force controller to refresh timesteps even if study/system names match previous state
+            self.controller.current_study = None
+            self.controller.current_system = None
+            
             self.study_combo.setCurrentText(g_opts.get('study', 'Select Study'))
             self.on_study_changed(self.study_combo.currentText())
             self.system_combo.setCurrentText(g_opts.get('system', 'Select System'))

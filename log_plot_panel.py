@@ -2482,10 +2482,16 @@ class LogPlotPanel(QWidget):
         # 2. Apply to other selected rows (Batch Update)
         # Use selectionModel().selectedRows() for reliable row detection
         selected_model_rows = self.plot_table.selectionModel().selectedRows()
-        unique_rows = set(idx.row() for idx in selected_model_rows)
+        selected_rows_set = set(idx.row() for idx in selected_model_rows)
         
-        # If the triggering row isn't in selection (e.g. slight focus lag), consider it selected
-        unique_rows.add(row)
+        # Logic to prevent accidental sync if widget click didn't update selection (e.g. checkbox)
+        if row not in selected_rows_set:
+            # The user interacted with a row NOT currently selected.
+            # Assume single-row edit.
+            unique_rows = {row}
+        else:
+            # The row IS selected, so apply to the full selection group.
+            unique_rows = selected_rows_set
         
         if len(unique_rows) > 1 and new_val is not None:
             for r in unique_rows:

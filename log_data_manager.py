@@ -31,7 +31,11 @@ class LogDataManager:
         
         # Recursively resolve tokens
         for token in set(tokens):
-            series = self._get_series(df, token)
+            # If the token refers to the property itself (e.g. 'Step' -> '{Step}/10'),
+            # force fetching the raw column to avoid infinite recursion.
+            ignore_custom = (token == property_name)
+            series = self._get_series(df, token, ignore_custom=ignore_custom)
+            
             if series is None:
                 return None
             local_env[token] = series
@@ -47,6 +51,9 @@ class LogDataManager:
 
         # Handle 'cot' -> '1/tan' (simple text replacement)
         clean_formula = clean_formula.replace("cot(", "1/np.tan(")
+        
+        # Handle '^' -> '**' for user convenience
+        clean_formula = clean_formula.replace("^", "**")
         
         # Safe environment for eval
         safe_globals = {
@@ -68,10 +75,22 @@ class LogDataManager:
             print(f"Error evaluating formula '{formula}': {e}")
             return None
 
-    def _get_series(self, df: pd.DataFrame, col_name: str) -> Optional[pd.Series]:
+    def _get_series(self, df: pd.DataFrame, col_name: str, ignore_custom: bool = False) -> Optional[pd.Series]:
+        if not ignore_custom and col_name in self.custom_properties:
+             # Try to evaluate custom property first
+             return self._evaluate_custom_property(df, col_name)
+
         if col_name in df.columns:
             return df[col_name]
-        return self._evaluate_custom_property(df, col_name)
+        
+        # Check if it is the index
+        if df.index.name == col_name:
+             return df.index.to_series()
+        
+        # If we are here, it's not in columns.
+        # If ignore_custom is True, we already skipped custom check.
+        # If ignore_custom is False, we already checked custom and it wasn't there.
+        return None
 
     def _has_column(self, df: pd.DataFrame, col_name: str) -> bool:
         if col_name in df.columns:

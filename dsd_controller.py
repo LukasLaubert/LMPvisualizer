@@ -51,6 +51,14 @@ class DSDController(QObject):
         self.plot_item.getAxis('right').linkToView(self.vb2)
         self.vb2.setXLink(self.plot_item)
         
+        # Ensure main ViewBox is on top and interactive for BOTH axes
+        self.plot_item.vb.setZValue(10)
+        self.plot_item.vb.setMouseEnabled(x=True, y=True)
+        
+        # Place secondary ViewBox behind and disable its mouse interaction
+        self.vb2.setZValue(-1)
+        self.vb2.setMouseEnabled(x=False, y=False)
+        
         def update_vb2_views():
             self.vb2.setGeometry(self.plot_item.vb.sceneBoundingRect())
             self.vb2.linkedViewChanged(self.plot_item.vb, self.vb2.XAxis)
@@ -295,9 +303,23 @@ class DSDController(QObject):
     def update_config(self, domains, global_options, slice_axis, observe_axis, plot_type, z_ranges=None):
         old_type = self.plot_config.get('plot_type')
         
-        # Cache Invalidation Check - EXCLUDE color, style, size for instant updates
+        # Cache Invalidation Check - EXCLUDE visual properties (color, style, size, show)
+        # Identity consists of all parameters affecting the numerical results.
+        def get_domain_identity(d):
+            return (
+                d.get('name'),
+                tuple(d.get('splits', [])),
+                tuple(d.get('active_segments', [])),
+                tuple(sorted(d.get('atom_types', []))),
+                d.get('pbc', False),
+                d.get('weighted', False),
+                d.get('bary_mid_twoside_weight', False),
+                d.get('box_arrangement'),
+                d.get('number_boxes')
+            )
+
         new_key = (
-            tuple(sorted([ (d.get('name'), tuple(d.get('splits', [])), tuple(d.get('active_segments', []))) for d in domains if not d.get('is_optimal_line')])),
+            tuple(sorted([get_domain_identity(d) for d in domains if not d.get('is_optimal_line')])),
             self.current_study, self.current_system,
             slice_axis, observe_axis, 
             global_options.get('z_filter_col'), global_options.get('z_filter_ref'),
@@ -365,8 +387,6 @@ class DSDController(QObject):
         
         # Restore fundamental visual state
         self.plot_item.showGrid(x=True, y=True, alpha=0.3)
-        self.vb2.setZValue(0)
-        self.plot_item.vb.setZValue(10)
         
         # Ensure right axis is hidden by default (Displacement plot will show if needed)
         self.plot_item.hideAxis('right')
@@ -447,6 +467,8 @@ class DSDController(QObject):
 
         for idx, domain in enumerate(self.domains):
             if domain.get('is_optimal_line'): continue
+            if not domain.get('show', True): continue
+            
             if domain.get('pbc', False): any_domain_pbc = True
             
             # Pass df_final explicitly for filtering logic
@@ -458,6 +480,9 @@ class DSDController(QObject):
             )
             valid_results = [r for r in results if r is not None and not r.empty]
             valid_results.sort(key=lambda r: r['center'].mean())
+
+            # Layering: Top row (low idx) -> Top Layer (High Z)
+            z_val = len(self.domains) - idx
 
             for i, df_res in enumerate(valid_results):
                 x = df_res['center'].values
@@ -478,17 +503,22 @@ class DSDController(QObject):
                     c1 = pg.PlotCurveItem(x, y + y_err, pen=None)
                     c2 = pg.PlotCurveItem(x, y - y_err, pen=None)
                     bc = QColor(color); bc.setAlpha(50)
-                    self.plot_item.addItem(pg.FillBetweenItem(c1, c2, brush=pg.mkBrush(bc)))
+                    fill = pg.FillBetweenItem(c1, c2, brush=pg.mkBrush(bc))
+                    fill.setZValue(z_val - 0.5)
+                    self.plot_item.addItem(fill)
 
                 # Plot Domain Segment
                 pen = pg.mkPen(color, width=2, style=pen_style) if pen_style != Qt.PenStyle.NoPen else None
                 d_name = domain.get('name', f"Domain {idx+1}")
                 p_name = f"{d_name}{i+1}" if len(valid_results) > 1 else d_name
                 
+                item = None
                 if symbol:
-                    self.plot_item.plot(x, y, pen=pen, symbol=symbol, symbolBrush=color, symbolPen=color, symbolSize=width, name=p_name)
+                    item = self.plot_item.plot(x, y, pen=pen, symbol=symbol, symbolBrush=color, symbolPen=color, symbolSize=width, name=p_name)
                 else:
-                    self.plot_item.plot(x, y, pen=pen, name=p_name)
+                    item = self.plot_item.plot(x, y, pen=pen, name=p_name)
+                
+                if item: item.setZValue(z_val)
 
                 # Particle Counts Bars
                 if show_right_axis:
@@ -498,8 +528,11 @@ class DSDController(QObject):
                          diffs = np.diff(np.sort(x))
                          pos_diffs = diffs[diffs > 0]
                          if len(pos_diffs) > 0: w_bar = np.min(pos_diffs) * 0.8
+                     
                      cb = QColor(color).darker(200); cb.setAlpha(128)
-                     self.vb2.addItem(pg.BarGraphItem(x=x, height=count_val, width=w_bar, brush=cb, pen=None))
+                     bar = pg.BarGraphItem(x=x, height=count_val, width=w_bar, brush=cb, pen=None)
+                     bar.setZValue(z_val - 0.2)
+                     self.vb2.addItem(bar)
 
                 for _, r in df_res.iterrows():
                     all_pts_flat.append((r['center'], r['mean_disp']))
@@ -583,15 +616,20 @@ class DSDController(QObject):
         
         self.last_target_strain = slope
 
-        if options.get('opt_line', False):
-            opt_settings = next((d for d in self.domains if d.get('is_optimal_line')), None)
-            if opt_settings:
-                oc = QColor(opt_settings.get('color', 'black'))
-                os_str = opt_settings.get('style', '--')
-                ops = Qt.PenStyle.DashLine if os_str == '--' else Qt.PenStyle.SolidLine
-                try: width = int(opt_settings.get('size', 1))
-                except: width = 1
-                self.plot_item.plot([x1, x2], [y1, y2], pen=pg.mkPen(oc, width=width, style=ops), name="Optimal Line")
+        # Optimal Line Plotting (Independent of Menu Option)
+        opt_settings = next((d for d in self.domains if d.get('is_optimal_line')), None)
+        
+        # Use 'show' from table, default to True if missing
+        show_opt = opt_settings.get('show', True) if opt_settings else True
+        
+        if opt_settings and show_opt:
+            oc = QColor(opt_settings.get('color', 'black'))
+            os_str = opt_settings.get('style', '--')
+            ops = Qt.PenStyle.DashLine if os_str == '--' else Qt.PenStyle.SolidLine
+            try: width = int(opt_settings.get('size', 1))
+            except: width = 1
+            opt_item = self.plot_item.plot([x1, x2], [y1, y2], pen=pg.mkPen(oc, width=width, style=ops), name="Optimal Line")
+            opt_item.setZValue(1000)
 
         # Report Generation
         headers = ["Split", "Strain", "Error", "#Parts", "#Weights"]
@@ -657,26 +695,42 @@ class DSDController(QObject):
         x_plot = x_full[steps_to_plot]
         
         # 3. Plot Domains
+        # Iterate over cached results, but find their CURRENT config by matching properties
+        # This handles row swapping without requiring cache invalidation/recalculation
         for d_data in self._strain_cache['domains']:
-            name = d_data['name']
             
-            # Resolve current style from table using stored source index
-            # This aligns with displacement plot behavior (row-based) and handles duplicate names correctly
-            d_idx = d_data.get('source_index')
-            domain_cfg = None
+            # Identify the current domain config that matches this result
+            # Match by parent_identity (Name, Splits, Active Segments)
+            matched_domain = None
+            matched_idx = -1
             
-            if d_idx is not None and 0 <= d_idx < len(self.domains):
-                domain_cfg = self.domains[d_idx]
+            target_key = d_data.get('parent_identity')
             
-            if domain_cfg:
-                color = QColor(domain_cfg.get('color', 'blue'))
-                style_str = domain_cfg.get('style', 'o')
-                try: width = int(domain_cfg.get('size', 2))
-                except: width = 2
-            else:
-                color = QColor(d_data['color'])
-                style_str = d_data['style']
-                width = 2
+            if target_key:
+                for idx, d in enumerate(self.domains):
+                    if d.get('is_optimal_line'): continue
+                    
+                    current_key = (d.get('name'), tuple(d.get('splits', [])), tuple(d.get('active_segments', [])))
+                    if current_key == target_key:
+                        matched_domain = d
+                        matched_idx = idx
+                        break
+            
+            # If not found (e.g. deleted), skip
+            if matched_domain is None:
+                continue
+
+            # Respect Show flag
+            if not matched_domain.get('show', True):
+                continue
+
+            color = QColor(matched_domain.get('color', 'blue'))
+            style_str = matched_domain.get('style', 'o')
+            try: width = int(matched_domain.get('size', 2))
+            except: width = 2
+                
+            # Layering: Top of table (low matched index) -> Top Layer (high Z)
+            z_val = len(self.domains) - matched_idx
 
             y_full = np.array(d_data['strains'])
             y_err_full = np.array(d_data['stds'])
@@ -693,17 +747,25 @@ class DSDController(QObject):
                     c1 = pg.PlotCurveItem(x_plot[mask], y_plot[mask] + y_err_plot[mask], pen=None)
                     c2 = pg.PlotCurveItem(x_plot[mask], y_plot[mask] - y_err_plot[mask], pen=None)
                     bc = QColor(color); bc.setAlpha(50)
-                    self.plot_item.addItem(pg.FillBetweenItem(c1, c2, brush=pg.mkBrush(bc)))
+                    fill = pg.FillBetweenItem(c1, c2, brush=pg.mkBrush(bc))
+                    fill.setZValue(z_val - 0.5)
+                    self.plot_item.addItem(fill)
 
                 pen = pg.mkPen(color, width=width, style=pen_style) if pen_style != Qt.PenStyle.NoPen else None
+                item = None
                 if symbol:
-                    self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, symbol=symbol, 
-                                        symbolBrush=color, symbolPen=color, symbolSize=width*2, name=name)
+                    item = self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, symbol=symbol, 
+                                        symbolBrush=color, symbolPen=color, symbolSize=width*2, name=matched_domain['name'])
                 else:
-                    self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, name=name)
+                    item = self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, name=matched_domain['name'])
+                
+                if item: item.setZValue(z_val)
 
         # 4. Optimal Line (Target Strain)
-        if options.get('opt_line', False):
+        opt_settings = next((d for d in self.domains if d.get('is_optimal_line')), None)
+        show_opt = opt_settings.get('show', True) if opt_settings else True
+
+        if show_opt:
             if plot_type == 'Strain Over Strain':
                 # Optimal is y=x
                 valid_x = x_plot[~np.isnan(x_plot)]
@@ -712,6 +774,7 @@ class DSDController(QObject):
                     p_item = self.plot_item.plot([x_min, x_max], [x_min, x_max], 
                                                pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="Target")
                     p_item.is_opt_line = True
+                    p_item.setZValue(1000)
             else: # Strain Over Step
                 # Optimal is a curve of target strains over timesteps
                 mask = ~np.isnan(x_full) & ~np.isnan(self._strain_cache['target_strains'])
@@ -720,6 +783,7 @@ class DSDController(QObject):
                     p_item = self.plot_item.plot(x_plot, effective_target, 
                                                pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="Target")
                     p_item.is_opt_line = True
+                    p_item.setZValue(1000)
 
         # 5. Generate Error Report
         report = self._generate_strain_error_report(self._strain_cache, curr_idx)
@@ -728,12 +792,8 @@ class DSDController(QObject):
     def _generate_strain_error_report(self, cache, curr_idx):
         """
         Calculates errors based on MATLAB logic:
-        - Cum Abs: sum(|act-tar|) / sum(|tar|)
-        - Cum Sign: sum(act-tar) / sum(|tar|)
-        - Indv Abs: mean(|act-tar| / |tar|)
-        - Indv Sign: mean((act-tar) / |tar|)
+        Iterates in table order using parent_identity matching.
         """
-        timesteps = cache['timesteps'][:curr_idx+1]
         target_strains = np.array(cache['target_strains'][:curr_idx+1])
         
         # Mask for valid target strains (avoid div by zero/NaN)
@@ -742,54 +802,58 @@ class DSDController(QObject):
             return "No valid target strain data for error calculation."
             
         tar_m = target_strains[mask]
-        sum_abs_tar = np.sum(np.abs(tar_m))
         
         headers = ["Domain", "Cum.Abs", "Cum.Sign", "Indv.Abs", "Indv.Sign"]
         rows = []
         
-        # Group by original domain name to calculate row means
-        domain_groups = {} # {base_name: [ {results} ]}
-        
-        for d_data in cache['domains']:
-            # Find base name (remove segment suffix if exists)
-            name = d_data['name']
-            # Heuristic: split names like "Domain1", "Domain2" or "Domain1_1"
-            # Actually, calculate_strain_evolution_cached uses name + segment index
-            # We need to know which ones belong together.
-            # Let's use the 'name' and look for group peers.
+        # Iterate in CURRENT Table order
+        for domain in self.domains:
+            if domain.get('is_optimal_line'): continue
+            if not domain.get('show', True): continue
             
-            y_m = np.array(d_data['strains'][:curr_idx+1])[mask]
-            valid_mask = ~np.isnan(y_m)
+            # Identity of this domain
+            target_ident = (domain.get('name'), tuple(domain.get('splits', [])), tuple(domain.get('active_segments', [])))
             
-            if not np.any(valid_mask):
-                res = {"name": name, "errs": [np.nan]*4}
-            else:
-                y = y_m[valid_mask]
-                t = tar_m[valid_mask]
-                diff = y - t
+            # Find all matching results in cache
+            domain_results = [d for d in cache['domains'] if d.get('parent_identity') == target_ident]
+            
+            for d_data in domain_results:
+                name = d_data['name']
+                y_m = np.array(d_data['strains'][:curr_idx+1])[mask]
+                valid_mask = ~np.isnan(y_m)
                 
-                # Cum errors
-                c_abs = np.sum(np.abs(diff)) / np.sum(np.abs(t))
-                c_sign = np.sum(diff) / np.sum(np.abs(t))
+                if not np.any(valid_mask):
+                    errs = ["N/A"] * 4
+                else:
+                    y = y_m[valid_mask]
+                    t = tar_m[valid_mask]
+                    diff = y - t
+                    
+                    # Cum errors
+                    c_abs = np.sum(np.abs(diff)) / np.sum(np.abs(t))
+                    c_sign = np.sum(diff) / np.sum(np.abs(t))
+                    
+                    # Indv errors
+                    indv_diff_rel = diff / t
+                    i_abs = np.mean(np.abs(indv_diff_rel))
+                    i_sign = np.mean(indv_diff_rel)
+                    
+                    errs = [f"{c_abs:.4f}", f"{c_sign:.4f}", f"{i_abs:.4f}", f"{i_sign:.4f}"]
                 
-                # Indv errors
-                indv_diff_rel = diff / t
-                i_abs = np.mean(np.abs(indv_diff_rel))
-                i_sign = np.mean(indv_diff_rel)
-                
-                res = {"name": name, "errs": [c_abs, c_sign, i_abs, i_sign]}
-            
-            # Grouping logic: "NameSplit" -> "Name"
-            # Try to strip trailing digits
-            import re
-            match = re.search(r'^(.*?)(\d+)$', name)
-            if match: base_name = match.group(1)
-            else: base_name = name
-            
-            if base_name not in domain_groups: domain_groups[base_name] = []
-            domain_groups[base_name].append(res)
+                rows.append([name] + errs)
 
-        all_row_means = []
+        if not rows:
+            return "No visible domains to report."
+
+        # Format as table string
+        widths = [max(len(str(row[i])) for row in ([headers] + rows)) for i in range(len(headers))]
+        row_fmt = " | ".join([f"{{:<{w}}}" if i==0 else f"{{:>{w}}}" for i, w in enumerate(widths)])
+        
+        lines = [row_fmt.format(*headers), "-" * len(row_fmt.format(*headers))]
+        for row in rows:
+            lines.append(row_fmt.format(*row))
+            
+        return "\n".join(lines)
 
         for base_name, segments in domain_groups.items():
             for seg in segments:
