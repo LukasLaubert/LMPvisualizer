@@ -117,16 +117,13 @@ class LogDataManager:
         for study_name, system_list in studies.items():
             self.data[study_name] = {}
             for system_name in system_list:
-                log_files = []
-                
-                # Check for "study|system" key first (Flat/Parent mode)
-                flat_key = f"{study_name}|{system_name}"
-                
-                if flat_key in file_map:
-                    log_files = [file_map[flat_key]]
-                elif system_name in file_map:
-                    log_files = [file_map[system_name]]
-                else: # Standard project structure
+                # Use the map provided by discover_studies_systems
+                # Key is "study|system"
+                key = f"{study_name}|{system_name}"
+                log_files = file_map.get(key, [])
+
+                if not log_files:
+                    # Fallback for manual addition or older session files
                     log_path = root_path / study_name / system_name
                     if not log_keywords:
                         log_files = list(log_path.glob("log.lammps"))
@@ -136,15 +133,13 @@ class LogDataManager:
                         log_files = sorted(list(set(log_files)))
 
                 if not log_files:
-                    self.warnings.append(f"No log files found for: {study_name}/{system_name}")
                     continue
                 
-                # This check is now implicitly handled by the fact that we found the files.
-                # We can simplify the successful_keywords logic.
-                for keyword in log_keywords:
-                    for file_path in log_files:
-                        if keyword in file_path.name:
-                            successful_keywords.add(keyword)
+                # Update successful keywords
+                for fpath in log_files:
+                    for kw in (log_keywords or []):
+                        if kw in fpath.name:
+                            successful_keywords.add(kw)
 
                 df = LogParser.parse_multiple_logs(log_files)
 
@@ -154,7 +149,9 @@ class LogDataManager:
                         if col not in all_cols_ordered:
                             all_cols_ordered.append(col)
                 else:
-                    self.warnings.append(f"Could not parse thermo data for: {study_name}/{system_name}")
+                    # Include specific filenames in the error message
+                    file_list = ", ".join([f.name for f in log_files])
+                    self.warnings.append(f"Could not parse thermo data for:\n{study_name}/{system_name} [{file_list}]")
         
         self.available_columns = all_cols_ordered
         return self.warnings, successful_keywords

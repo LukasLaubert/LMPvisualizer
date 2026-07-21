@@ -231,11 +231,25 @@ class DSDController(QObject):
                     g_min_x, g_max_x = np.min(x_pts[valid_mask_x]), np.max(x_pts[valid_mask_x])
 
                 for d_res in self._strain_cache['domains']:
+                    # Visibility check: Use source_index to find the parent domain's checkbox state
+                    s_idx = d_res.get('source_index')
+                    if s_idx is not None and s_idx < len(self.domains):
+                        if not self.domains[s_idx].get('strain_show', True):
+                            continue
+
                     y_pts = np.array(d_res['strains'][:slice_idx])
+                    y_err = np.array(d_res['stds'][:slice_idx]) if options.get('strain_std', False) else None
+                    
                     valid_mask_y = ~np.isnan(y_pts)
                     if np.any(valid_mask_y):
                         g_min_y = min(g_min_y, np.min(y_pts[valid_mask_y]))
                         g_max_y = max(g_max_y, np.max(y_pts[valid_mask_y]))
+                        
+                        if y_err is not None:
+                            valid_mask_err = ~np.isnan(y_err) & valid_mask_y
+                            if np.any(valid_mask_err):
+                                g_min_y = min(g_min_y, np.min(y_pts[valid_mask_err] - y_err[valid_mask_err]))
+                                g_max_y = max(g_max_y, np.max(y_pts[valid_mask_err] + y_err[valid_mask_err]))
         else:
             # Displacement plot logic (original)
             for ts in search_steps:
@@ -243,6 +257,10 @@ class DSDController(QObject):
                  if df_curr is None: continue
                  
                  for domain in self.domains:
+                     # Visibility check
+                     if not domain.get('show', True):
+                         continue
+
                      results = self.data_manager.slice_disp_mean(
                         df_init, df_curr, domain, slice_axis, observe_axis, box_curr, 
                         z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'), 
@@ -571,8 +589,8 @@ class DSDController(QObject):
                 color = QColor(domain.get('color', 'blue'))
                 style_str = domain.get('style', 'o')
                 symbol, pen_style = self._get_pyqtgraph_style(style_str)
-                try: width = int(domain.get('size', 3))
-                except: width = 3
+                try: width = float(domain.get('size', 3.0))
+                except: width = 3.0
 
                 # Plot Error Band
                 if y_err is not None:
@@ -584,7 +602,7 @@ class DSDController(QObject):
                     self.plot_item.addItem(fill)
 
                 # Plot Domain Segment
-                pen = pg.mkPen(color, width=2, style=pen_style) if pen_style != Qt.PenStyle.NoPen else None
+                pen = pg.mkPen(color, width=2.0, style=pen_style) if pen_style != Qt.PenStyle.NoPen else None
                 d_name = domain.get('name', f"Domain {idx+1}")
                 p_name = f"{d_name}{i+1}" if len(valid_results) > 1 else d_name
                 
@@ -776,76 +794,106 @@ class DSDController(QObject):
         x_plot = x_full[steps_to_plot]
         
         # 3. Plot Domains
-        # Iterate over self.domains (CURRENT Table Order) to ensure correct layering and legend order
+        line_styles_order = ['-', '--', '.-']
+        
+        # Iterate over self.domains (CURRENT Table Order)
         for idx, domain in enumerate(self.domains):
             if domain.get('is_optimal_line'): continue
-            
-            # Respect Show flag
-            if not domain.get('show', True):
-                continue
+            if not domain.get('strain_show', True): continue
 
             # Identify identity
             current_id = (domain.get('name'), tuple(domain.get('splits', [])), tuple(domain.get('active_segments', [])))
             
-            # Find matching data in cache
-            d_data = None
-            for data_item in self._strain_cache['domains']:
-                if data_item.get('parent_identity') == current_id:
-                    d_data = data_item
-                    break
-            
-            if d_data is None:
-                continue
+            # Find ALL matching data in cache (handles splits)
+            domain_results = [d for d in self._strain_cache['domains'] if d.get('parent_identity') == current_id]
+            if not domain_results: continue
+                
+            # Sort results by name to ensure spatial/index consistency
+            domain_results.sort(key=lambda d: d.get('name', ''))
 
-            # Visual Properties from CURRENT domain config
+            # Visual Properties
             color = QColor(domain.get('color', 'blue'))
-            style_str = domain.get('style', 'o')
-            try: width = int(domain.get('size', 2))
-            except: width = 2
+            try: width = float(domain.get('strain_size', 2.0))
+            except: width = 2.0
+            
+            # Resolve Starting Style
+            user_style = domain.get('strain_style', '-')
+            if not user_style: user_style = '-'
+            
+            # Determine Cycle of 3 styles
+            if user_style in line_styles_order:
+                # User picked a line style -> cycle through the 3 standard line styles starting there
+                start_idx = line_styles_order.index(user_style)
+                cycle = [
+                    line_styles_order[start_idx],
+                    line_styles_order[(start_idx + 1) % 3],
+                    line_styles_order[(start_idx + 2) % 3]
+                ]
+            else:
+                # User picked a custom marker -> cycle: UserMarker, '-', '--'
+                cycle = [user_style, '-', '--']
                           
             z_val = len(self.domains) - idx
 
-            y_full = np.array(d_data['strains'])
-            y_err_full = np.array(d_data['stds'])
-            
-            y_plot = y_full[steps_to_plot]
-            y_err_plot = y_err_full[steps_to_plot]
-            
-            symbol, pen_style = self._get_pyqtgraph_style(style_str)
-            
-            # Mask NaNs for plotting error bands
-            mask = ~np.isnan(x_plot) & ~np.isnan(y_plot)
-            if np.any(mask):
-                if options.get('strain_std', False) and np.any(y_err_plot[mask] > 0):
-                    c1 = pg.PlotCurveItem(x_plot[mask], y_plot[mask] + y_err_plot[mask], pen=None)
-                    c2 = pg.PlotCurveItem(x_plot[mask], y_plot[mask] - y_err_plot[mask], pen=None)
-                    bc = QColor(color); bc.setAlpha(50)
-                    fill = pg.FillBetweenItem(c1, c2, brush=pg.mkBrush(bc))
-                    fill.setZValue(z_val - 0.5)
-                    self.plot_item.addItem(fill)
-
-                pen = pg.mkPen(color, width=width, style=pen_style) if pen_style != Qt.PenStyle.NoPen else None
-                item = None
-                if symbol:
-                    item = self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, symbol=symbol, 
-                                        symbolBrush=color, symbolPen=color, symbolSize=width*2, name=domain['name'])
-                else:
-                    item = self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, name=domain['name'])
+            # Iterate over splits
+            for i, d_data in enumerate(domain_results):
+                y_full = np.array(d_data['strains'])
+                y_err_full = np.array(d_data['stds'])
                 
-                if item: item.setZValue(z_val)
+                y_plot = y_full[steps_to_plot]
+                y_err_plot = y_err_full[steps_to_plot]
+                
+                # Get current style from cycle
+                current_style_str = cycle[i % 3]
+                symbol, pen_style = self._get_pyqtgraph_style(current_style_str)
+                
+                # Mask NaNs for plotting error bands
+                mask = ~np.isnan(x_plot) & ~np.isnan(y_plot)
+                if np.any(mask):
+                    if options.get('strain_std', False) and np.any(y_err_plot[mask] > 0):
+                        c1 = pg.PlotCurveItem(x_plot[mask], y_plot[mask] + y_err_plot[mask], pen=None)
+                        c2 = pg.PlotCurveItem(x_plot[mask], y_plot[mask] - y_err_plot[mask], pen=None)
+                        bc = QColor(color); bc.setAlpha(50)
+                        fill = pg.FillBetweenItem(c1, c2, brush=pg.mkBrush(bc))
+                        fill.setZValue(z_val - 0.5)
+                        self.plot_item.addItem(fill)
+
+                    pen = pg.mkPen(color, width=width, style=pen_style) if pen_style != Qt.PenStyle.NoPen else None
+                    
+                    item = None
+                    if symbol:
+                        # Ensure symbol size matches line width or is scaled for visibility
+                        item = self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, symbol=symbol, 
+                                            symbolBrush=color, symbolPen=color, symbolSize=width*3, name=d_data['name'])
+                    else:
+                        item = self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, name=d_data['name'])
+                    
+                    if item: item.setZValue(z_val)
 
         # 4. Optimal Line (Target Strain)
         opt_settings = next((d for d in self.domains if d.get('is_optimal_line')), None)
-        show_opt = opt_settings.get('show', True) if opt_settings else True
+        show_opt = opt_settings.get('strain_show', True) if opt_settings else True
+        
+        # Get properties from settings, defaulting to strain defaults
+        try: opt_width = float(opt_settings.get('strain_size', 2.0)) if opt_settings else 2.0
+        except: opt_width = 2.0
+        
+        opt_style_str = opt_settings.get('strain_style', '--') if opt_settings else '--'
+        # Support fallback if user picked a marker for the end-to-end line
+        _, opt_pen_style = self._get_pyqtgraph_style(opt_style_str)
+        
+        opt_color = QColor(opt_settings.get('color', 'black')) if opt_settings else QColor('black')
 
         if show_opt:
+            pen = pg.mkPen(opt_color, width=opt_width, style=opt_pen_style)
+            
             if plot_type == 'Strain Over Strain':
                 # Optimal is y=x
                 valid_x = x_plot[~np.isnan(x_plot)]
                 if len(valid_x) > 0:
                     x_min, x_max = np.min(valid_x), np.max(valid_x)
                     p_item = self.plot_item.plot([x_min, x_max], [x_min, x_max], 
-                                               pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="End-to-end")
+                                               pen=pen, name="End-to-end")
                     p_item.is_opt_line = True
                     p_item.setZValue(1000)
             else: # Strain Over Step
@@ -854,7 +902,7 @@ class DSDController(QObject):
                 if np.any(mask):
                     effective_target = np.array(self._strain_cache['target_strains'])[steps_to_plot]
                     p_item = self.plot_item.plot(x_plot, effective_target, 
-                                               pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="End-to-end")
+                                               pen=pen, name="End-to-end")
                     p_item.is_opt_line = True
                     p_item.setZValue(1000)
 
@@ -882,7 +930,7 @@ class DSDController(QObject):
         # Iterate in CURRENT Table order
         for domain in self.domains:
             if domain.get('is_optimal_line'): continue
-            if not domain.get('show', True): continue
+            if not domain.get('strain_show', True): continue
             
             # Identity of this domain
             target_ident = (domain.get('name'), tuple(domain.get('splits', [])), tuple(domain.get('active_segments', [])))

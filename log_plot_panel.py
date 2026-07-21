@@ -51,6 +51,7 @@ class LogPlotPanel(QWidget):
 
         # Track loaded path to prevent clearing data on mode switch
         self.loaded_path = None 
+        self._is_internal_update = False
 
         self._init_ui()
         self._connect_signals()
@@ -1517,7 +1518,7 @@ class LogPlotPanel(QWidget):
         self.lock_axes_btn.rightClicked.connect(self._on_scale_lock_toggled)
         
         self.study_combo.currentTextChanged.connect(self.on_study_selected)
-        self.system_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('system', text))
+        self.system_combo.currentTextChanged.connect(self.on_system_selected)
         self.xaxis_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('x_axis', text))
         self.yaxis_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('y_axis', text))
         
@@ -1878,7 +1879,8 @@ class LogPlotPanel(QWidget):
 
         time_units_map = {'lj': 'tau', 'real': 'fs', 'metal': 'ps', 'si': 's', 'cgs': 's', 'electron': 'fs', 'micro': 'us', 'nano': 'ns'}
         self.main_window.units_label.setText(f"Unit: {units or 'N/A'}")
-        self.main_window.timestep_label.setText(f"Timestep: {timestep} {time_unit}" if timestep else "Timestep: N/A")
+        t_unit = time_units_map.get(units, "")
+        self.main_window.timestep_label.setText(f"Timestep: {timestep} {t_unit}" if timestep else "Timestep: N/A")
 
         # Update state tracking
         self.loaded_path = root_path
@@ -1963,27 +1965,101 @@ class LogPlotPanel(QWidget):
             self.add_btn.setEnabled(False)
 
     def on_study_selected(self, text=""):
+        """
+        Handle Study selection. 
+        1. Filter System dropdown (Study-specific or All).
+        2. Auto-select System if study has exactly ONE.
+        3. Update the selected row(s) Study/System components.
+        """
         study = self.study_combo.currentText()
-
-        def reset_combo_with_systems(combo, placeholder, items):
-            combo.blockSignals(True)
-            current_text = combo.currentText()
-            combo.clear()
-            combo.addItem(placeholder)
-            if len(items) > 1:
-                combo.addItem("average")
-            combo.addItems(items)
-            if current_text in items or (current_text == "average" and len(items) > 1):
-                combo.setCurrentText(current_text)
-            else:
-                combo.setCurrentIndex(0)
-            combo.blockSignals(False)
-
+        
+        # 1. Reset and filter the system combo
+        self.system_combo.blockSignals(True)
+        current_sys = self.system_combo.currentText()
+        self.system_combo.clear()
+        self.system_combo.addItem("Select System")
+        
+        # If Study is selected, show its systems. If "Select Study", show ALL systems.
         systems = self.data_manager.get_system_names(study) if self.study_combo.currentIndex() > 0 else self.data_manager.get_all_system_names()
-        reset_combo_with_systems(self.system_combo, "Select System", systems)
+        
+        if len(systems) > 1:
+            self.system_combo.addItem("average")
+        self.system_combo.addItems(systems)
+        
+        # 2. Auto-selection / Preservation logic for System dropdown
+        final_sys = "Select System"
+        if len(systems) == 1:
+            # Study has exactly one system -> Auto-select it
+            final_sys = systems[0]
+            self.system_combo.setCurrentText(final_sys)
+        elif current_sys in systems or (current_sys == "average" and len(systems) > 1):
+            # Keep previous selection if it still exists in the new context
+            final_sys = current_sys
+            self.system_combo.setCurrentText(final_sys)
+        else:
+            # Fallback to placeholder
+            self.system_combo.setCurrentIndex(0)
+            
+        self.system_combo.blockSignals(False)
+        
+        # 3. Update the selected row(s) - ONLY if this was a manual user change
+        if not self._is_internal_update:
+            # Update the study component
+            self._update_selected_row_name_component('study', text)
+            # If system was auto-changed, update that component too
+            if final_sys != current_sys:
+                self._update_selected_row_name_component('system', final_sys)
 
-        # Update only the study component of the selected row
-        self._update_selected_row_name_component('study', text)
+    def on_system_selected(self, text: str):
+        """
+        Handle System selection. 
+        1. If Study is 'Select Study' and selected system belongs to only ONE study, auto-select it.
+        2. Filter System dropdown to match the selected/auto-selected study.
+        3. Update selected rows Study/System components.
+        """
+        if not text or text == "Select System":
+            if not self._is_internal_update:
+                self._update_selected_row_name_component('system', text)
+            return
+
+        final_study = self.study_combo.currentText()
+
+        # 1. Handle unique study auto-selection
+        if self.study_combo.currentIndex() == 0: # "Select Study"
+            matching_studies = []
+            for s_name, s_map in self.data_manager.data.items():
+                if text in s_map:
+                    matching_studies.append(s_name)
+            
+            if len(matching_studies) == 1:
+                # Unique study found! 
+                final_study = matching_studies[0]
+                
+                # Update UI Study combo
+                self.study_combo.blockSignals(True)
+                self.study_combo.setCurrentText(final_study)
+                self.study_combo.blockSignals(False)
+                
+                # IMPORTANT: Now that a study is selected, the system dropdown 
+                # MUST be updated to only contain systems from THIS study.
+                systems = self.data_manager.get_system_names(final_study)
+                
+                self.system_combo.blockSignals(True)
+                self.system_combo.clear()
+                self.system_combo.addItem("Select System")
+                if len(systems) > 1:
+                    self.system_combo.addItem("average")
+                self.system_combo.addItems(systems)
+                self.system_combo.setCurrentText(text) # Restore selection
+                self.system_combo.blockSignals(False)
+
+        # 2. Update the row data - ONLY if manual user change
+        if not self._is_internal_update:
+            # If we auto-selected a study, save that too
+            if final_study != "Select Study":
+                self._update_selected_row_name_component('study', final_study)
+            # Save the system component
+            self._update_selected_row_name_component('system', text)
 
     def on_table_selection_changed(self):
         # Update dropdowns to match selected row
@@ -1997,9 +2073,9 @@ class LogPlotPanel(QWidget):
 
         plot_name = plot_name_item.data(Qt.ItemDataRole.UserRole) or plot_name_item.text()
         
-        for combo in [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo]:
-            combo.blockSignals(True)
-
+        # Set internal update flag to prevent loop/overwriting during selection change
+        self._is_internal_update = True
+        
         try:
             parts = plot_name.split(' | ')
             study, system, x_ax, y_ax = (parts + ['N/A'] * 4)[:4]
@@ -2011,23 +2087,14 @@ class LogPlotPanel(QWidget):
                 else:
                     combo.setCurrentIndex(0)
 
+            # Triggering study change will now also repopulate system combo correctly via on_study_selected
             set_combo_text(self.study_combo, study)
-
-            # Manually update system combo based on the selected study
-            systems = self.data_manager.get_system_names(study) if study not in ["N/A", "."] else self.data_manager.get_all_system_names()
-            self.system_combo.clear()
-            self.system_combo.addItem("Select System")
-            if len(systems) > 1:
-                self.system_combo.addItem("average")
-            self.system_combo.addItems(systems)
-
             set_combo_text(self.system_combo, system)
             set_combo_text(self.xaxis_combo, x_ax)
             set_combo_text(self.yaxis_combo, y_ax)
         
         finally:
-            for combo in [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo]:
-                combo.blockSignals(False)
+            self._is_internal_update = False
         
         # Trigger plot update because x-axis might need to change
         self.update_plots()

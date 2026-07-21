@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QListView, QFrame, QScrollArea, QTextEdit,
     QGroupBox, QToolButton, QSizePolicy, QGridLayout
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QEvent, QRect, QSize, QRectF
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QEvent, QRect, QSize, QRectF, QLocale
 from PyQt6.QtGui import (
     QColor, QIntValidator, QDoubleValidator, QStandardItemModel, QStandardItem, 
     QMouseEvent, QPalette, QPainter, QBrush, QPen, QFont, QLinearGradient
@@ -459,10 +459,12 @@ class DSDAddDomainDialog(QDialog):
     def __init__(self, parent=None, current_data=None, current_slice_axis=None, available_types=None, axis_bounds=None):
         super().__init__(parent)
         self.setWindowTitle("Add/Edit Domain")
-        self.resize(350, 480) 
+        self.resize(350, 100) # Start small, let layout expand
         
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setSpacing(10)
+        # Ensure dialog shrinks to fit
+        self.main_layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
 
         # --- 1. Appearance & Data Group ---
         grp_data = QGroupBox("Appearance & Data")
@@ -477,46 +479,36 @@ class DSDAddDomainDialog(QDialog):
             self.name_input.setText(current_data.get('name', ''))
         lay_data.addRow("Name:", self.name_input)
 
-        # Atom Types
+        # Atom Types & Color (Merged Row)
         self.type_selector = CheckableComboBox(
             available_types, 
             current_data.get('atom_types') if current_data else None,
             self
         )
-        lay_data.addRow("Atom Types:", self.type_selector)
-
-        # Style & Color
-        h_style = QHBoxLayout()
-        h_style.setContentsMargins(0,0,0,0)
-        
-        self.style_input = QComboBox()
-        self.style_input.addItems(['Dots', '.-', '--', '-o', '-*', 'x', 'o'])
-        if current_data:
-            self.style_input.setCurrentText(current_data.get('style', 'Dots'))
-        else:
-            self.style_input.setCurrentText('Dots')
         
         init_color = QColor(current_data.get('color')) if (current_data and 'color' in current_data) else self._get_random_color()
         self.color_btn = ColorButton(init_color)
-        self.color_btn.setFixedSize(30, 24) # 5/4 aspect ratio (wider than high)
+        self.color_btn.setFixedSize(30, 24)
         
-        h_style.addWidget(self.style_input, 1)
-        h_style.addWidget(QLabel("Color:"))
-        h_style.addWidget(self.color_btn)
+        h_types = QHBoxLayout()
+        h_types.setContentsMargins(0,0,0,0)
+        h_types.addWidget(self.type_selector, 1)
+        h_types.addWidget(QLabel("Color:"))
+        h_types.addWidget(self.color_btn)
         
-        lay_data.addRow("Style:", h_style)
+        lay_data.addRow("Atom Types:", h_types)
+        
+        # Style row removed as requested
         
         self.main_layout.addWidget(grp_data)
 
         # --- 2. Domain Segmentation Group ---
         self.grp_seg = QGroupBox("Domain Segmentation")
         lay_seg = QVBoxLayout(self.grp_seg)
-        # Top margin increased slightly to avoid text clash with the floating 'i' button if needed,
-        # though side placement usually suffices.
         lay_seg.setContentsMargins(10, 20, 10, 10) 
         lay_seg.setSpacing(5)
         
-        # Info Button - Parented to GroupBox to float on the border
+        # Info Button
         self.info_btn = QToolButton(self.grp_seg)
         self.info_btn.setText("i")
         self.info_btn.setCheckable(True)
@@ -601,7 +593,8 @@ class DSDAddDomainDialog(QDialog):
         lay_calc.addWidget(self.chk_bary, 3, 1)
         
         self.main_layout.addWidget(grp_calc)
-        self.main_layout.addStretch()
+        
+        # No addStretch() to keep it compact
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.validate_and_accept)
@@ -612,10 +605,8 @@ class DSDAddDomainDialog(QDialog):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Position the 'i' button in top-right of the group box
         if hasattr(self, 'grp_seg') and hasattr(self, 'info_btn'):
             margin_right = 5
-            # y=0 places it roughly on the border line for standard styling
             self.info_btn.move(self.grp_seg.width() - self.info_btn.width() - margin_right, 0)
 
     def _get_random_color(self):
@@ -656,7 +647,7 @@ class DSDAddDomainDialog(QDialog):
             'name': self.name_input.text() or "Domain",
             'atom_types': self.type_selector.get_selection(),
             'color': self.color_btn.color().name(),
-            'style': self.style_input.currentText(),
+            # Style removed from dialog, preserved in table logic
             'number_boxes': self.num_boxes.value(),
             'box_arrangement': self.arrangement.currentText(),
             'pbc': self.chk_pbc.isChecked(),
@@ -678,6 +669,7 @@ class DSDTableWidget(QTableWidget):
         super().__init__(parent)
         self.panel = panel_ref 
         self.setColumnCount(7)
+        self.context_mode = 'displacement' # 'displacement' or 'strain'
         
         # Bold Header
         header_labels = ["↕", "Plot", "✅", "Color", "Style", "Size", "Del"]
@@ -688,7 +680,6 @@ class DSDTableWidget(QTableWidget):
         self.horizontalHeader().setFont(font)
         
         header = self.horizontalHeader()
-        # Matched to LogPlotPanel style
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed) # Arrows
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch) # Plot Name
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed) # Show
@@ -706,11 +697,68 @@ class DSDTableWidget(QTableWidget):
         
         self.verticalHeader().hide()
         self.opt_line_row = -1 # Track optimal line position
-        
+
+    def set_context(self, mode):
+        """Switches between 'displacement' and 'strain' styling contexts."""
+        if mode not in ['displacement', 'strain']: return
+        self.context_mode = mode
+        self.refresh_table_context()
+
+    def refresh_table_context(self):
+        """Updates displayed Style and Size values based on current context."""
+        def format_val(val):
+            try:
+                f = float(val)
+                return f"{f:g}"
+            except: return str(val)
+
+        for row in range(self.rowCount()):
+            item = self.item(row, 0)
+            if not item: continue
+            settings = item.data(Qt.ItemDataRole.UserRole)
+            
+            # Update Style Combo
+            style_combo = self.cellWidget(row, 4)
+            if style_combo:
+                style_combo.blockSignals(True)
+                if self.context_mode == 'displacement':
+                    style_combo.setCurrentText(settings.get('style', 'Dots'))
+                else:
+                    style_combo.setCurrentText(settings.get('strain_style', '-'))
+                style_combo.blockSignals(False)
+            
+            # Update Size Edit
+            size_edit = self.cellWidget(row, 5)
+            if size_edit:
+                size_edit.blockSignals(True)
+                if self.context_mode == 'displacement':
+                    size_edit.setText(format_val(settings.get('size', '2')))
+                else:
+                    size_edit.setText(format_val(settings.get('strain_size', '2.0')))
+                size_edit.blockSignals(False)
+
+            # Update Show Checkbox
+            chk_container = self.cellWidget(row, 2)
+            if chk_container:
+                chk_show = chk_container.findChild(QCheckBox)
+                if chk_show:
+                    chk_show.blockSignals(True)
+                    if self.context_mode == 'displacement':
+                        chk_show.setChecked(settings.get('show', True))
+                    else:
+                        chk_show.setChecked(settings.get('strain_show', True))
+                    chk_show.blockSignals(False)
+
     def add_domain(self, name, settings, is_optimal_line=False):
         if settings.get('is_optimal_line', False) or name in ["Optimal Line", "End-to-end"]:
             is_optimal_line = True
             
+        def format_val(val):
+            try:
+                f = float(val)
+                return f"{f:g}"
+            except: return str(val)
+
         # Optimal line always at the BOTTOM
         if is_optimal_line:
             if self.opt_line_row != -1:
@@ -764,7 +812,13 @@ class DSDTableWidget(QTableWidget):
         chk_show = QCheckBox()
         # Explicitly center the checkbox
         chk_show.setStyleSheet("margin-left: 5px; margin-right: 5px;")
-        chk_show.setChecked(settings.get('show', True))
+        
+        # Init based on context
+        if self.context_mode == 'displacement':
+            chk_show.setChecked(settings.get('show', True))
+        else:
+            chk_show.setChecked(settings.get('strain_show', True))
+            
         chk_show.toggled.connect(lambda checked: self._on_show_toggled(chk_show, checked))
         
         # Container to center it nicely
@@ -783,13 +837,27 @@ class DSDTableWidget(QTableWidget):
         # Col 4: Style
         style_combo = QComboBox()
         style_combo.addItems(["Dots", "o", "x", "+", "d", "s", "t", "p", "h", "star", "-", "--", ".-"])
-        style_combo.setCurrentText(settings.get('style', 'Dots'))
+        
+        # Init based on context
+        if self.context_mode == 'displacement':
+            style_combo.setCurrentText(settings.get('style', 'Dots'))
+        else:
+            style_combo.setCurrentText(settings.get('strain_style', '-'))
+            
         style_combo.currentTextChanged.connect(lambda t: self._on_style_changed(style_combo, t))
         self.setCellWidget(row, 4, style_combo)
         
         # Col 5: Size
-        size_edit = QLineEdit(str(settings.get('size', '3')))
-        size_edit.setValidator(QIntValidator(1, 100))
+        init_size = settings.get('size', '2') if self.context_mode == 'displacement' else settings.get('strain_size', '2.0')
+        size_edit = QLineEdit(format_val(init_size))
+        
+        # Use Double Validator for decimal support with C Locale (International)
+        from PyQt6.QtCore import QLocale
+        val = QDoubleValidator(0.1, 100.0, 2)
+        val.setLocale(QLocale(QLocale.Language.C))
+        val.setNotation(QDoubleValidator.Notation.StandardNotation)
+        size_edit.setValidator(val)
+        
         size_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         size_edit.textChanged.connect(lambda t: self._on_size_changed(size_edit, t))
         self.setCellWidget(row, 5, size_edit)
@@ -808,12 +876,14 @@ class DSDTableWidget(QTableWidget):
         
         # Store settings in hidden item 0
         settings['is_optimal_line'] = is_optimal_line
-        settings['show'] = settings.get('show', True) # Ensure 'show' is present
+        settings['show'] = settings.get('show', True)
+        settings['strain_show'] = settings.get('strain_show', True)
         dummy = QTableWidgetItem()
         dummy.setData(Qt.ItemDataRole.UserRole, settings)
         self.setItem(row, 0, dummy)
         
         self._update_move_buttons_visibility()
+
 
     def _move_row_up(self):
         btn = self.sender()
@@ -945,7 +1015,10 @@ class DSDTableWidget(QTableWidget):
              item = self.item(row, 0)
              if item:
                  settings = item.data(Qt.ItemDataRole.UserRole)
-                 settings['show'] = checked
+                 if self.context_mode == 'displacement':
+                     settings['show'] = checked
+                 else:
+                     settings['strain_show'] = checked
                  item.setData(Qt.ItemDataRole.UserRole, settings)
                  self.domainEdited.emit(row, settings) 
 
@@ -977,7 +1050,12 @@ class DSDTableWidget(QTableWidget):
             item = self.item(row, 0)
             if item:
                 settings = item.data(Qt.ItemDataRole.UserRole)
-                settings['style'] = text
+                # Store based on context
+                if self.context_mode == 'displacement':
+                    settings['style'] = text
+                else:
+                    settings['strain_style'] = text
+                
                 item.setData(Qt.ItemDataRole.UserRole, settings)
                 self.domainEdited.emit(row, settings)
 
@@ -990,7 +1068,12 @@ class DSDTableWidget(QTableWidget):
             item = self.item(row, 0)
             if item:
                 settings = item.data(Qt.ItemDataRole.UserRole)
-                settings['size'] = text
+                # Store based on context
+                if self.context_mode == 'displacement':
+                    settings['size'] = text
+                else:
+                    settings['strain_size'] = text
+                    
                 item.setData(Qt.ItemDataRole.UserRole, settings)
                 self.domainEdited.emit(row, settings)
             
@@ -1007,15 +1090,22 @@ class DSDTableWidget(QTableWidget):
         settings = item.data(Qt.ItemDataRole.UserRole)
         
         # Sync current state of widgets into settings before editing
-        # This ensures persistence of changes made directly in table
         color_btn = self.cellWidget(row, 3)
         if color_btn: settings['color'] = color_btn.color().name()
         
         style_combo = self.cellWidget(row, 4)
-        if style_combo: settings['style'] = style_combo.currentText()
+        if style_combo:
+            if self.context_mode == 'displacement':
+                settings['style'] = style_combo.currentText()
+            else:
+                settings['strain_style'] = style_combo.currentText()
         
         size_edit = self.cellWidget(row, 5)
-        if size_edit: settings['size'] = size_edit.text()
+        if size_edit:
+            if self.context_mode == 'displacement':
+                settings['size'] = size_edit.text()
+            else:
+                settings['strain_size'] = size_edit.text()
 
         # Context
         current_slice_axis = None
@@ -1041,10 +1131,16 @@ class DSDTableWidget(QTableWidget):
             new_data = dlg.get_data()
             self.cellWidget(row, 1).setText(new_data['name'])
             self.cellWidget(row, 3).set_color(QColor(new_data['color']))
-            self.cellWidget(row, 4).setCurrentText(new_data['style'])
-            # Size is not edited in dialog, preserve it
-            new_data['size'] = settings.get('size', '3')
-            new_data['show'] = settings.get('show', True) # Preserve show status
+            # Style/Size are handled by table logic, preserved from before dialog
+            
+            # Restore styles/sizes from old settings + context logic
+            new_data['style'] = settings.get('style', 'Dots')
+            new_data['size'] = settings.get('size', '2')
+            new_data['strain_style'] = settings.get('strain_style', '-')
+            new_data['strain_size'] = settings.get('strain_size', '2.0')
+            
+            new_data['show'] = settings.get('show', True)
+            new_data['strain_show'] = settings.get('strain_show', True)
             
             item.setData(Qt.ItemDataRole.UserRole, new_data)
             self.domainEdited.emit(row, new_data)

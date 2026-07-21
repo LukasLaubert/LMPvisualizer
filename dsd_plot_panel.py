@@ -229,10 +229,18 @@ class DSDPlotPanel(QWidget):
         main_layout.addWidget(self.main_splitter, 1)
 
         self._init_options_menu()
-        self.plot_type_combo.currentTextChanged.connect(self._update_options_menu)
 
 
     # --- Helpers ---
+    def _on_plot_type_changed(self, text):
+        self._update_options_menu()
+        
+        context = 'displacement' if text == "Displacement plot" else 'strain'
+        if hasattr(self, 'plot_table'):
+            self.plot_table.set_context(context)
+            
+        self.update_plot()
+
     def _init_options_menu(self):
         self.opt_actions = {}
         
@@ -330,7 +338,7 @@ class DSDPlotPanel(QWidget):
         
         self.slice_axis_combo.currentTextChanged.connect(self.update_plot)
         self.observe_axis_combo.currentTextChanged.connect(self.update_plot)
-        self.plot_type_combo.currentTextChanged.connect(self.update_plot)
+        self.plot_type_combo.currentTextChanged.connect(self._on_plot_type_changed)
         self.zfilter_combo.currentTextChanged.connect(self._on_zfilter_changed)
         self.zfilter_ref_combo.currentTextChanged.connect(self._on_zfilter_changed)
         self.controller.boundsChanged.connect(self._on_controller_bounds_changed)

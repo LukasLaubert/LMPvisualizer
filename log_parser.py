@@ -31,85 +31,71 @@ class LogParser:
         raise FileNotFoundError(f"Could not find a valid LAMMPS project root in or above '{path}'.")
 
     @staticmethod
-    def discover_studies_systems(path: Path, log_keywords: List[str]) -> Tuple[Dict[str, List[str]], List[str], Dict[str, Path]]:
+    def discover_studies_systems(path: Path, log_keywords: List[str]) -> Tuple[Dict[str, List[str]], List[str], Dict[str, List[Path]]]:
         """
-        Discovers studies and systems. Handles normal project structures,
-        flat directories with log files, and single log file paths.
-        Returns studies dict, warnings list, and a map of {system_name: full_path} for flat modes.
+        Discovers studies and systems by recursively finding log files.
+        Study = Grandparent folder, System = Parent folder of the log file.
+        Groups multiple logs in the same folder into a single system.
         """
         warnings = []
-        file_map = {}
-
-        # Case 1: Path is a single file
-        if path.is_file():
-            studies = {'.': [path.stem]}
-            file_map = {path.stem: path}
-            return studies, warnings, file_map
-
-        # Case 2: Path is a directory, try normal discovery first
-        if path.is_dir():
-            study_dirs = [d for d in path.iterdir() if d.is_dir() and not d.name.startswith(('.', '_'))]
-            
-            if study_dirs:
-                studies = {}
-                base_systems = None
-                for study_dir in study_dirs:
-                    systems = sorted([s.name for s in study_dir.iterdir() if s.is_dir() and not s.name.startswith(('.', '_'))])
-                    if not systems:
-                        warnings.append(f"Study '{study_dir.name}' contains no system subdirectories.")
-                        continue
-                    studies[study_dir.name] = systems
-                    if base_systems is None:
-                        base_systems = set(systems)
-                
-                if base_systems is not None:
-                    consistent_studies = {}
-                    all_systems_found = set()
-                    for study_name, system_list in studies.items():
-                        if set(system_list) == base_systems:
-                            consistent_studies[study_name] = system_list
-                            all_systems_found.update(system_list)
-                    
-                    if consistent_studies:
-                        # Found a valid, consistent project structure
-                        return consistent_studies, warnings, {}
-
-        # Fallback: Path is a directory with no valid study structure, or a single file was provided
-        # We check the CURRENT directory (study='.') AND the PARENT directory (study='..')
-        
-        # 1. Determine directories to scan
-        scan_targets = []
-        if path.is_dir():
-            scan_targets.append(('.', path))
-            if path.parent and path.parent != path: # Ensure parent exists and is not same (root)
-                 scan_targets.append(('..', path.parent))
-        
+        file_map = {} # { "study|system": [List of Paths] }
         studies = {}
-        file_map = {}
-        found_any = False
 
-        for study_label, dir_path in scan_targets:
-            current_log_files = []
-            if not log_keywords:
-                current_log_files = list(dir_path.glob("log.lammps"))
-            else:
-                for keyword in log_keywords:
-                    current_log_files.extend(dir_path.glob(f"*{keyword}*"))
-                current_log_files = sorted(list(set(current_log_files)))
+        if not path.is_dir():
+            if path.is_file():
+                studies = {'.': [path.stem]}
+                file_map = {f".|{path.stem}": [path]}
+                return studies, warnings, file_map
+            return {}, ["Path does not exist."], {}
 
-            if current_log_files:
-                systems = [f.stem for f in current_log_files]
-                studies[study_label] = systems
-                for f in current_log_files:
-                    # Key by "study|system" to avoid collision if same system name exists in both levels
-                    file_map[f"{study_label}|{f.stem}"] = f
-                found_any = True
+        # 1. Find all potential log files recursively
+        all_found = []
+        search_keywords = log_keywords if log_keywords else ["log.lammps"]
+        for kw in search_keywords:
+            # Use rglob for deep discovery
+            pattern = f"*{kw}*" if "." not in kw else f"*{kw}"
+            all_found.extend(list(path.rglob(pattern)))
+        
+        # 2. Filter and Group by directory
+        unique_files = sorted(list(set(f for f in all_found if f.is_file())))
+        
+        for fpath in unique_files:
+            # Skip hidden or export folders
+            if any(p.startswith(('.', '_')) for p in fpath.relative_to(path).parts[:-1]):
+                continue
+                
+            try:
+                rel_parts = fpath.relative_to(path).parent.parts
+                
+                # Determine Study/System names based on hierarchy
+                if len(rel_parts) >= 2:
+                    study = rel_parts[-2]
+                    system = rel_parts[-1]
+                elif len(rel_parts) == 1:
+                    study = path.name
+                    system = rel_parts[0]
+                else:
+                    # File is in the root
+                    study = "."
+                    system = fpath.stem
 
-        if found_any:
-            return studies, warnings, file_map
+                if study not in studies:
+                    studies[study] = []
+                if system not in studies[study]:
+                    studies[study].append(system)
 
-        # If we reach here, nothing was found
-        return {}, ["No study directories or log files found in the given path (checked current and parent)."], {}
+                key = f"{study}|{system}"
+                if key not in file_map:
+                    file_map[key] = []
+                file_map[key].append(fpath)
+                
+            except Exception:
+                continue
+
+        if not studies:
+            return {}, ["No log files found matching keywords in the directory hierarchy."], {}
+
+        return studies, warnings, file_map
     
     @staticmethod
     def extract_thermo_data(logfile_path: Path) -> Optional[pd.DataFrame]:

@@ -35,9 +35,11 @@ class TrjDataManager:
 
                 # Case 1: Flat/Single file
                 if flat_key in file_map:
-                    target_files = [file_map[flat_key]]
+                    entry = file_map[flat_key]
+                    target_files = entry if isinstance(entry, list) else [entry]
                 elif system_name in file_map:
-                    target_files = [file_map[system_name]]
+                    entry = file_map[system_name]
+                    target_files = entry if isinstance(entry, list) else [entry]
                 
                 # Case 2: Standard Project
                 else:
@@ -55,7 +57,9 @@ class TrjDataManager:
                 # Sort to prefer shorter names or specific extensions
                 target_files.sort()
                 
-                loaded = False
+                loaded_any = False
+                
+                # Iterate through ALL found files and register them
                 for fpath in target_files:
                     try:
                         # Only metadata is parsed on init, so this is fast
@@ -63,7 +67,22 @@ class TrjDataManager:
                         
                         # Check if we successfully got columns
                         if parser.get_column_names():
-                            self.parsers[study_name][system_name] = parser
+                            # Naming Logic:
+                            # 1. If only one file is found in the system folder, 
+                            #    always use the system folder name as the key.
+                            # 2. If multiple files are found, use the filename.
+                            # 3. Handle standard Study_System prefix as before.
+                            
+                            if len(target_files) == 1 and flat_key not in file_map:
+                                key_name = system_name
+                            else:
+                                standard_prefix = f"{study_name}_{system_name}"
+                                if fpath.stem == standard_prefix:
+                                    key_name = system_name
+                                else:
+                                    key_name = fpath.stem
+
+                            self.parsers[study_name][key_name] = parser
                             
                             for kw in keywords:
                                 if kw in fpath.name:
@@ -72,12 +91,12 @@ class TrjDataManager:
                             for col in parser.get_column_names():
                                 all_cols_found.add(col)
                             
-                            loaded = True
-                            break 
+                            loaded_any = True
+                            
                     except Exception as e:
                         print(f"Failed to init parser for {fpath}: {e}")
 
-                if not loaded:
+                if not loaded_any:
                     # If we found files but couldn't parse any, warn the user
                     self.warnings.append(f"Found files for {system_name} but could not parse headers.")
 

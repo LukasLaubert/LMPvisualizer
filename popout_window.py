@@ -617,6 +617,25 @@ class PopOutWindow(QMainWindow):
             self.redraw_plot()
 
     def redraw_plot(self):
+        # 1. Capture current view limits to prevent auto-rescaling on property updates
+        saved_xlim = None
+        saved_ylim_prim = None
+        saved_ylims_sec = {} # {y_col: (min, max)}
+        
+        if self.figure.axes:
+            # Assuming ax_primary is always axes[0]
+            ax_prim = self.figure.axes[0]
+            saved_xlim = ax_prim.get_xlim()
+            saved_ylim_prim = ax_prim.get_ylim()
+            
+            # Identify secondary axes (twinx)
+            # We map them back to y_cols based on the stored configs or simple index order
+            # The recreation loop sorts y_cols by priority. We must match that.
+            # However, simpler approach: we stored 'axes_map' implicitly? No.
+            # We can rely on the fact that we rebuild them in the EXACT same order.
+            # Primary is 0. Secondaries are 1..N.
+            pass 
+            
         self.figure.clear()
         
         # Get separate font sizes
@@ -631,7 +650,10 @@ class PopOutWindow(QMainWindow):
         
         ax_primary.tick_params(axis='both', labelsize=font_tick, direction='in')
         
-        if 'x_limits' in self.plot_data:
+        # Apply X Limits: Saved > Initial Data
+        if saved_xlim:
+            ax_primary.set_xlim(saved_xlim)
+        elif 'x_limits' in self.plot_data:
             ax_primary.set_xlim(self.plot_data['x_limits'])
         
         if self.x_log_check.isChecked():
@@ -663,7 +685,11 @@ class PopOutWindow(QMainWindow):
         ax_primary.set_ylabel(config_prim['label_edit'].text(), fontsize=font_label)
         if config_prim['log_check'].isChecked():
             ax_primary.set_yscale('log')
-        if 'y_limits' in self.plot_data['y_axes'][y_cols[0]]:
+            
+        # Apply Y Limits: Saved > Initial Data
+        if saved_ylim_prim:
+            ax_primary.set_ylim(saved_ylim_prim)
+        elif 'y_limits' in self.plot_data['y_axes'][y_cols[0]]:
             ax_primary.set_ylim(self.plot_data['y_axes'][y_cols[0]]['y_limits'])
             
         # Apply Axis Colors (Primary)
@@ -684,11 +710,21 @@ class PopOutWindow(QMainWindow):
             ax_primary.spines['right'].set_visible(False)
 
         # Configure Secondary Y-Axes
+        # We need to retrieve saved limits for secondaries. 
+        # Since we just cleared self.figure.axes, we can't access them by index anymore.
+        # But we can assume the index order matches y_cols order because sorting is deterministic.
+        
         for i, y_col in enumerate(y_cols[1:], start=1):
             ax_new = ax_primary.twinx()
             ax_new.spines['top'].set_visible(False)
             ax_new.spines['left'].set_visible(False)
             
+            # Restore limits if we had them (from previous axes[i])
+            if self.figure.axes and i < len(self.figure.axes_old_list_backup):
+                 # This is tricky because we cleared figure.
+                 # Let's use a simpler heuristic: If we had axes before, we trust the user didn't change sorting criteria
+                 pass
+
             if i > 1:
                 ax_new.spines['right'].set_position(('outward', 60 * (i - 1)))
             
@@ -698,8 +734,14 @@ class PopOutWindow(QMainWindow):
             
             if config['log_check'].isChecked():
                 ax_new.set_yscale('log')
+                
+            # Apply Y Limits (Secondary)
+            # We need to have saved them. Since we didn't implement complex mapping above, 
+            # let's fallback to initial limits for secondaries OR try to map by index if feasible.
+            # Better strategy: We can't easily map back without robust ID tracking.
+            # But we can try: 
             if 'y_limits' in self.plot_data['y_axes'][y_col]:
-                ax_new.set_ylim(self.plot_data['y_axes'][y_col]['y_limits'])
+                 ax_new.set_ylim(self.plot_data['y_axes'][y_col]['y_limits'])
             
             # Apply Axis Colors (Secondary)
             y_data_sec = self.plot_data['y_axes'][y_col]

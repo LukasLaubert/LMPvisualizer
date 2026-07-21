@@ -33,9 +33,12 @@ class DSDDataManager:
                 flat_key = f"{study_name}|{system_name}"
                 
                 if flat_key in file_map:
-                    target_files = [file_map[flat_key]]
-                elif system_name in file_map: # Fallback for backward compatibility/direct mapping
-                    target_files = [file_map[system_name]]
+                    # Map now contains a list of paths
+                    entry = file_map[flat_key]
+                    target_files = entry if isinstance(entry, list) else [entry]
+                elif system_name in file_map: 
+                    entry = file_map[system_name]
+                    target_files = entry if isinstance(entry, list) else [entry]
                 else:
                     system_path = root_path / study_name / system_name
                     if system_path.is_dir():
@@ -46,14 +49,30 @@ class DSDDataManager:
                 if not target_files: continue
                 target_files.sort()
                 
+                # Iterate through ALL found files and register them
                 for fpath in target_files:
                     try:
                         parser = TrajectoryParser(fpath)
                         if parser.get_column_names():
-                            self.parsers[study_name][system_name] = parser
+                            # Naming Logic:
+                            # 1. If only one file is found in the system folder, 
+                            #    always use the system folder name as the key.
+                            # 2. If multiple files are found, use the filename.
+                            # 3. Handle standard Study_System prefix as before.
+                            
+                            if len(target_files) == 1 and flat_key not in file_map:
+                                key_name = system_name
+                            else:
+                                standard_prefix = f"{study_name}_{system_name}"
+                                if fpath.stem == standard_prefix:
+                                    key_name = system_name
+                                else:
+                                    key_name = fpath.stem
+
+                            self.parsers[study_name][key_name] = parser
+                            
                             for kw in keywords:
                                 if kw in fpath.name: successful_keywords.add(kw)
-                            break 
                     except Exception: pass
 
         if not self.parsers:
@@ -732,14 +751,30 @@ class DSDDataManager:
                             
                             bx_min, bx_max = x_sorted[0], x_sorted[-1]
                             by_min, by_max = y_sorted[0], y_sorted[-1]
+
+                            # Calculate local slopes (strains) between adjacent points
+                            dx = np.diff(x_sorted)
+                            dy = np.diff(y_sorted)
                             
-                            if bx_max > bx_min:
-                                mean_strain = (by_max - by_min) / (bx_max - bx_min)
-                                std_strain = 0.0 
+                            with np.errstate(divide='ignore', invalid='ignore'):
+                                local_strains = dy / dx
+                            
+                            valid_slopes = local_strains[dx > 0]
+                            if len(valid_slopes) > 0:
+                                mean_strain = np.mean(valid_slopes)
+                                
+                                # Match legacy MATLAB behavior: 
+                                # Strain STD represents the spatial fluctuation (scatter) of local slopes within the domain.
+                                if len(valid_slopes) > 1:
+                                    std_strain = np.std(valid_slopes, ddof=1) # Sample standard deviation
+                                else:
+                                    std_strain = 0.0
                             else:
                                 mean_strain = 0.0
+                                std_strain = 0.0
                         else:
                             mean_strain = 0.0
+                            std_strain = 0.0
                     
                     final_domains_data[res_idx]['strains'].append(mean_strain)
                     final_domains_data[res_idx]['stds'].append(std_strain)

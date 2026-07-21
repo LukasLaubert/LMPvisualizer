@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
         # Keyword Storage for Modes
         # 0: Log Plot, 1: Trj Plot, 2: DSD Mode
         self.mode_keywords = {
-            self.MODE_LOG: ['.log', '.out'],
+            self.MODE_LOG: ['.lammpslog', '.out'],
             self.MODE_TRJ: ['.lammpstrj', '.dump'],
             self.MODE_DSD: ['.lammpstrj', '.dump']
         }
