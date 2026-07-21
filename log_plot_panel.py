@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QComboBox, QFrame, QTableWidget, QHeaderView, QTableWidgetItem,
     QMessageBox, QCheckBox, QLabel, QSplitter, QGridLayout, QSizePolicy, 
-    QMenu, QFileDialog
+    QMenu, QFileDialog, QDialog, QSpinBox
 )
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QColor, QIntValidator, QAction, QActionGroup, QFont
@@ -25,6 +25,50 @@ from custom_property_dialog import CustomPropertyDialog
 from popout_window import PopOutWindow
 from fit_dialog import FitFunctionDialog
 
+class QuantizeDialog(QDialog):
+    """Minimalist dialog for entering quantization points."""
+    def __init__(self, current_points, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Quantize Plot Data")
+        self.setMinimumWidth(300)
+        
+        layout = QVBoxLayout(self)
+        
+        self.label = QLabel("Enter number of data points for the average curve:")
+        layout.addWidget(self.label)
+        
+        self.spin = QSpinBox()
+        self.spin.setRange(2, 1000000)
+        self.spin.setValue(current_points if current_points else 100)
+        layout.addWidget(self.spin)
+        
+        btn_layout = QHBoxLayout()
+        
+        self.set_btn = QPushButton("Set Quantization")
+        self.set_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.set_btn)
+        
+        self.remove_btn = QPushButton("Remove Quantization")
+        self.remove_btn.clicked.connect(self._remove)
+        btn_layout.addWidget(self.remove_btn)
+        
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        self.result_value = None
+
+    def _remove(self):
+        self.result_value = "REMOVE"
+        self.accept()
+
+    def get_value(self):
+        if self.result_value == "REMOVE":
+            return None
+        return self.spin.value()
+
 class LogPlotPanel(QWidget):
     def __init__(self, main_window_ref):
         super().__init__()
@@ -41,6 +85,10 @@ class LogPlotPanel(QWidget):
         self.global_label_map = {}
         self.custom_properties = {} # Name -> Formula
         self.scale_lock_enabled = False
+        
+        # New Data Processing Properties
+        self.enforce_zero_start = False
+        self.quantize_points = None # None means deactivated, integer > 1 means active
         
         # Fit Feature Properties
         self.fit_dialogs = {} # row_id -> FitFunctionDialog instance
@@ -1531,34 +1579,69 @@ class LogPlotPanel(QWidget):
         group = QActionGroup(self)
         group.setExclusive(True)
 
-        action_valid = QAction("Valid Window (Exclude Borders)", self, checkable=True)
-        action_valid.setData("valid_window")
-        
-        action_symmetric = QAction("Symmetric Window (Shrink Borders)", self, checkable=True)
-        action_symmetric.setData("symmetric_window")
-        
-        action_asymmetric = QAction("Asymmetric Window (Use All Available)", self, checkable=True)
-        action_asymmetric.setData("asymmetric_window")
+        options = [
+            ("Moving Averages", None),
+            ("Valid Window (Exclude Borders)", "valid_window"),
+            ("Symmetric Window (Shrink Borders)", "symmetric_window"),
+            ("Asymmetric Window (Use All Available)", "asymmetric_window"),
+            ("Advanced Methods", None),
+            ("Gaussian Filter", "gaussian"),
+            ("Savitzky-Golay (Order 2)", "savgol_2"),
+            ("Savitzky-Golay (Order 3)", "savgol_3"),
+            ("Savitzky-Golay (Order 4)", "savgol_4"),
+            ("B-Splines (Smoothing Splines)", "bspline"),
+            ("Exponential Moving Average (EMA)", "ema"),
+            ("Data Manipulation", None),
+            ("Enforce Start at 0", "zero_start"),
+            (f"Quantize ({self.quantize_points} pts)" if self.quantize_points else "Quantize", "quantize")
+        ]
 
-        group.addAction(action_valid)
-        group.addAction(action_symmetric)
-        group.addAction(action_asymmetric)
+        actions_dict = {}
+        for text, data in options:
+            if data is None:
+                try:
+                    menu.addSection(text)
+                except AttributeError:
+                    action = QAction(text, self)
+                    action.setDisabled(True)
+                    menu.addAction(action)
+            else:
+                action = QAction(text, self)
+                action.setCheckable(True)
+                action.setData(data)
+                
+                # Custom check logic for special toggles
+                if data == "zero_start":
+                    action.setChecked(self.enforce_zero_start)
+                    action.triggered.connect(self._toggle_enforce_zero)
+                elif data == "quantize":
+                    action.setChecked(self.quantize_points is not None)
+                    action.triggered.connect(self._open_quantize_dialog)
+                else:
+                    group.addAction(action)
+                    if data == self.running_mean_setting:
+                        action.setChecked(True)
+                
+                menu.addAction(action)
+                actions_dict[data] = action
 
-        menu.addAction(action_valid)
-        menu.addAction(action_symmetric)
-        menu.addAction(action_asymmetric)
-
-        # Set the checkmark on the currently active setting
-        if self.running_mean_setting == "valid_window":
-            action_valid.setChecked(True)
-        elif self.running_mean_setting == "symmetric_window":
-            action_symmetric.setChecked(True)
-        else: # asymmetric_window
-            action_asymmetric.setChecked(True)
+        if not any(a.isChecked() for a in group.actions()):
+            # Fallback for moving average group
+            actions_dict.get("symmetric_window", QAction()).setChecked(True)
         
         group.triggered.connect(self._set_running_mean_setting)
         
         menu.exec(header.mapToGlobal(pos))
+
+    def _toggle_enforce_zero(self, checked):
+        self.enforce_zero_start = checked
+        self.update_plots()
+
+    def _open_quantize_dialog(self, checked=False):
+        dialog = QuantizeDialog(self.quantize_points, self)
+        if dialog.exec():
+            self.quantize_points = dialog.get_value()
+            self.update_plots()
 
     def _set_running_mean_setting(self, action):
         new_setting = action.data()
@@ -2259,6 +2342,15 @@ class LogPlotPanel(QWidget):
             try:
                 x_np = data['x'].to_numpy(dtype=float) if hasattr(data['x'], 'to_numpy') else np.array(data['x'], dtype=float)
                 y_np = data['y'].to_numpy(dtype=float) if hasattr(data['y'], 'to_numpy') else np.array(data['y'], dtype=float)
+                
+                # --- Enforce Start at 0 ---
+                if self.enforce_zero_start and len(x_np) > 0 and x_np[0] != 0:
+                    x_np = np.insert(x_np, 0, 0.0)
+                    y_np = np.insert(y_np, 0, 0.0)
+                    # Update data dict for original plot visualization
+                    data['x'] = x_np
+                    data['y'] = y_np
+
             except ValueError:
                 continue 
 
@@ -2277,6 +2369,11 @@ class LogPlotPanel(QWidget):
 
             if plot_info['mean_window'] >= 1:
                 running_mean_y = self._calculate_running_average(y_np, plot_info['mean_window'], 'mean')
+                # Calculate running std here to allow for quantization
+                running_std = None
+                if plot_info['show_std']:
+                    running_std = self._calculate_running_average(y_np, plot_info['mean_window'], 'std')
+
                 len_diff = len(x_np) - len(running_mean_y)
                 if len_diff > 0:
                     start_idx = len_diff // 2
@@ -2285,8 +2382,34 @@ class LogPlotPanel(QWidget):
                 else:
                     running_mean_x = x_np
                 
+                # --- Hard Anchor: Enforce Start at 0 for Smoothed Data ---
+                if self.enforce_zero_start:
+                    if len(running_mean_x) > 0 and running_mean_x[0] > 0:
+                        # Prepend origin to smoothed data so interpolation/plotting starts at 0
+                        running_mean_x = np.insert(running_mean_x, 0, 0.0)
+                        running_mean_y = np.insert(running_mean_y, 0, 0.0)
+                        if running_std is not None:
+                            running_std = np.insert(running_std, 0, 0.0)
+                    elif len(running_mean_x) > 0 and running_mean_x[0] == 0:
+                        # Hard force the very first point to exactly 0 to override averaging residuals
+                        running_mean_y[0] = 0.0
+                        if running_std is not None:
+                            running_std[0] = 0.0
+
+                # --- Quantization ---
+                if self.quantize_points and isinstance(self.quantize_points, int) and self.quantize_points > 1:
+                    if len(running_mean_x) > 1:
+                        # If Enforce 0 is on, we wrap the entire span from 0 to the end
+                        target_start_x = 0.0 if self.enforce_zero_start else running_mean_x[0]
+                        x_quant = np.linspace(target_start_x, running_mean_x[-1], self.quantize_points)
+                        y_quant = np.interp(x_quant, running_mean_x, running_mean_y)
+                        if running_std is not None:
+                            running_std = np.interp(x_quant, running_mean_x, running_std)
+                        running_mean_x, running_mean_y = x_quant, y_quant
+
                 plot_data_cache[plot_info['display_name']]['mean_x'] = running_mean_x
                 plot_data_cache[plot_info['display_name']]['mean_y'] = running_mean_y
+                plot_data_cache[plot_info['display_name']]['mean_std'] = running_std
 
             # [Fit Integration] Barrier: If plot is hidden in table, stop here.
             if not plot_info['is_active']:
@@ -2322,7 +2445,7 @@ class LogPlotPanel(QWidget):
             # --- 2. Draw Running Mean / Std Deviation ---
             if plot_info['mean_window'] >= 1:
                 if plot_info['show_std']:
-                    running_std = self._calculate_running_average(y_np, plot_info['mean_window'], 'std')
+                    running_std = src_data.get('mean_std')
                     if running_std is not None and len(running_std) == len(running_mean_y):
                         std_data = {
                             'x': running_mean_x, 'y': running_mean_y, 'std': running_std, 
@@ -2619,52 +2742,83 @@ class LogPlotPanel(QWidget):
         
         # pandas Series is efficient for this
         series = pd.Series(data)
+        data_np = np.array(data)
 
         if self.running_mean_setting == 'valid_window':
-            # 1) Exclude border values. Output is shorter.
-            # min_periods=window_size ensures only full windows are used.
             rolling_obj = series.rolling(window=window_size, center=True, min_periods=window_size)
-            if statistic == 'mean':
-                result = rolling_obj.mean()
-            else: # std
-                result = rolling_obj.std()
+            result = rolling_obj.mean() if statistic == 'mean' else rolling_obj.std()
             return result.dropna().to_numpy()
 
         elif self.running_mean_setting == 'symmetric_window':
-            # 2) Symmetric window, shrinks at borders.
-            data_np = np.array(data)
             result = np.zeros_like(data_np, dtype=float)
             half_window = window_size // 2
-            
             for i in range(len(data_np)):
-                # Determine symmetric radius
                 k = min(half_window, i, len(data_np) - 1 - i)
-                start_idx = i - k
-                end_idx = i + k + 1
+                start_idx, end_idx = i - k, i + k + 1
                 window_slice = data_np[start_idx:end_idx]
-                
-                if statistic == 'mean':
-                    result[i] = np.mean(window_slice)
-                else: # std
-                    result[i] = np.std(window_slice)
+                result[i] = np.mean(window_slice) if statistic == 'mean' else np.std(window_slice)
             return result
 
-        else: # 'asymmetric_window'
-            # 3) Use all available values up to window size (original behavior)
-            data_np = np.array(data)
+        elif self.running_mean_setting == 'asymmetric_window':
             result = np.zeros_like(data_np, dtype=float)
             half_window = window_size // 2
-            
             for i in range(len(data_np)):
                 start_idx = max(0, i - half_window)
                 end_idx = min(len(data_np), i + half_window + 1)
                 window_slice = data_np[start_idx:end_idx]
-                
-                if statistic == 'mean':
-                    result[i] = np.mean(window_slice)
-                else: # std
-                    result[i] = np.std(window_slice)
+                result[i] = np.mean(window_slice) if statistic == 'mean' else np.std(window_slice)
             return result
+
+        elif self.running_mean_setting == 'gaussian':
+            if statistic == 'mean':
+                from scipy.ndimage import gaussian_filter1d
+                sigma = max(1.0, window_size / 2.0)
+                return gaussian_filter1d(data_np, sigma=sigma)
+            else:
+                return series.rolling(window=window_size, center=True, min_periods=1).std().bfill().ffill().to_numpy()
+
+        elif self.running_mean_setting.startswith('savgol_'):
+            polyorder = int(self.running_mean_setting.split('_')[1])
+            window_len = window_size
+            if window_len % 2 == 0:
+                window_len += 1 # Savgol requires odd window length
+            if window_len <= polyorder:
+                window_len = polyorder + 1
+                if window_len % 2 == 0:
+                    window_len += 1
+            if statistic == 'mean':
+                from scipy.signal import savgol_filter
+                try:
+                    return savgol_filter(data_np, window_length=window_len, polyorder=polyorder)
+                except Exception as e:
+                    print(f"Savgol failed: {e}")
+                    return data_np
+            else:
+                return series.rolling(window=window_size, center=True, min_periods=1).std().bfill().ffill().to_numpy()
+
+        elif self.running_mean_setting == 'bspline':
+            if statistic == 'mean':
+                from scipy.interpolate import UnivariateSpline
+                try:
+                    variance = np.var(data_np)
+                    if variance == 0: return data_np
+                    # Normalizing s so that it roughly correlates with window size
+                    s_val = len(data_np) * variance * (window_size / 100.0)
+                    spline = UnivariateSpline(np.arange(len(data_np)), data_np, s=s_val)
+                    return spline(np.arange(len(data_np)))
+                except Exception as e:
+                    print(f"BSpline failed: {e}")
+                    return data_np
+            else:
+                return series.rolling(window=window_size, center=True, min_periods=1).std().bfill().ffill().to_numpy()
+
+        elif self.running_mean_setting == 'ema':
+            if statistic == 'mean':
+                return series.ewm(span=window_size, adjust=False).mean().to_numpy()
+            else:
+                return series.ewm(span=window_size, adjust=False).std().bfill().to_numpy()
+
+        return data_np
 
     def _update_axis_properties(self, visible_plots_info, x_label_override: str = None):
         # x_label_override is the x-property from the selected row.
@@ -2898,6 +3052,8 @@ class LogPlotPanel(QWidget):
             'keywords': self.main_window.chip_input.get_chips(), # Added keywords
             'average_choices': self.average_user_choices,
             'running_mean_setting': self.running_mean_setting,
+            'enforce_zero_start': self.enforce_zero_start,
+            'quantize_points': self.quantize_points,
             'global_label_map': self.global_label_map,
             'custom_properties': self.custom_properties,
             'scale_lock': self.scale_lock_enabled,
@@ -3119,6 +3275,8 @@ class LogPlotPanel(QWidget):
 
             # Restore Settings
             self.running_mean_setting = data.get('running_mean_setting', 'symmetric_window')
+            self.enforce_zero_start = data.get('enforce_zero_start', False)
+            self.quantize_points = data.get('quantize_points', None)
             self.scale_lock_enabled = data.get('scale_lock', False)
             axes_locked = data.get('axes_lock', False)
             self.lock_axes_btn.setChecked(axes_locked)
