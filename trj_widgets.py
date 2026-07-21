@@ -8,29 +8,62 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF
 from PyQt6.QtGui import QPainter, QBrush, QColor, QLinearGradient, QMouseEvent, QFont
 
+class ConstrainedDoubleSpinBox(QDoubleSpinBox):
+    """
+    A QDoubleSpinBox that allows typing values outside a local range
+    but clamps scrolling to that local range.
+    """
+    def __init__(self, c_min, c_max, parent=None):
+        super().__init__(parent)
+        self._c_min = c_min
+        self._c_max = c_max
+        # Set a very wide range for typing, but internal logic will use _c_min/_c_max for scrolling
+        self.setRange(-1e12, 1e12) 
+
+    def stepBy(self, steps):
+        current_val = self.value()
+        step_size = self.singleStep()
+
+        new_val = current_val + step_size * steps
+        
+        # Clamp new_val to the local constraints for scrolling
+        if new_val < self._c_min:
+            new_val = self._c_min
+        elif new_val > self._c_max:
+            new_val = self._c_max
+        
+        # Prevent stepping beyond the constraint bounds if already at them
+        if (current_val == self._c_min and steps < 0) or \
+           (current_val == self._c_max and steps > 0):
+            return # Don't change value
+
+        self.setValue(new_val)
+
 class FilterBarWidget(QWidget):
     """
-    Vertical bar widget for filtering a range (min/max).
+    Vertical bar widget for filtering multiple ranges (min/max segments).
     Includes logic to maintain relative handle positions when data range changes.
+    Supports splitting, joining, creating, and deleting segments.
     """
-    rangeChanged = pyqtSignal(float, float)
+    rangesChanged = pyqtSignal(list)  # Emits list of (min, max) tuples
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(40) # Shrunk width as requested
+        self.setFixedWidth(40)
         self.setMinimumHeight(150)
 
         self.data_min = 0.0
         self.data_max = 100.0
-        self.current_min = 0.0
-        self.current_max = 100.0
+        
+        # List of tuples [(min, max), ...] sorted by value (descending visual, but handled by logic)
+        self.current_ranges = [(0.0, 100.0)] 
 
-        self.hover_handle = None 
+        self.hover_handle = None  # (index, 'top'|'bottom'|'center')
         self.dragging = None
         self.drag_start_y = 0
         self.drag_start_vals = (0.0, 0.0)
 
-        self.bar_width = 14
+        self.bar_width = 8
         self.margin_top = 20
         self.margin_bottom = 20
         self.bar_x = (40 - self.bar_width) // 2
@@ -44,25 +77,55 @@ class FilterBarWidget(QWidget):
         old_range = self.data_max - self.data_min
         if old_range == 0: old_range = 1.0
         
-        rel_min = (self.current_min - self.data_min) / old_range
-        rel_max = (self.current_max - self.data_min) / old_range
-        
-        rel_min = max(0.0, min(1.0, rel_min))
-        rel_max = max(0.0, min(1.0, rel_max))
-        
+        # Calculate relative positions for all existing ranges
+        rel_ranges = []
+        for cmin, cmax in self.current_ranges:
+            rmin = (cmin - self.data_min) / old_range
+            rmax = (cmax - self.data_min) / old_range
+            rel_ranges.append((max(0.0, min(1.0, rmin)), max(0.0, min(1.0, rmax))))
+            
         self.data_min = dmin
         self.data_max = dmax
         new_range = dmax - dmin
         
-        self.current_min = self.data_min + (rel_min * new_range)
-        self.current_max = self.data_min + (rel_max * new_range)
-        
+        # Reconstruct ranges based on new data limits
+        self.current_ranges = []
+        for rmin, rmax in rel_ranges:
+            nmin = self.data_min + (rmin * new_range)
+            nmax = self.data_min + (rmax * new_range)
+            self.current_ranges.append((nmin, nmax))
+            
         self.update()
 
-    def set_current_range(self, cmin, cmax):
-        self.current_min = max(self.data_min, min(self.data_max, cmin))
-        self.current_max = max(self.data_min, min(self.data_max, cmax))
+    def set_current_ranges(self, ranges):
+        """Sets the list of active ranges."""
+        valid_ranges = []
+        for start, end in ranges:
+            start = max(self.data_min, min(self.data_max, start))
+            end = max(self.data_min, min(self.data_max, end))
+            if start > end: start, end = end, start
+            valid_ranges.append((start, end))
+        
+        # Sort and merge overlapping if necessary (though UI prevents overlap usually)
+        valid_ranges.sort(key=lambda x: x[0])
+        self.current_ranges = valid_ranges
         self.update()
+
+    # Backwards compatibility wrapper
+    def set_current_range(self, cmin, cmax):
+        self.set_current_ranges([(cmin, cmax)])
+
+    @property
+    def current_min(self):
+        # Return global min across all ranges for compatibility
+        if not self.current_ranges: return self.data_min
+        return min(r[0] for r in self.current_ranges)
+
+    @property
+    def current_max(self):
+        # Return global max across all ranges for compatibility
+        if not self.current_ranges: return self.data_max
+        return max(r[1] for r in self.current_ranges)
 
     def val_to_y(self, val):
         h = self.height() - self.margin_top - self.margin_bottom
@@ -103,103 +166,134 @@ class FilterBarWidget(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(bar_rect, 3, 3)
 
-        y_high = self.val_to_y(self.current_max)
-        y_low = self.val_to_y(self.current_min)
-        
-        range_rect = QRectF(self.bar_x, y_high, self.bar_width, y_low - y_high)
-        painter.setBrush(QColor(255, 150, 150))
-        painter.drawRect(range_rect)
-
         handle_h = 6
-        handle_w = self.bar_width + 6
-        handle_x = self.bar_x - 3
-        
-        col_top = QColor(0, 120, 240) if self.hover_handle == 'top' else QColor(100, 100, 100)
-        painter.setBrush(col_top)
-        painter.drawRoundedRect(QRectF(handle_x, y_high - handle_h/2, handle_w, handle_h), 2, 2)
-        
-        col_bot = QColor(0, 120, 240) if self.hover_handle == 'bottom' else QColor(100, 100, 100)
-        painter.setBrush(col_bot)
-        painter.drawRoundedRect(QRectF(handle_x, y_low - handle_h/2, handle_w, handle_h), 2, 2)
+        handle_w = 20
+        handle_x = self.bar_x + (self.bar_width - handle_w) / 2
+
+        for i, (cmin, cmax) in enumerate(self.current_ranges):
+            y_high = self.val_to_y(cmax)
+            y_low = self.val_to_y(cmin)
+            
+            range_rect = QRectF(self.bar_x, y_high, self.bar_width, y_low - y_high)
+            painter.setBrush(QColor(255, 150, 150))
+            painter.drawRect(range_rect)
+
+            # Top Handle
+            is_hover_top = (self.hover_handle == (i, 'top'))
+            col_top = QColor(0, 120, 240) if is_hover_top else QColor(100, 100, 100)
+            painter.setBrush(col_top)
+            painter.drawRoundedRect(QRectF(handle_x, y_high - handle_h/2, handle_w, handle_h), 2, 2)
+            
+            # Bottom Handle
+            is_hover_bot = (self.hover_handle == (i, 'bottom'))
+            col_bot = QColor(0, 120, 240) if is_hover_bot else QColor(100, 100, 100)
+            painter.setBrush(col_bot)
+            painter.drawRoundedRect(QRectF(handle_x, y_low - handle_h/2, handle_w, handle_h), 2, 2)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton and self.hover_handle:
             self.dragging = self.hover_handle
             self.drag_start_y = event.position().y()
-            self.drag_start_vals = (self.current_min, self.current_max)
+            idx, _ = self.hover_handle
+            self.drag_start_vals = self.current_ranges[idx]
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.show_context_menu(event.position())
 
-    def mouseMoveEvent(self, event: QMouseEvent):
-        y = event.position().y()
-        y_high = self.val_to_y(self.current_max)
-        y_low = self.val_to_y(self.current_min)
-        tol = 8
+    def show_context_menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        val = self.y_to_val(pos.y())
+        
+        # Check if inside a segment
+        target_idx = -1
+        for i, (rmin, rmax) in enumerate(self.current_ranges):
+            if rmin <= val <= rmax:
+                target_idx = i
+                break
+        
+        menu = QMenu(self)
+        if target_idx != -1:
+            # Inside a red segment
+            edit_action = menu.addAction("Set Filter Range")
+            edit_action.triggered.connect(lambda: self.open_set_range_dialog(target_idx))
 
-        if not self.dragging:
-            if abs(y - y_high) < tol:
-                self.hover_handle = 'top'
-                self.setCursor(Qt.CursorShape.SizeVerCursor)
-            elif abs(y - y_low) < tol:
-                self.hover_handle = 'bottom'
-                self.setCursor(Qt.CursorShape.SizeVerCursor)
-            elif y_high < y < y_low:
-                self.hover_handle = 'center'
-                self.setCursor(Qt.CursorShape.SizeAllCursor)
-            else:
-                self.hover_handle = None
-                self.setCursor(Qt.CursorShape.ArrowCursor)
-            self.update()
+            split_action = menu.addAction("Split Filter segment")
+            split_action.triggered.connect(lambda: self.split_segment(target_idx, val))
+            
+            del_action = menu.addAction("Delete Filter segment")
+            del_action.triggered.connect(lambda: self.delete_segment(target_idx))
         else:
-            delta_px = y - self.drag_start_y
+            # Inside a pale area
+            create_action = menu.addAction("Create Filter segment")
+            create_action.triggered.connect(lambda: self.create_segment(val))
             
-            if self.dragging == 'top':
-                val = self.y_to_val(y)
-                val = max(self.current_min, val)
-                self.current_max = val
-                self.rangeChanged.emit(self.current_min, self.current_max)
-
-            elif self.dragging == 'bottom':
-                val = self.y_to_val(y)
-                val = min(self.current_max, val)
-                self.current_min = val
-                self.rangeChanged.emit(self.current_min, self.current_max)
-
-            elif self.dragging == 'center':
-                start_min, start_max = self.drag_start_vals
-                diff = start_max - start_min
-                start_y_min = self.val_to_y(start_min)
-                target_y_min = start_y_min + delta_px
-                new_min = self.y_to_val(target_y_min)
-                
-                if new_min < self.data_min: new_min = self.data_min
-                if new_min + diff > self.data_max: new_min = self.data_max - diff
-                
-                self.current_min = new_min
-                self.current_max = new_min + diff
-                self.rangeChanged.emit(self.current_min, self.current_max)
+            # Check for joining
+            # Find neighbors
+            # Since self.current_ranges is likely sorted by min logic or just implementation order
+            # but let's ensure we find the gap.
+            sorted_ranges = sorted(enumerate(self.current_ranges), key=lambda x: x[1][0])
             
-            self.update()
+            below_idx = -1
+            above_idx = -1
+            
+            for i in range(len(sorted_ranges)):
+                idx, (rmin, rmax) = sorted_ranges[i]
+                if rmax < val:
+                    below_idx = idx # Found a segment strictly below val
+                if rmin > val:
+                    above_idx = idx # Found a segment strictly above val
+                    break # First one above is the immediate neighbor
+            
+            if below_idx != -1 and above_idx != -1:
+                join_action = menu.addAction("Join Filter segments")
+                join_action.triggered.connect(lambda: self.join_segments(below_idx, above_idx))
+                
+        menu.exec(self.mapToGlobal(pos.toPoint()))
 
-    def mouseReleaseEvent(self, event):
-        self.dragging = None
-        self.update()
+    def open_set_range_dialog(self, target_idx):
+        if target_idx < 0 or target_idx >= len(self.current_ranges):
+            return
 
-    def mouseDoubleClickEvent(self, event):
+        # Ensure sorted for checking neighbors
+        sorted_indices = sorted(range(len(self.current_ranges)), key=lambda k: self.current_ranges[k][0])
+        sorted_pos = sorted_indices.index(target_idx)
+        
+        # Determine constraints
+        constraint_min = self.data_min
+        constraint_max = self.data_max
+        
+        if sorted_pos > 0:
+            prev_idx = sorted_indices[sorted_pos - 1]
+            constraint_min = self.current_ranges[prev_idx][1] # Max of previous
+        
+        if sorted_pos < len(self.current_ranges) - 1:
+            next_idx = sorted_indices[sorted_pos + 1]
+            constraint_max = self.current_ranges[next_idx][0] # Min of next
+        
         dialog = QDialog(self)
         dialog.setWindowTitle("Set Filter Range")
         layout = QFormLayout(dialog)
         
-        sp_min = QDoubleSpinBox()
-        sp_min.setRange(-1e12, 1e12)
-        sp_min.setDecimals(4)
-        sp_min.setValue(self.current_min)
+        cur_min, cur_max = self.current_ranges[target_idx]
         
-        sp_max = QDoubleSpinBox()
-        sp_max.setRange(-1e12, 1e12)
+        def clamp_val(spinbox):
+            val = spinbox.value()
+            clamped = max(constraint_min, min(constraint_max, val))
+            if val != clamped:
+                spinbox.setValue(clamped)
+
+        sp_max = ConstrainedDoubleSpinBox(constraint_min, constraint_max)
         sp_max.setDecimals(4)
-        sp_max.setValue(self.current_max)
+        sp_max.setValue(cur_max)
+        sp_max.editingFinished.connect(lambda: clamp_val(sp_max))
         
-        layout.addRow("Min:", sp_min)
+        sp_min = ConstrainedDoubleSpinBox(constraint_min, constraint_max)
+        sp_min.setDecimals(4)
+        sp_min.setValue(cur_min)
+        sp_min.editingFinished.connect(lambda: clamp_val(sp_min))
+        
         layout.addRow("Max:", sp_max)
+        layout.addRow("Min:", sp_min)
+        layout.addRow(QLabel(f"Bounds: [{constraint_min:.4f}, {constraint_max:.4f}]"))
         
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(dialog.accept)
@@ -209,9 +303,220 @@ class FilterBarWidget(QWidget):
         if dialog.exec():
             v1 = sp_min.value()
             v2 = sp_max.value()
+            
+            # Final clamp
+            v1 = max(constraint_min, min(constraint_max, v1))
+            v2 = max(constraint_min, min(constraint_max, v2))
+            
             if v1 > v2: v1, v2 = v2, v1
-            self.set_current_range(v1, v2)
-            self.rangeChanged.emit(self.current_min, self.current_max)
+            
+            self.current_ranges[target_idx] = (v1, v2)
+            self.current_ranges.sort(key=lambda x: x[0])
+            self.rangesChanged.emit(self.current_ranges)
+            self.update()
+
+    def split_segment(self, idx, split_val):
+        rmin, rmax = self.current_ranges[idx]
+        if abs(rmin - split_val) < 1e-6 or abs(rmax - split_val) < 1e-6:
+            return # Too close to edge
+            
+        # Create two new segments
+        seg1 = (rmin, split_val)
+        seg2 = (split_val, rmax)
+        
+        self.current_ranges.pop(idx)
+        self.current_ranges.append(seg1)
+        self.current_ranges.append(seg2)
+        # Keep sorted
+        self.current_ranges.sort(key=lambda x: x[0])
+        self.rangesChanged.emit(self.current_ranges)
+        self.update()
+
+    def delete_segment(self, idx):
+        self.current_ranges.pop(idx)
+        self.rangesChanged.emit(self.current_ranges)
+        self.update()
+
+    def create_segment(self, val):
+        # Create a small segment centered at val, but constrained by neighbors
+        delta = (self.data_max - self.data_min) * 0.05 # 5% width default
+        new_min = val - delta/2
+        new_max = val + delta/2
+        
+        # Constrain
+        new_min = max(self.data_min, new_min)
+        new_max = min(self.data_max, new_max)
+        
+        # Check overlaps
+        # Simplest way: just clip against existing ranges
+        # Better: clamp to gap
+        
+        sorted_ranges = sorted(self.current_ranges, key=lambda x: x[0])
+        gap_min = self.data_min
+        gap_max = self.data_max
+        
+        for rmin, rmax in sorted_ranges:
+            if rmax < val:
+                gap_min = max(gap_min, rmax)
+            if rmin > val:
+                gap_max = min(gap_max, rmin)
+                break
+                
+        new_min = max(new_min, gap_min)
+        new_max = min(new_max, gap_max)
+        
+        if new_max > new_min:
+            self.current_ranges.append((new_min, new_max))
+            self.current_ranges.sort(key=lambda x: x[0])
+            self.rangesChanged.emit(self.current_ranges)
+            self.update()
+
+    def join_segments(self, idx1, idx2):
+        # Join range idx1 and idx2
+        r1 = self.current_ranges[idx1]
+        r2 = self.current_ranges[idx2]
+        
+        new_min = min(r1[0], r2[0])
+        new_max = max(r1[1], r2[1])
+        
+        # Remove both
+        # Be careful with indices shifting. Remove largest index first.
+        if idx1 > idx2:
+            self.current_ranges.pop(idx1)
+            self.current_ranges.pop(idx2)
+        else:
+            self.current_ranges.pop(idx2)
+            self.current_ranges.pop(idx1)
+            
+        self.current_ranges.append((new_min, new_max))
+        self.current_ranges.sort(key=lambda x: x[0])
+        self.rangesChanged.emit(self.current_ranges)
+        self.update()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        y = event.position().y()
+        tol = 8
+
+        if not self.dragging:
+            # Hit test
+            found = False
+            for i, (rmin, rmax) in enumerate(self.current_ranges):
+                y_high = self.val_to_y(rmax)
+                y_low = self.val_to_y(rmin)
+                
+                if abs(y - y_high) < tol:
+                    self.hover_handle = (i, 'top')
+                    self.setCursor(Qt.CursorShape.SizeVerCursor)
+                    found = True
+                    break
+                elif abs(y - y_low) < tol:
+                    self.hover_handle = (i, 'bottom')
+                    self.setCursor(Qt.CursorShape.SizeVerCursor)
+                    found = True
+                    break
+                elif y_high < y < y_low:
+                    self.hover_handle = (i, 'center')
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                    found = True
+                    break
+            
+            if not found:
+                self.hover_handle = None
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            
+            self.update()
+        else:
+            idx, mode = self.dragging
+            curr_ranges = sorted(self.current_ranges, key=lambda x: x[0])
+            # Find where 'idx' is in the sorted list to check neighbors
+            # (Assuming self.current_ranges stays sorted or we resort)
+            # Actually, let's work with the actual object in current_ranges
+            
+            # Constraints
+            # Find neighbors
+            target_range = self.current_ranges[idx]
+            # Since list might not be sorted by index, find position in sorted comparison
+            sorted_indices = sorted(range(len(self.current_ranges)), key=lambda k: self.current_ranges[k][0])
+            sorted_pos = sorted_indices.index(idx)
+            
+            # Constraint bounds
+            constraint_min = self.data_min
+            constraint_max = self.data_max
+            
+            if sorted_pos > 0:
+                prev_idx = sorted_indices[sorted_pos - 1]
+                constraint_min = self.current_ranges[prev_idx][1] # Max of previous
+            
+            if sorted_pos < len(self.current_ranges) - 1:
+                next_idx = sorted_indices[sorted_pos + 1]
+                constraint_max = self.current_ranges[next_idx][0] # Min of next
+                
+            delta_px = y - self.drag_start_y
+            
+            if mode == 'top':
+                # Changing MAX value
+                val = self.y_to_val(y)
+                # Max cannot go below Min of this range
+                val = max(target_range[0], val)
+                # Max cannot go above next range's Min
+                val = min(constraint_max, val)
+                
+                self.current_ranges[idx] = (target_range[0], val)
+
+            elif mode == 'bottom':
+                # Changing MIN value
+                val = self.y_to_val(y)
+                # Min cannot go above Max of this range
+                val = min(target_range[1], val)
+                # Min cannot go below prev range's Max
+                val = max(constraint_min, val)
+                
+                self.current_ranges[idx] = (val, target_range[1])
+
+            elif mode == 'center':
+                start_min, start_max = self.drag_start_vals
+                diff = start_max - start_min
+                
+                start_y_min = self.val_to_y(start_min)
+                target_y_min = start_y_min + delta_px
+                new_min = self.y_to_val(target_y_min)
+                
+                new_max = new_min + diff
+                
+                # Check bounds against constraints
+                if new_min < constraint_min:
+                    new_min = constraint_min
+                    new_max = new_min + diff
+                
+                if new_max > constraint_max:
+                    new_max = constraint_max
+                    new_min = new_max - diff
+                    
+                self.current_ranges[idx] = (new_min, new_max)
+            
+            self.rangesChanged.emit(self.current_ranges)
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        self.dragging = None
+        # Ensure sorted order after drag
+        self.current_ranges.sort(key=lambda x: x[0])
+        self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        pos = event.position().y()
+        val = self.y_to_val(pos)
+        
+        target_idx = -1
+        for i, (rmin, rmax) in enumerate(self.current_ranges):
+            if rmin <= val <= rmax:
+                target_idx = i
+                break
+        
+        if target_idx != -1:
+            self.open_set_range_dialog(target_idx)
+        else:
+            self.create_segment(val)
 
 
 class HeatmapBarWidget(QWidget):

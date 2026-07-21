@@ -284,7 +284,8 @@ class TrjPlotPanel(QWidget):
         self.player_controls.fpsChanged.connect(self.controller.set_fps)
         self.player_controls.autoReplayToggled.connect(self.controller.set_auto_replay)
         
-        self.filter_bar.rangeChanged.connect(self._on_filter_bar_changed)
+        # Updated connection
+        self.filter_bar.rangesChanged.connect(self._on_filter_bar_changed)
         
         self.popout_btn.clicked.connect(self.launch_popout)
         self.export_btn.clicked.connect(self.quick_export)
@@ -431,7 +432,7 @@ class TrjPlotPanel(QWidget):
             'z_col': "No Z-Filter", 'h_col': "No Heatmap",
             'view_lock': True, 'view_sync': True, 'view_range': None,
             'current_step_index': 0,
-            'z_range': (float('-inf'), float('inf'))
+            'z_ranges': [(float('-inf'), float('inf'))] # Default single full range
         }
         row_data = {
             'state': state, 'is_heatmap': False, 'color': "#000000",
@@ -667,7 +668,7 @@ class TrjPlotPanel(QWidget):
                     state['current_step_index'] = step
                     item.setData(Qt.ItemDataRole.UserRole, state)
 
-    def _on_filter_bar_changed(self, min_val, max_val):
+    def _on_filter_bar_changed(self, ranges):
         self.update_plot_from_selection()
         row = self.plot_table.currentRow()
         if row >= 0:
@@ -675,7 +676,7 @@ class TrjPlotPanel(QWidget):
             if item:
                 state = item.data(Qt.ItemDataRole.UserRole)
                 if state:
-                    state['z_range'] = (min_val, max_val)
+                    state['z_ranges'] = ranges
                     item.setData(Qt.ItemDataRole.UserRole, state)
 
     def _on_controller_bounds_changed(self, bounds):
@@ -733,7 +734,7 @@ class TrjPlotPanel(QWidget):
             'view_sync': old_state.get('view_sync', False),
             'view_range': old_state.get('view_range', None),
             'current_step_index': old_state.get('current_step_index', 0),
-            'z_range': old_state.get('z_range', (self.filter_bar.current_min, self.filter_bar.current_max))
+            'z_ranges': old_state.get('z_ranges', self.filter_bar.current_ranges)
         }
         
         if state['view_lock']:
@@ -811,9 +812,10 @@ class TrjPlotPanel(QWidget):
                 )
                 self.filter_bar.set_data_range(dmin, dmax)
                 
-                if 'z_range' in state:
-                    cmin, cmax = state['z_range']
-                    self.filter_bar.set_current_range(cmin, cmax)
+                if 'z_ranges' in state:
+                    self.filter_bar.set_current_ranges(state['z_ranges'])
+                elif 'z_range' in state: # Legacy
+                    self.filter_bar.set_current_ranges([state['z_range']])
             
             step_idx = state.get('current_step_index', 0)
             self.controller.set_timestep_index(step_idx)
@@ -857,10 +859,10 @@ class TrjPlotPanel(QWidget):
                 self.filter_bar.set_data_range(dmin, dmax)
                 
                 if is_new_filter_activation:
-                    self.filter_bar.set_current_range(dmin, dmax)
-                    state['z_range'] = (dmin, dmax)
+                    self.filter_bar.set_current_ranges([(dmin, dmax)])
+                    state['z_ranges'] = [(dmin, dmax)]
                 else:
-                    state['z_range'] = (self.filter_bar.current_min, self.filter_bar.current_max)
+                    state['z_ranges'] = self.filter_bar.current_ranges
 
         item = self.plot_table.item(row, 1)
         item.setData(Qt.ItemDataRole.UserRole, state)
@@ -943,16 +945,16 @@ class TrjPlotPanel(QWidget):
         # Calculate relative z-filter handles for persistence
         bar_min = self.filter_bar.data_min
         bar_max = self.filter_bar.data_max
-        cur_min = self.filter_bar.current_min
-        cur_max = self.filter_bar.current_max
-        
         range_span = bar_max - bar_min
         if range_span == 0: range_span = 1.0
         
-        rel_min = (cur_min - bar_min) / range_span
-        rel_max = (cur_max - bar_min) / range_span
-        rel_min = max(0.0, min(1.0, rel_min))
-        rel_max = max(0.0, min(1.0, rel_max))
+        rel_ranges = []
+        for cmin, cmax in self.filter_bar.current_ranges:
+            rel_min = (cmin - bar_min) / range_span
+            rel_max = (cmax - bar_min) / range_span
+            rel_min = max(0.0, min(1.0, rel_min))
+            rel_max = max(0.0, min(1.0, rel_max))
+            rel_ranges.append((rel_min, rel_max))
 
         config = {
             'active': True,
@@ -964,8 +966,8 @@ class TrjPlotPanel(QWidget):
             'y_label': y_label,
             'z_filter_col': z_col,
             'z_filter_ref': state.get('z_ref'),
-            'z_range': (cur_min, cur_max),
-            'z_range_rel': (rel_min, rel_max),
+            'z_ranges': self.filter_bar.current_ranges,
+            'z_ranges_rel': rel_ranges,
             'heatmap_col': h_col,
             'heatmap_ref': state.get('h_ref'),
             'heatmap_gradient': gradient,

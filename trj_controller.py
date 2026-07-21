@@ -223,6 +223,16 @@ class TrjController(QObject):
         if z_col and z_col not in ["Select Z-Filter", "No Z-Filter"]:
             z_ref = self.view_config.get('z_filter_ref', 'Current')
             
+            # Helper to combine multiple ranges into a mask
+            def get_range_mask(series, ranges):
+                combined = np.zeros(len(series), dtype=bool)
+                if not ranges: # If no ranges, maybe show all or none? Usually means uninitialized filter
+                    return np.ones(len(series), dtype=bool) 
+                    
+                for rmin, rmax in ranges:
+                    combined |= (series >= rmin) & (series <= rmax)
+                return combined
+
             if z_ref == 'Current':
                 # Dynamic per-step filtering relative to current distribution
                 if z_col in df.columns:
@@ -233,14 +243,25 @@ class TrjController(QObject):
                     self.boundsChanged.emit({'z_filter': (curr_min, curr_max)})
                     
                     # Apply relative handle positions to current bounds
-                    rel_min, rel_max = self.view_config.get('z_range_rel', (0.0, 1.0))
-                    thresh_min = curr_min + rel_min * (curr_max - curr_min)
-                    thresh_max = curr_min + rel_max * (curr_max - curr_min)
+                    # z_ranges_rel should be a list of (rel_min, rel_max)
+                    rel_ranges = self.view_config.get('z_ranges_rel', [(0.0, 1.0)])
                     
-                    mask = (df[z_col] >= thresh_min) & (df[z_col] <= thresh_max)
+                    abs_ranges = []
+                    for rel_min, rel_max in rel_ranges:
+                        thresh_min = curr_min + rel_min * (curr_max - curr_min)
+                        thresh_max = curr_min + rel_max * (curr_max - curr_min)
+                        abs_ranges.append((thresh_min, thresh_max))
+                        
+                    mask = get_range_mask(df[z_col], abs_ranges)
+
             else:
                 # Initial / Final Logic (Absolute filtering)
-                z_min, z_max = self.view_config.get('z_range', (float('-inf'), float('inf')))
+                # z_ranges should be a list of (min, max)
+                z_ranges = self.view_config.get('z_ranges', [])
+                if not z_ranges:
+                    # Fallback for single range legacy or default
+                    legacy_range = self.view_config.get('z_range', (float('-inf'), float('inf')))
+                    z_ranges = [legacy_range]
                 
                 if z_ref in ['Initial', 'Final']:
                     target_key = 'initial' if z_ref == 'Initial' else 'final'
@@ -251,7 +272,7 @@ class TrjController(QObject):
                             
                     ref_df = self._ref_cache.get(target_key)
                     if ref_df is not None and z_col in ref_df.columns and 'id' in ref_df.columns:
-                        ref_mask = (ref_df[z_col] >= z_min) & (ref_df[z_col] <= z_max)
+                        ref_mask = get_range_mask(ref_df[z_col], z_ranges)
                         valid_ids = ref_df.loc[ref_mask, 'id'].values
                         if 'id' in df.columns:
                             mask = df['id'].isin(valid_ids)
