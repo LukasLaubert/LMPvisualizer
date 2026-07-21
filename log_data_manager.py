@@ -4,7 +4,88 @@ import re
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import ast
 from typing import Dict, Optional, Tuple, List
+
+
+def split_indexed_token(token: str, known_names) -> Tuple[str, Optional[str]]:
+    """Split tokens like 'Lx(end-1)' into ('Lx', 'end-1') when Lx is known."""
+    known_set = set(known_names or [])
+    if token in known_set:
+        return token, None
+
+    for name in sorted(known_set, key=len, reverse=True):
+        prefix = f"{name}("
+        if token.startswith(prefix) and token.endswith(")"):
+            index_expr = token[len(prefix):-1].strip()
+            return name, index_expr
+
+    return token, None
+
+
+def evaluate_index_expression(expr: str, end_value: int) -> int:
+    """Evaluate a restricted 1-based index expression with 'end' support."""
+    if end_value < 1:
+        raise ValueError("No values are available for indexing.")
+
+    allowed_binops = {
+        ast.Add: lambda a, b: a + b,
+        ast.Sub: lambda a, b: a - b,
+        ast.Mult: lambda a, b: a * b,
+        ast.Div: lambda a, b: a / b,
+        ast.FloorDiv: lambda a, b: a // b,
+        ast.Mod: lambda a, b: a % b,
+        ast.Pow: lambda a, b: a ** b,
+    }
+    allowed_unary = {
+        ast.UAdd: lambda a: a,
+        ast.USub: lambda a: -a,
+    }
+
+    def eval_node(node):
+        if isinstance(node, ast.Expression):
+            return eval_node(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.Name) and node.id == "end":
+            return end_value
+        if isinstance(node, ast.BinOp) and type(node.op) in allowed_binops:
+            return allowed_binops[type(node.op)](eval_node(node.left), eval_node(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in allowed_unary:
+            return allowed_unary[type(node.op)](eval_node(node.operand))
+        raise ValueError("Index expressions may only use numbers, 'end', and arithmetic operators.")
+
+    try:
+        value = eval_node(ast.parse(expr, mode="eval"))
+    except Exception as exc:
+        raise ValueError(f"Invalid index expression '{expr}': {exc}")
+
+    if not np.isfinite(value) or abs(value - round(value)) > 1e-9:
+        raise ValueError(f"Index expression '{expr}' must evaluate to an integer.")
+
+    index = int(round(value))
+    if index < 1 or index > end_value:
+        raise IndexError(f"Index {index} is out of range. Available range is 1..{end_value}.")
+    return index
+
+
+def formula_min(*values):
+    if not values:
+        raise ValueError("min() requires at least one value.")
+    result = values[0]
+    for value in values[1:]:
+        result = np.minimum(result, value)
+    return result
+
+
+def formula_max(*values):
+    if not values:
+        raise ValueError("max() requires at least one value.")
+    result = values[0]
+    for value in values[1:]:
+        result = np.maximum(result, value)
+    return result
+
 
 class LogDataManager:
     """Manages all simulation data using pandas. Supports Lazy Loading."""
@@ -49,21 +130,34 @@ class LogDataManager:
         
         formula = self.custom_properties[property_name]
         
-        # Identify columns used in the formula: {ColumnName}
+        # Identify columns used in the formula: {ColumnName} or {ColumnName(index)}
         pattern = r"\{([^}]+)\}"
         tokens = re.findall(pattern, formula)
+        known_names = set(df.columns) | set(self.custom_properties)
+        if df.index.name:
+            known_names.add(df.index.name)
         
         local_env = {}
         
         # Recursively resolve tokens
         for token in set(tokens):
+            base_token, index_expr = split_indexed_token(token, known_names)
             # If the token refers to the property itself (e.g. 'Step' -> '{Step}/10'),
             # force fetching the raw column to avoid infinite recursion.
-            ignore_custom = (token == property_name)
-            series = self._get_series(df, token, ignore_custom=ignore_custom)
+            ignore_custom = (base_token == property_name)
+            series = self._get_series(df, base_token, ignore_custom=ignore_custom)
             
             if series is None:
                 return None
+            if index_expr is not None:
+                try:
+                    if not hasattr(series, "iloc"):
+                        return None
+                    index = evaluate_index_expression(index_expr, len(series))
+                    series = series.iloc[index - 1]
+                except Exception as e:
+                    print(f"Error indexing token '{{{token}}}': {e}")
+                    return None
             local_env[token] = series
 
         # Replace tokens in formula with valid variable names
@@ -89,6 +183,8 @@ class LogDataManager:
             "sin": np.sin,
             "cos": np.cos,
             "tan": np.tan,
+            "min": formula_min,
+            "max": formula_max,
             "e": np.e,
             "pi": np.pi,
         }
@@ -96,12 +192,29 @@ class LogDataManager:
         try:
             # Use eval with numpy support (via safe_globals and pandas series in token_map)
             result = eval(clean_formula, safe_globals, token_map)
+            if np.isscalar(result) or getattr(result, "ndim", None) == 0:
+                return pd.Series([float(result)] * len(df), index=df.index)
             return result
         except Exception as e:
             print(f"Error evaluating formula '{formula}': {e}")
             return None
 
     def _get_series(self, df: pd.DataFrame, col_name: str, ignore_custom: bool = False) -> Optional[pd.Series]:
+        known_names = set(df.columns) | set(self.custom_properties)
+        if df.index.name:
+            known_names.add(df.index.name)
+        base_name, index_expr = split_indexed_token(col_name, known_names)
+        if index_expr is not None:
+            series = self._get_series(df, base_name, ignore_custom=ignore_custom)
+            if series is None or not hasattr(series, "iloc"):
+                return None
+            try:
+                index = evaluate_index_expression(index_expr, len(series))
+                return series.iloc[index - 1]
+            except Exception as e:
+                print(f"Error indexing token '{{{col_name}}}': {e}")
+                return None
+
         if not ignore_custom and col_name in self.custom_properties:
              # Try to evaluate custom property first
              return self._evaluate_custom_property(df, col_name)
@@ -206,6 +319,73 @@ class LogDataManager:
     def get_all_column_names(self) -> List[str]:
         """Returns a list of all available data columns from the project."""
         return self.available_columns
+
+    def _get_column_lengths(self) -> Dict[str, int]:
+        """Return minimum observed lengths for raw columns across loaded project systems."""
+        lengths = {}
+        for study in list(self.data.keys()):
+            for system in list(self.data[study].keys()):
+                df = self._ensure_system_loaded(study, system)
+                if df is None:
+                    continue
+                for col in df.columns:
+                    col_len = len(df[col])
+                    lengths[col] = col_len if col not in lengths else min(lengths[col], col_len)
+                if df.index.name:
+                    idx_len = len(df.index)
+                    lengths[df.index.name] = idx_len if df.index.name not in lengths else min(lengths[df.index.name], idx_len)
+        return lengths
+
+    def _infer_custom_property_length(self, prop_name: str, custom_properties: Dict[str, str], raw_lengths: Dict[str, int], seen=None):
+        if prop_name in raw_lengths:
+            return raw_lengths[prop_name]
+        if prop_name not in custom_properties:
+            return None
+        if seen is None:
+            seen = set()
+        if prop_name in seen:
+            return None
+        seen.add(prop_name)
+
+        known_names = set(raw_lengths.keys()) | set(custom_properties.keys())
+        lengths = []
+        for token in re.findall(r"\{([^}]+)\}", custom_properties[prop_name]):
+            base, index_expr = split_indexed_token(token, known_names)
+            if index_expr is not None:
+                continue
+            length = self._infer_custom_property_length(base, custom_properties, raw_lengths, seen.copy())
+            if length is not None:
+                lengths.append(length)
+        return min(lengths) if lengths else 1
+
+    def validate_formula_indices(self, formula: str, custom_properties: Dict[str, str] = None) -> Tuple[bool, str]:
+        """Validate indexed tokens against available loaded data lengths."""
+        custom_properties = custom_properties if custom_properties is not None else self.custom_properties
+        initial_known_names = set(self.available_columns) | set(custom_properties.keys())
+        tokens_to_check = []
+
+        for token in re.findall(r"\{([^}]+)\}", formula):
+            base, index_expr = split_indexed_token(token, initial_known_names)
+            if index_expr is not None:
+                tokens_to_check.append((token, base, index_expr))
+
+        if not tokens_to_check:
+            return True, ""
+
+        raw_lengths = self._get_column_lengths()
+        known_names = set(raw_lengths.keys()) | initial_known_names
+
+        for token, _, _ in tokens_to_check:
+            base, index_expr = split_indexed_token(token, known_names)
+            length = self._infer_custom_property_length(base, custom_properties, raw_lengths)
+            if length is None:
+                continue
+            try:
+                evaluate_index_expression(index_expr, length)
+            except Exception as exc:
+                return False, f"Index for variable '{base}' in '{{{token}}}' is out of range or invalid:\n{exc}"
+
+        return True, ""
 
     def check_data_consistency(self, study: str) -> Dict[str, int]:
         """

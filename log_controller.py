@@ -69,7 +69,7 @@ class LogController:
         self.scale_locked = False
         self._is_syncing_axes = False # Flag to prevent recursive signal handling
 
-    def toggle_axes_lock(self, locked: bool):
+    def toggle_axes_lock(self, locked: bool, reset_view: bool = True):
         """Connects or disconnects the synchronization signal for all active Y-axes."""
         self.axes_locked = locked
         
@@ -87,7 +87,7 @@ class LogController:
                 vb.sigRangeChanged.connect(self._on_axis_range_changed)
         
         # Trigger reset view to apply the new locking logic immediately
-        if self.y_axes:
+        if reset_view and self.y_axes:
             self.reset_view()
 
     def toggle_scale_lock(self, locked: bool):
@@ -106,8 +106,38 @@ class LogController:
                 vb.sigRangeChanged.connect(self._on_axis_range_changed)
         
         # Trigger immediate sync if enabling scale lock
-        if self.y_axes:
+        if locked and self.y_axes:
             self.reset_view()
+
+    def align_zero_preserve_scale(self, source_vb: pg.ViewBox = None):
+        """Align y-axis zero positions without changing current y-range heights."""
+        if len(self.y_axes) < 2:
+            return
+
+        source_vb = source_vb or self.plot_item.getViewBox()
+        src_min, src_max = source_vb.viewRange()[1]
+        src_height = src_max - src_min
+        if src_height == 0:
+            return
+
+        src_zero_rel = -src_min / src_height
+        was_syncing = self._is_syncing_axes
+        self._is_syncing_axes = True
+        try:
+            for axis_info in self.y_axes.values():
+                vb = axis_info['viewbox']
+                if vb is source_vb:
+                    continue
+
+                curr_min, curr_max = vb.viewRange()[1]
+                curr_height = curr_max - curr_min
+                if curr_height == 0:
+                    continue
+
+                new_min = -src_zero_rel * curr_height
+                vb.setYRange(new_min, new_min + curr_height, padding=0)
+        finally:
+            self._is_syncing_axes = was_syncing
 
     def apply_current_locks(self):
         """Forces synchronization/reset of views. Useful after reloading plots."""
@@ -355,6 +385,63 @@ class LogController:
                 axis.setPen(color)
             self.y_axis_colors[y_col] = color  # Store for export
 
+    @staticmethod
+    def _viewbox_axis_inverted(viewbox, axis: str) -> bool:
+        key = 'xInverted' if axis == 'x' else 'yInverted'
+        return bool(getattr(viewbox, 'state', {}).get(key, False))
+
+    @staticmethod
+    def _oriented_range(values, inverted: bool):
+        if not values or len(values) != 2:
+            return values
+        return [values[1], values[0]] if inverted else values
+
+    def _x_inverted(self) -> bool:
+        return self._viewbox_axis_inverted(self.plot_item.getViewBox(), 'x')
+
+    def _y_inverted(self, y_col: str) -> bool:
+        if y_col in self.y_axes:
+            return self._viewbox_axis_inverted(self.y_axes[y_col]['viewbox'], 'y')
+        return False
+
+    @staticmethod
+    def _format_export_value(value):
+        if value is None:
+            return ''
+        try:
+            if np.isnan(value):
+                return ''
+        except TypeError:
+            pass
+        return str(value)
+
+    @staticmethod
+    def _subset_positions(base_x, sub_x):
+        base = np.asarray(base_x, dtype=float)
+        sub = np.asarray(sub_x, dtype=float)
+        if len(sub) > len(base):
+            return None
+
+        positions = []
+        search_start = 0
+        for value in sub:
+            if search_start >= len(base):
+                return None
+            matches = np.where(np.isclose(base[search_start:], value, rtol=1e-9, atol=1e-12))[0]
+            if len(matches) == 0:
+                return None
+            pos = search_start + int(matches[0])
+            positions.append(pos)
+            search_start = pos + 1
+        return positions
+
+    @staticmethod
+    def _align_values(length, positions, values):
+        aligned = [None] * length
+        for pos, value in zip(positions, values):
+            aligned[pos] = value
+        return aligned
+
     def export_plot(self, filename: str, figsize=None):
         # Dispatch to text export if applicable
         if filename.lower().endswith(('.csv', '.tsv')):
@@ -410,14 +497,15 @@ class LogController:
             if i > 1: ax_new.spines['right'].set_position(('outward', 60 * (i - 1)))
             matplotlib_axes[y_col] = ax_new
         
-        # Apply Limits
+        # Apply Limits, preserving PyQtGraph axis inversion.
         vb_main = self.plot_item.getViewBox()
-        ax_primary.set_xlim(vb_main.viewRange()[0])
+        ax_primary.set_xlim(self._oriented_range(vb_main.viewRange()[0], self._x_inverted()))
 
         for y_col in y_axis_order:
             ax = matplotlib_axes[y_col]
             if y_col in self.y_axes:
-                ax.set_ylim(self.y_axes[y_col]['viewbox'].viewRange()[1])
+                vb = self.y_axes[y_col]['viewbox']
+                ax.set_ylim(self._oriented_range(vb.viewRange()[1], self._y_inverted(y_col)))
 
         # Plot Curves
         all_handles = []
@@ -490,150 +578,136 @@ class LogController:
     def _export_text_data(self, filename: str):
         """Internal handler for exporting data to CSV or TSV."""
         import csv
-        
+
         delimiter = '\t' if filename.lower().endswith('.tsv') else ','
-        
-        # 1. Collect Visible Plots
-        # We must explicitly SKIP the auxiliary "running_mean_std" plots here.
-        # They will be picked up via association with the "running_mean" plots.
+
         plots_by_yaxis = {}
         axis_max_priority = {}
-        
         for name, plot_info in self.plots.items():
             if name.endswith("_running_mean_std"):
-                continue # Skip pure std plots; they are merged into mean plots later.
+                continue
 
             item = plot_info.get('item')
-            if not item or not item.isVisible(): continue
+            if not item or not item.isVisible():
+                continue
             y_col = plot_info.get('y_col')
-            if not y_col: continue
-            
-            if y_col not in plots_by_yaxis: plots_by_yaxis[y_col] = []
-            plots_by_yaxis[y_col].append((name, plot_info))
-            
-            prio = plot_info.get('layer_priority', 0)
-            if y_col not in axis_max_priority:
-                axis_max_priority[y_col] = prio
-            else:
-                axis_max_priority[y_col] = max(axis_max_priority[y_col], prio)
-        
-        if not plots_by_yaxis: return
+            if not y_col:
+                continue
 
-        # Sort axes
+            plots_by_yaxis.setdefault(y_col, []).append((name, plot_info))
+            axis_max_priority[y_col] = max(axis_max_priority.get(y_col, 0), plot_info.get('layer_priority', 0))
+
+        if not plots_by_yaxis:
+            return
+
         y_axis_order = [y_col for y_col in self.y_axes.keys() if y_col in plots_by_yaxis]
         y_axis_order.sort(key=lambda y: axis_max_priority.get(y, 0))
 
-        # Sort plots within axes
         sorted_plot_list = []
         for y_col in y_axis_order:
-            group_plots = sorted(plots_by_yaxis[y_col], key=lambda x: x[1].get('layer_priority', 0))
-            sorted_plot_list.extend(group_plots)
+            sorted_plot_list.extend(sorted(plots_by_yaxis[y_col], key=lambda x: x[1].get('layer_priority', 0)))
 
-        # 2. Group datasets by identical X-data
         x_groups = []
 
         for name, plot_info in sorted_plot_list:
             item = plot_info['item']
             x_data, y_data = item.getData()
-            
-            if x_data is None or y_data is None: continue
-            
-            # Logic to extract STD data
+            if x_data is None or y_data is None:
+                continue
+
+            x_values = np.asarray(x_data)
+            y_values = np.asarray(y_data)
             std_data = None
-            
-            # Case A: Check if this is a Running Mean that has a separate Running Std plot linked
-            # The naming convention is "BaseName_running_mean" -> "BaseName_running_mean_std"
+
             std_plot_name = name + "_std"
             if std_plot_name in self.plots:
-                std_info = self.plots[std_plot_name]
-                # Check if the std plot actually has data (error item)
-                error_item = std_info.get('error_item')
+                error_item = self.plots[std_plot_name].get('error_item')
                 if error_item:
-                    # FillBetweenItem stores curves. Curve1=y-std, Curve2=y+std.
                     c1 = error_item.curves[0].getData()
                     c2 = error_item.curves[1].getData()
                     if c1[1] is not None and c2[1] is not None:
                         std_data = np.abs(c2[1] - c1[1]) / 2.0
-            
-            # Case B: Check if this plot itself has an error item (e.g. Original data with Raw Std)
             elif plot_info.get('error_item'):
                 error_item = plot_info.get('error_item')
                 c1 = error_item.curves[0].getData()
                 c2 = error_item.curves[1].getData()
                 if c1[1] is not None and c2[1] is not None:
                     std_data = np.abs(c2[1] - c1[1]) / 2.0
-            
-            found_group = False
-            for group in x_groups:
-                if np.array_equal(group['x'], x_data):
-                    group['datasets'].append({
-                        'name': name,
-                        'info': plot_info,
-                        'y': y_data,
-                        'std': std_data
-                    })
-                    found_group = True
-                    break
-            
-            if not found_group:
-                x_groups.append({
-                    'x': x_data,
-                    'datasets': [{
-                        'name': name,
-                        'info': plot_info,
-                        'y': y_data,
-                        'std': std_data
-                    }]
-                })
 
-        # 3. Construct Header Rows and Data Columns
+            dataset = {
+                'name': name,
+                'info': plot_info,
+                'x': x_values,
+                'y': y_values,
+                'std': np.asarray(std_data) if std_data is not None else None,
+            }
+
+            target_group = None
+            target_positions = None
+            for group in x_groups:
+                positions = self._subset_positions(group['x'], x_values)
+                if positions is not None:
+                    target_group = group
+                    target_positions = positions
+                    break
+
+            if target_group is None:
+                target_group = {'x': x_values, 'datasets': []}
+                target_positions = list(range(len(x_values)))
+                x_groups.append(target_group)
+
+            target_group['datasets'].append({
+                'name': dataset['name'],
+                'info': dataset['info'],
+                'y': self._align_values(len(target_group['x']), target_positions, dataset['y']),
+                'std': self._align_values(len(target_group['x']), target_positions, dataset['std']) if dataset['std'] is not None else None,
+            })
+
         header_row_1 = []
         header_row_2 = []
         header_row_3 = []
         data_columns = []
         max_rows = 0
+        x_inverted = self._x_inverted()
 
         for group in x_groups:
-            rows_in_group = len(group['x'])
+            order = list(range(len(group['x'])))
+            if x_inverted:
+                order.reverse()
+            rows_in_group = len(order)
             max_rows = max(max_rows, rows_in_group)
-            
-            # X Column
+
             header_row_1.append('x')
             header_row_2.append(self.x_axis_label)
             header_row_3.append('')
-            data_columns.append(group['x'])
+            data_columns.append([group['x'][i] for i in order])
 
-            # Y (and STD) Columns
             for ds in group['datasets']:
                 y_col_name = ds['info'].get('y_col', '')
                 y_axis_label = self.y_axis_labels.get(y_col_name, y_col_name)
-                
+
                 header_row_1.append('y')
                 header_row_2.append(y_axis_label)
                 header_row_3.append(ds['name'])
-                data_columns.append(ds['y'])
-                
+                data_columns.append([ds['y'][i] for i in order])
+
                 if ds['std'] is not None:
                     header_row_1.append('std')
-                    header_row_2.append('') # Axis label for std is empty
-                    header_row_3.append('') # Legend label for std is empty
-                    data_columns.append(ds['std'])
+                    header_row_2.append('')
+                    header_row_3.append('')
+                    data_columns.append([ds['std'][i] for i in order])
 
-        # 4. Write to File
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f, delimiter=delimiter)
                 writer.writerow(header_row_1)
                 writer.writerow(header_row_2)
                 writer.writerow(header_row_3)
-                
+
                 for i in range(max_rows):
                     row_data = []
                     for col in data_columns:
-                        if i < len(col):
-                            row_data.append(str(col[i]))
-                        else:
-                            row_data.append('')
+                        row_data.append(self._format_export_value(col[i]) if i < len(col) else '')
                     writer.writerow(row_data)
             print(f"Data exported to {filename}")
         except Exception as e:
@@ -645,6 +719,7 @@ class LogController:
             'title': "", 
             'x_label': self.x_axis_label,
             'x_limits': self.plot_item.getViewBox().viewRange()[0],
+            'x_inverted': self._x_inverted(),
             'y_axes': {}
         }
 
@@ -661,6 +736,7 @@ class LogController:
                     'label': self.y_axis_labels.get(y_col, y_col),
                     'color': self.y_axis_colors.get(y_col, QColor("black")),
                     'y_limits': vb.viewRange()[1],
+                    'y_inverted': self._y_inverted(y_col),
                     'series': []
                 }
 
@@ -864,19 +940,24 @@ class LogController:
     def set_view_ranges(self, ranges: Dict[str, Any]):
         """Restores view ranges from a dictionary."""
         if not ranges: return
-        
-        # Restore Main
-        if 'main' in ranges:
-            xr, yr = ranges['main']
-            self.plot_item.getViewBox().setRange(xRange=xr, yRange=yr, padding=0)
-            
-        # Restore Aux
-        for y_col, axis_info in self.y_axes.items():
-            if y_col in ranges:
-                xr, yr = ranges[y_col]
-                axis_info['viewbox'].setYRange(yr[0], yr[1], padding=0)
-                # X is linked to main, so no need to set X
-    
+
+        was_syncing = self._is_syncing_axes
+        self._is_syncing_axes = True
+        try:
+            # Restore Main
+            if 'main' in ranges:
+                xr, yr = ranges['main']
+                self.plot_item.getViewBox().setRange(xRange=xr, yRange=yr, padding=0)
+
+            # Restore Aux
+            for y_col, axis_info in self.y_axes.items():
+                if y_col in ranges:
+                    xr, yr = ranges[y_col]
+                    axis_info['viewbox'].setYRange(yr[0], yr[1], padding=0)
+                    # X is linked to main, so no need to set X
+        finally:
+            self._is_syncing_axes = was_syncing
+
     def _get_data_bounds_for_viewbox(self, viewbox: pg.ViewBox):
         """Helper to get min/max Y data from all visible plots associated with a given ViewBox."""
         vmin = float('inf')

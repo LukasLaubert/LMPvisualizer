@@ -616,6 +616,12 @@ class PopOutWindow(QMainWindow):
             plt.rcParams['font.family'] = 'sans-serif'
             self.redraw_plot()
 
+    @staticmethod
+    def _oriented_limits(limits, inverted):
+        if not limits or len(limits) != 2:
+            return limits
+        return [limits[1], limits[0]] if inverted else limits
+
     def redraw_plot(self):
         # 1. Capture current view limits to prevent auto-rescaling on property updates
         saved_xlim = None
@@ -654,7 +660,7 @@ class PopOutWindow(QMainWindow):
         if saved_xlim:
             ax_primary.set_xlim(saved_xlim)
         elif 'x_limits' in self.plot_data:
-            ax_primary.set_xlim(self.plot_data['x_limits'])
+            ax_primary.set_xlim(self._oriented_limits(self.plot_data['x_limits'], self.plot_data.get('x_inverted', False)))
         
         if self.x_log_check.isChecked():
             ax_primary.set_xscale('log')
@@ -690,7 +696,8 @@ class PopOutWindow(QMainWindow):
         if saved_ylim_prim:
             ax_primary.set_ylim(saved_ylim_prim)
         elif 'y_limits' in self.plot_data['y_axes'][y_cols[0]]:
-            ax_primary.set_ylim(self.plot_data['y_axes'][y_cols[0]]['y_limits'])
+            y_axis_data = self.plot_data['y_axes'][y_cols[0]]
+            ax_primary.set_ylim(self._oriented_limits(y_axis_data['y_limits'], y_axis_data.get('y_inverted', False)))
             
         # Apply Axis Colors (Primary)
         y_data_prim = self.plot_data['y_axes'][y_cols[0]]
@@ -719,12 +726,6 @@ class PopOutWindow(QMainWindow):
             ax_new.spines['top'].set_visible(False)
             ax_new.spines['left'].set_visible(False)
             
-            # Restore limits if we had them (from previous axes[i])
-            if self.figure.axes and i < len(self.figure.axes_old_list_backup):
-                 # This is tricky because we cleared figure.
-                 # Let's use a simpler heuristic: If we had axes before, we trust the user didn't change sorting criteria
-                 pass
-
             if i > 1:
                 ax_new.spines['right'].set_position(('outward', 60 * (i - 1)))
             
@@ -741,7 +742,8 @@ class PopOutWindow(QMainWindow):
             # Better strategy: We can't easily map back without robust ID tracking.
             # But we can try: 
             if 'y_limits' in self.plot_data['y_axes'][y_col]:
-                 ax_new.set_ylim(self.plot_data['y_axes'][y_col]['y_limits'])
+                 y_axis_data = self.plot_data['y_axes'][y_col]
+                 ax_new.set_ylim(self._oriented_limits(y_axis_data['y_limits'], y_axis_data.get('y_inverted', False)))
             
             # Apply Axis Colors (Secondary)
             y_data_sec = self.plot_data['y_axes'][y_col]

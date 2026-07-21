@@ -4,8 +4,9 @@ from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget,
                              QDialogButtonBox, QHeaderView, QTableWidgetItem,
                              QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog,
                              QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication, 
-                             QStyledItemDelegate, QComboBox, QSizePolicy, QMessageBox, QFileDialog)
-from PyQt6.QtGui import QColor, QPalette, QFontMetrics, QFont
+                             QStyledItemDelegate, QComboBox, QSizePolicy, QMessageBox, QFileDialog,
+                             QStyleOptionButton, QStyle)
+from PyQt6.QtGui import QColor, QPalette, QFontMetrics, QFont, QPainter
 from PyQt6.QtCore import pyqtSignal, Qt, QEvent
 
 class NeutralPanel(QWidget):
@@ -357,6 +358,26 @@ class DraggableTableWidget(QTableWidget):
 
 class RightClickButton(QPushButton):
     rightClicked = pyqtSignal()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._checked_background_color = None
+
+    def set_checked_background_color(self, color):
+        self._checked_background_color = QColor(color) if color else None
+        self.update()
+
+    def paintEvent(self, event):
+        if self._checked_background_color is not None and self.isChecked():
+            option = QStyleOptionButton()
+            self.initStyleOption(option)
+            for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+                option.palette.setColor(group, QPalette.ColorRole.Button, self._checked_background_color)
+                option.palette.setColor(group, QPalette.ColorRole.Highlight, self._checked_background_color)
+            painter = QPainter(self)
+            self.style().drawControl(QStyle.ControlElement.CE_PushButton, option, painter, self)
+            return
+        super().paintEvent(event)
 
     def mousePressEvent(self, event: QEvent):
         if event.type() == QEvent.Type.MouseButtonPress:

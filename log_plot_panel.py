@@ -1,3 +1,4 @@
+import copy
 import os
 from pathlib import Path
 import re
@@ -85,6 +86,10 @@ class LogPlotPanel(QWidget):
         self.global_label_map = {}
         self.custom_properties = {} # Name -> Formula
         self.scale_lock_enabled = False
+        self.single_axis_view_lock_enabled = False
+        self.single_axis_view_ranges = None
+        self._applying_single_axis_lock = False
+        self._suppress_single_axis_range_capture = False
         
         # New Data Processing Properties
         self.enforce_zero_start = False
@@ -159,6 +164,7 @@ class LogPlotPanel(QWidget):
         self.plot_widget = pg.PlotWidget(axisItems={'left': ColoredAxis('left'), 'bottom': ColoredAxis('bottom')})
         self.plot_widget.setBackground('w')
         self.plot_controller = LogController(self.plot_widget)
+        self.plot_widget.getPlotItem().getViewBox().sigRangeChanged.connect(self._on_single_axis_view_range_changed)
 
         self.lock_axes_btn = RightClickButton()
         self.lock_axes_btn.setCheckable(True)
@@ -168,10 +174,17 @@ class LogPlotPanel(QWidget):
         self.lock_axes_btn.setParent(self.plot_widget)
         self.lock_axes_btn.setGeometry(self.plot_widget.width() - 40, 00, 40, 30)
 
+        self.view_lock_btn = RightClickButton()
+        self.view_lock_btn.setCheckable(True)
+        self.view_lock_btn.setText("\U0001f513")
+        self.view_lock_btn.setToolTip("Left Click: Lock/Unlock View Limits")
+        self.view_lock_btn.hide()
+        self.view_lock_btn.setParent(self.plot_widget)
+        self.view_lock_btn.setGeometry(self.plot_widget.width() - 40, 0, 40, 30)
         original_resize = self.plot_widget.resizeEvent
         def custom_resize_event(event):
             if hasattr(self, 'lock_axes_btn'):
-                self.lock_axes_btn.setGeometry(self.plot_widget.width() - 40, 00, 40, 30)
+                self._update_lock_button_position()
             if original_resize:
                 original_resize(event)
         self.plot_widget.resizeEvent = custom_resize_event
@@ -324,6 +337,7 @@ class LogPlotPanel(QWidget):
         
         self.lock_axes_btn.toggled.connect(self._on_lock_axes_toggled)
         self.lock_axes_btn.rightClicked.connect(self._on_scale_lock_toggled)
+        self.view_lock_btn.toggled.connect(self._on_view_lock_toggled)
         
         self.study_combo.currentTextChanged.connect(self.on_study_selected)
         self.system_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('system', text))
@@ -922,7 +936,12 @@ class LogPlotPanel(QWidget):
         triggering_combo.blockSignals(True)
         
         try:
-            dialog = CustomPropertyDialog(self.data_manager.get_all_column_names(), self.custom_properties, self)
+            dialog = CustomPropertyDialog(
+                self.data_manager.get_all_column_names(),
+                self.custom_properties,
+                self,
+                index_validator=self.data_manager.validate_formula_indices
+            )
             if dialog.exec():
                 # Update local properties
                 self.custom_properties = dialog.get_properties()
@@ -1429,7 +1448,7 @@ class LogPlotPanel(QWidget):
     def _uses_forced_average_std(system: str) -> bool:
         return system == "average & std"
 
-    def _update_selected_row_name_component(self, component: str, value: str):
+    def _update_selected_row_name_component(self, component: str, value: str, refresh: bool = True):
         """Update only a specific component of the plot name for ALL selected rows."""
         if self._is_internal_update:
             return
@@ -1513,12 +1532,15 @@ class LogPlotPanel(QWidget):
                 self._update_row_display(row)
                 self._update_row_visual_state(row)
 
-        # 3. Refresh
+        if refresh:
+            self._finish_row_name_update()
+
+    def _finish_row_name_update(self):
         self.update_plots()
         self._update_plot_labels()
         
-        # Reset view to ensure new data fits
-        if self.plot_controller:
+        # Reset view to ensure new data fits unless the independent view lock is active.
+        if self.plot_controller and not self.single_axis_view_lock_enabled:
             self.plot_controller.reset_view()
 
     def _connect_signals(self):
@@ -1532,6 +1554,7 @@ class LogPlotPanel(QWidget):
         
         self.lock_axes_btn.toggled.connect(self._on_lock_axes_toggled)
         self.lock_axes_btn.rightClicked.connect(self._on_scale_lock_toggled)
+        self.view_lock_btn.toggled.connect(self._on_view_lock_toggled)
         
         self.study_combo.currentTextChanged.connect(self.on_study_selected)
         self.system_combo.currentTextChanged.connect(self.on_system_selected)
@@ -1547,32 +1570,142 @@ class LogPlotPanel(QWidget):
         """Handle double-click on table row to edit labels."""
         self._edit_global_labels()
 
+    def _is_single_axis_lock_mode(self):
+        return len(self.plot_controller.y_axes) == 1
+
+    def _is_multi_axis_lock_mode(self):
+        return len(self.plot_controller.y_axes) > 1
+
+    def _is_multi_axis_lock_active(self):
+        return self._is_multi_axis_lock_mode() and (self.plot_controller.axes_locked or self.scale_lock_enabled)
+
+    def _update_lock_button_position(self):
+        if not hasattr(self, 'plot_widget'):
+            return
+        right_x = max(0, self.plot_widget.width() - 40)
+        if hasattr(self, 'lock_axes_btn'):
+            self.lock_axes_btn.setGeometry(right_x, 0, 40, 30)
+        if hasattr(self, 'view_lock_btn'):
+            view_x = 0 if self._is_multi_axis_lock_mode() else right_x
+            self.view_lock_btn.setGeometry(view_x, 0, 40, 30)
+
+    def _set_button_checked_silent(self, button, checked):
+        old_block = button.blockSignals(True)
+        button.setChecked(checked)
+        button.blockSignals(old_block)
+
+    def _set_lock_button_checked_silent(self, checked):
+        self._set_button_checked_silent(self.lock_axes_btn, checked)
+
+    def _set_view_lock_button_checked_silent(self, checked):
+        if hasattr(self, 'view_lock_btn'):
+            self._set_button_checked_silent(self.view_lock_btn, checked)
+
+    def _capture_single_axis_view_range(self):
+        self.single_axis_view_ranges = copy.deepcopy(self.plot_controller.get_view_ranges())
+
+    def _restore_preserved_view_ranges(self, ranges, single_axis_ranges=None):
+        """Restore plot ranges after a metadata refresh without updating lock state."""
+        if not ranges:
+            return
+
+        old_suppress = self._suppress_single_axis_range_capture
+        self._suppress_single_axis_range_capture = True
+        try:
+            self.plot_controller.set_view_ranges(ranges)
+            if self.single_axis_view_lock_enabled:
+                self.single_axis_view_ranges = copy.deepcopy(
+                    single_axis_ranges if single_axis_ranges is not None else ranges
+                )
+        finally:
+            self._suppress_single_axis_range_capture = old_suppress
+
+    def _apply_single_axis_view_range(self):
+        if not self.single_axis_view_ranges:
+            return
+        self._applying_single_axis_lock = True
+        try:
+            if isinstance(self.single_axis_view_ranges, dict):
+                self.plot_controller.set_view_ranges(self.single_axis_view_ranges)
+            else:
+                xr, yr = self.single_axis_view_ranges
+                vb = self.plot_widget.getPlotItem().getViewBox()
+                vb.setRange(xRange=xr, yRange=yr, padding=0)
+        finally:
+            self._applying_single_axis_lock = False
+
+    def _on_single_axis_view_range_changed(self, *_):
+        if (
+            self.single_axis_view_lock_enabled
+            and not self._applying_single_axis_lock
+            and not self._suppress_single_axis_range_capture
+        ):
+            self._capture_single_axis_view_range()
+
     def _update_lock_button_visuals(self):
-        """Updates the lock button text to reflect 0-lock (Checked) and Scale-lock (Flag) states."""
-        # 0-Lock is represented by the button's Checked state (visualized by the OS/Theme, usually darker/blue)
-        # Scale-Lock is represented by the Vertical Arrow symbol
-        
-        # Base icon: Locked or Unlocked based on 0-alignment (Position)
-        text = "🔒" if self.lock_axes_btn.isChecked() else "🔓"
-        
-        # Append Vertical Arrow if Scaling is locked
+        """Update separate view-lock and multi-axis alignment/scale lock buttons."""
+        has_axes = len(self.plot_controller.y_axes) > 0
+        is_multi_axis = self._is_multi_axis_lock_mode()
+
+        if hasattr(self, 'view_lock_btn'):
+            self._set_view_lock_button_checked_silent(self.single_axis_view_lock_enabled)
+            self.view_lock_btn.setText("\U0001f512" if self.single_axis_view_lock_enabled else "\U0001f513")
+            self.view_lock_btn.setToolTip("Left Click: Lock/Unlock View Limits")
+            self.view_lock_btn.setStyleSheet("")
+            if hasattr(self.view_lock_btn, "set_checked_background_color"):
+                self.view_lock_btn.set_checked_background_color(None)
+            self.view_lock_btn.setVisible(has_axes)
+
+        self.lock_axes_btn.setVisible(is_multi_axis)
+        self._set_lock_button_checked_silent(self.plot_controller.axes_locked)
+        text = "\U0001f512" if self.plot_controller.axes_locked else "\U0001f513"
         if self.scale_lock_enabled:
-            text += " ↕"
-            
+            text += " \u2195"
+        self.lock_axes_btn.setToolTip("Left Click: Lock/Unlock 0-alignment\nRight Click: Lock/Unlock Scaling")
         self.lock_axes_btn.setText(text)
-        
-        # Clear any specific stylesheets to ensure the native "Checked" state is visible
-        self.lock_axes_btn.setStyleSheet("")
+
+        red_active = is_multi_axis and (self.plot_controller.axes_locked or self.scale_lock_enabled)
+        if hasattr(self.lock_axes_btn, "set_checked_background_color"):
+            self.lock_axes_btn.setStyleSheet("")
+            self.lock_axes_btn.set_checked_background_color(QColor("#c62828") if red_active else None)
+        elif red_active:
+            self.lock_axes_btn.setStyleSheet("QPushButton:checked { background-color: #c62828; }")
+        else:
+            self.lock_axes_btn.setStyleSheet("")
+
+        self._update_lock_button_position()
+
+    def _on_view_lock_toggled(self, checked):
+        """Handle the independent view-limit lock button."""
+        self.single_axis_view_lock_enabled = checked
+        if checked:
+            self._capture_single_axis_view_range()
+        else:
+            self.single_axis_view_ranges = None
+            self.plot_controller.reset_view()
+        self._update_lock_button_visuals()
 
     def _on_lock_axes_toggled(self, checked):
-        """Handle Left Click: Toggle 0-alignment lock."""
-        self.plot_controller.toggle_axes_lock(checked)
+        """Handle multi-axis 0-alignment lock."""
+        if not self._is_multi_axis_lock_mode():
+            self._update_lock_button_visuals()
+            return
+
+        self.plot_controller.toggle_axes_lock(checked, reset_view=False)
+        if checked:
+            self.plot_controller.align_zero_preserve_scale()
+            if self.single_axis_view_lock_enabled:
+                self._capture_single_axis_view_range()
         self._update_lock_button_visuals()
 
     def _on_scale_lock_toggled(self):
-        """Handle Right Click: Toggle Scale lock."""
+        """Handle multi-axis scale lock."""
+        if not self._is_multi_axis_lock_mode():
+            return
         self.scale_lock_enabled = not self.scale_lock_enabled
         self.plot_controller.toggle_scale_lock(self.scale_lock_enabled)
+        if self.single_axis_view_lock_enabled:
+            self._capture_single_axis_view_range()
         self._update_lock_button_visuals()
 
     def _show_mean_header_context_menu(self, pos):
@@ -1856,6 +1989,12 @@ class LogPlotPanel(QWidget):
         if not force_reload and self.loaded_path == root_path:
             return
 
+        preserved_view_ranges = None
+        preserved_single_axis_ranges = None
+        if keep_table and self.plot_controller and self.plot_controller.y_axes:
+            preserved_view_ranges = copy.deepcopy(self.plot_controller.get_view_ranges())
+            preserved_single_axis_ranges = copy.deepcopy(self.single_axis_view_ranges)
+
         self.running_mean_setting = "symmetric_window" 
         self.average_user_choices.clear()
         
@@ -1953,6 +2092,7 @@ class LogPlotPanel(QWidget):
         # If keeping table, trigger a plot update to refresh data sources
         if keep_table:
             self.update_plots()
+            self._restore_preserved_view_ranges(preserved_view_ranges, preserved_single_axis_ranges)
 
     def _update_ui_state(self, project_loaded: bool, keep_table: bool = False):
         # Only clear table/plots if we are NOT keeping the table (e.g., new path load)
@@ -1997,9 +2137,12 @@ class LogPlotPanel(QWidget):
             reset_combo(self.study_combo, "Select Study", self.data_manager.get_study_names())
             reset_combo(self.system_combo, "Select System", self.data_manager.get_all_system_names())
             
-            # Use new population method for axes
-            self._populate_axis_combo(self.xaxis_combo, self.data_manager.get_all_column_names())
-            self._populate_axis_combo(self.yaxis_combo, self.data_manager.get_all_column_names())
+            # Refresh axis choices while preserving valid selections on keyword refresh.
+            if keep_table:
+                self._refresh_axis_combos()
+            else:
+                self._populate_axis_combo(self.xaxis_combo, self.data_manager.get_all_column_names())
+                self._populate_axis_combo(self.yaxis_combo, self.data_manager.get_all_column_names())
             
             # Only add a default row if we cleared the table and have data
             if not keep_table:
@@ -2054,7 +2197,10 @@ class LogPlotPanel(QWidget):
         
         # 3. Update the selected row(s) - ONLY if this was a manual user change
         if not self._is_internal_update:
-            self._update_selected_row_name_component('study', text)
+            self._update_selected_row_name_component('study', text, refresh=False)
+            if final_sys != "Select System":
+                self._update_selected_row_name_component('system', final_sys, refresh=False)
+            self._finish_row_name_update()
 
     def on_system_selected(self, text: str):
         """
@@ -2213,6 +2359,8 @@ class LogPlotPanel(QWidget):
         It handles data fetching, processing (averaging/smoothing), 
         caching for curve fitting, and rendering both original data and fits.
         """
+        self._suppress_single_axis_range_capture = True
+
         # 1. Clear existing plots and reset view
         self.plot_controller.clear_all_plots()
         
@@ -2346,22 +2494,12 @@ class LogPlotPanel(QWidget):
             
             if not data: continue
 
-            # [Fit Integration] Cache Data for Engine
+            # [Fit Integration] Keep Orig data raw; enforce-0 belongs to the averaged line below.
             try:
                 x_np = data['x'].to_numpy(dtype=float) if hasattr(data['x'], 'to_numpy') else np.array(data['x'], dtype=float)
                 y_np = data['y'].to_numpy(dtype=float) if hasattr(data['y'], 'to_numpy') else np.array(data['y'], dtype=float)
-                
-                # --- Enforce Start at 0 ---
-                if self.enforce_zero_start and len(x_np) > 0 and x_np[0] != 0:
-                    x_np = np.insert(x_np, 0, 0.0)
-                    y_np = np.insert(y_np, 0, 0.0)
-                    # Update data dict for original plot visualization
-                    data['x'] = x_np
-                    data['y'] = y_np
-
             except ValueError:
                 continue 
-
             plot_data_cache[plot_info['display_name']] = {
                 'x': x_np, 
                 'y': y_np, 
@@ -2390,20 +2528,6 @@ class LogPlotPanel(QWidget):
                 else:
                     running_mean_x = x_np
                 
-                # --- Hard Anchor: Enforce Start at 0 for Smoothed Data ---
-                if self.enforce_zero_start:
-                    if len(running_mean_x) > 0 and running_mean_x[0] > 0:
-                        # Prepend origin to smoothed data so interpolation/plotting starts at 0
-                        running_mean_x = np.insert(running_mean_x, 0, 0.0)
-                        running_mean_y = np.insert(running_mean_y, 0, 0.0)
-                        if running_std is not None:
-                            running_std = np.insert(running_std, 0, 0.0)
-                    elif len(running_mean_x) > 0 and running_mean_x[0] == 0:
-                        # Hard force the very first point to exactly 0 to override averaging residuals
-                        running_mean_y[0] = 0.0
-                        if running_std is not None:
-                            running_std[0] = 0.0
-
                 # --- Quantization ---
                 if self.quantize_points and isinstance(self.quantize_points, int) and self.quantize_points > 1:
                     if len(running_mean_x) > 1:
@@ -2414,6 +2538,15 @@ class LogPlotPanel(QWidget):
                         if running_std is not None:
                             running_std = np.interp(x_quant, running_mean_x, running_std)
                         running_mean_x, running_mean_y = x_quant, y_quant
+
+                # --- Hard Anchor: Draw averaged data to the origin without changing Orig data ---
+                if self.enforce_zero_start and len(running_mean_x) > 0:
+                    starts_at_origin = running_mean_x[0] == 0 and running_mean_y[0] == 0
+                    if not starts_at_origin:
+                        running_mean_x = np.insert(running_mean_x, 0, 0.0)
+                        running_mean_y = np.insert(running_mean_y, 0, 0.0)
+                        if running_std is not None:
+                            running_std = np.insert(running_std, 0, 0.0)
 
                 plot_data_cache[plot_info['display_name']]['mean_x'] = running_mean_x
                 plot_data_cache[plot_info['display_name']]['mean_y'] = running_mean_y
@@ -2453,7 +2586,6 @@ class LogPlotPanel(QWidget):
             # --- 2. Draw Running Mean / Std Deviation ---
             if plot_info['mean_window'] >= 1:
                 if plot_info['show_std']:
-                    running_std = src_data.get('mean_std')
                     if running_std is not None and len(running_std) == len(running_mean_y):
                         std_data = {
                             'x': running_mean_x, 'y': running_mean_y, 'std': running_std, 
@@ -2598,7 +2730,13 @@ class LogPlotPanel(QWidget):
         for row in range(self.plot_table.rowCount()):
             self._update_row_visual_state(row)
         
-        self.plot_controller.apply_current_locks()
+        self._suppress_single_axis_range_capture = False
+        if self.single_axis_view_lock_enabled:
+            if self.single_axis_view_ranges is None:
+                self._capture_single_axis_view_range()
+            self._apply_single_axis_view_range()
+        else:
+            self.plot_controller.apply_current_locks()
 
     def _update_fit_type_combos(self):
         """
@@ -2852,8 +2990,8 @@ class LogPlotPanel(QWidget):
             for y_ax in self.plot_controller.y_axes.keys():
                 self.plot_controller.set_axis_color(y_ax, black_color)
         
-        # Show/hide lock button
-        self.lock_axes_btn.setVisible(len(y_labels) > 1)
+        # Update view-lock and multi-axis alignment/scale lock button visibility.
+        self._update_lock_button_visuals()
 
     def delete_plot_row(self):
         button = self.sender()
@@ -3065,8 +3203,10 @@ class LogPlotPanel(QWidget):
             'global_label_map': self.global_label_map,
             'custom_properties': self.custom_properties,
             'scale_lock': self.scale_lock_enabled,
-            'axes_lock': self.lock_axes_btn.isChecked(),
+            'axes_lock': self.plot_controller.axes_locked,
             'view_ranges': self.plot_controller.get_view_ranges(),
+            'single_axis_view_lock': self.single_axis_view_lock_enabled,
+            'single_axis_view_ranges': self.single_axis_view_ranges,
             'fit_table_visible': self.fit_table_visible,
             'selected_row': self.plot_table.currentRow(),
             'plots': [],
@@ -3287,7 +3427,9 @@ class LogPlotPanel(QWidget):
             self.quantize_points = data.get('quantize_points', None)
             self.scale_lock_enabled = data.get('scale_lock', False)
             axes_locked = data.get('axes_lock', False)
-            self.lock_axes_btn.setChecked(axes_locked)
+            self.single_axis_view_lock_enabled = data.get('single_axis_view_lock', False)
+            self.single_axis_view_ranges = data.get('single_axis_view_ranges')
+            self.plot_controller.toggle_axes_lock(axes_locked)
             self.plot_controller.toggle_scale_lock(self.scale_lock_enabled)
             self._update_lock_button_visuals()
 

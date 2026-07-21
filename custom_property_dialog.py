@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtGui import QFont
 import re
 import numpy as np
+from log_data_manager import split_indexed_token, formula_min, formula_max
 
 class ClickableListWidget(QListWidget):
     """A ListWidget that deselects items when clicking on empty space."""
@@ -19,7 +20,7 @@ class ClickableListWidget(QListWidget):
         super().mousePressEvent(event)
 
 class CustomPropertyDialog(QDialog):
-    def __init__(self, available_columns, custom_properties, parent=None):
+    def __init__(self, available_columns, custom_properties, parent=None, index_validator=None):
         super().__init__(parent)
         self.setWindowTitle("Custom Axis Properties")
         self.resize(600, 600)
@@ -27,6 +28,7 @@ class CustomPropertyDialog(QDialog):
         self.available_columns = sorted(available_columns)
         self.custom_properties = custom_properties.copy() # Work on a copy
         self.original_properties = custom_properties # Reference to update on save
+        self.index_validator = index_validator
         self.selected_result = None # Store the property to be used on close
         
         self._init_ui()
@@ -61,7 +63,10 @@ class CustomPropertyDialog(QDialog):
         symbols_layout.setHorizontalSpacing(5)
         symbols_layout.setVerticalSpacing(5)
         
-        symbols = [('+', '+'), ('-', '-'), ('*', '*'), ('/', '/'), ('^', '**'), ('(', '('), (')', ')'), ('sqrt', 'sqrt('), ('sin', 'sin('), ('cos', 'cos('), ('tan', 'tan('), ('cot', 'cot('), ('e', 'np.e'), ('π', 'np.pi')]
+        symbols = [
+            ('+', '+'), ('-', '-'), ('*', '*'), ('/', '/'), ('^', '**'), ('(', '('), (')', ')'), ('min', 'min('),
+            ('sqrt', 'sqrt('), ('sin', 'sin('), ('cos', 'cos('), ('tan', 'tan('), ('cot', 'cot('), ('e', 'np.e'), ('\u03c0', 'np.pi'), ('max', 'max(')
+        ]
         
         row, col = 0, 0
         for label, value in symbols:
@@ -71,12 +76,12 @@ class CustomPropertyDialog(QDialog):
             btn.clicked.connect(lambda checked, v=value: self.insert_text(v))
             symbols_layout.addWidget(btn, row, col)
             col += 1
-            if col > 6: # 7 columns
+            if col > 7: # 8 columns, two compact rows
                 col = 0
                 row += 1
         
         # Add a stretch to the last column to push buttons to the left
-        symbols_layout.setColumnStretch(7, 1)
+        symbols_layout.setColumnStretch(8, 1)
         
         editor_layout.addWidget(symbols_group)
 
@@ -214,9 +219,11 @@ class CustomPropertyDialog(QDialog):
         # 1. Identify all tokens {Token}
         tokens = re.findall(r"\{([^}]+)\}", formula)
 
-        # Check if symbols inside {} are available
+        # Check if symbols inside {} are available, allowing indexed tokens like {Lx(end-1)}
+        known_names = set(self.available_columns) | set(self.custom_properties)
         for token in tokens:
-            if token not in self.available_columns and token not in self.custom_properties:
+            base_token, _ = split_indexed_token(token, known_names)
+            if base_token not in known_names:
                 return False, f"Symbol '{{{token}}}' is not found in available properties."
         
         # 2. Replace {Token} with 'var' in the formula for syntax checking
@@ -237,6 +244,8 @@ class CustomPropertyDialog(QDialog):
             "sin": np.sin,
             "cos": np.cos,
             "tan": np.tan,
+            "min": formula_min,
+            "max": formula_max,
             "e": np.e,
             "pi": np.pi,
             "var": 1.0 # Dummy value for columns
@@ -245,9 +254,13 @@ class CustomPropertyDialog(QDialog):
         try:
             # Use eval to catch NameError (unknown variables) and SyntaxError
             eval(clean_formula, safe_globals)
-            return True, ""
         except Exception as e:
             return False, str(e)
+
+        if self.index_validator:
+            return self.index_validator(formula, self.custom_properties)
+
+        return True, ""
 
     def save_definition(self):
         name = self.name_input.text().strip()
