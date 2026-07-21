@@ -1719,7 +1719,22 @@ class LogPlotPanel(QWidget):
         self.main_window.current_project_path = self.main_window.path_edit.text()
 
     def export_plot(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export Plot", "", "SVG Files (*.svg);;PDF Files (*.pdf)")
+        filters = (
+            "PNG Image (*.png);;"
+            "JPEG Image (*.jpg *.jpeg);;"
+            "TIFF Image (*.tif *.tiff);;"
+            "WebP Image (*.webp);;"
+            "Scalable Vector Graphics (*.svg *.svgz);;"
+            "PDF Document (*.pdf);;"
+            "Encapsulated PostScript (*.eps);;"
+            "PostScript (*.ps);;"
+            "PGF Code (*.pgf);;"
+            "Raw Pixel Data (*.raw *.rgba);;"
+            "CSV Data (*.csv);;"
+            "TSV Data (*.tsv)"
+        )
+        path, filter_used = QFileDialog.getSaveFileName(self, "Export Plot", "", filters)
+        
         if path:
             dpi = self.logicalDpiX()
             width_in = self.plot_widget.width() / dpi

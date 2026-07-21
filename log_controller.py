@@ -302,6 +302,11 @@ class LogController:
             self.y_axis_colors[y_col] = color  # Store for export
 
     def export_plot(self, filename: str, figsize=None):
+        # Dispatch to text export if applicable
+        if filename.lower().endswith(('.csv', '.tsv')):
+            self._export_text_data(filename)
+            return
+
         try:
             import matplotlib.pyplot as plt
         except ImportError:
@@ -427,6 +432,158 @@ class LogController:
             print(f"Failed to save plot: {e}")
         finally:
             plt.close(fig)
+
+    def _export_text_data(self, filename: str):
+        """Internal handler for exporting data to CSV or TSV."""
+        import csv
+        
+        delimiter = '\t' if filename.lower().endswith('.tsv') else ','
+        
+        # 1. Collect Visible Plots
+        # We must explicitly SKIP the auxiliary "running_mean_std" plots here.
+        # They will be picked up via association with the "running_mean" plots.
+        plots_by_yaxis = {}
+        axis_max_priority = {}
+        
+        for name, plot_info in self.plots.items():
+            if name.endswith("_running_mean_std"):
+                continue # Skip pure std plots; they are merged into mean plots later.
+
+            item = plot_info.get('item')
+            if not item or not item.isVisible(): continue
+            y_col = plot_info.get('y_col')
+            if not y_col: continue
+            
+            if y_col not in plots_by_yaxis: plots_by_yaxis[y_col] = []
+            plots_by_yaxis[y_col].append((name, plot_info))
+            
+            prio = plot_info.get('layer_priority', 0)
+            if y_col not in axis_max_priority:
+                axis_max_priority[y_col] = prio
+            else:
+                axis_max_priority[y_col] = max(axis_max_priority[y_col], prio)
+        
+        if not plots_by_yaxis: return
+
+        # Sort axes
+        y_axis_order = [y_col for y_col in self.y_axes.keys() if y_col in plots_by_yaxis]
+        y_axis_order.sort(key=lambda y: axis_max_priority.get(y, 0))
+
+        # Sort plots within axes
+        sorted_plot_list = []
+        for y_col in y_axis_order:
+            group_plots = sorted(plots_by_yaxis[y_col], key=lambda x: x[1].get('layer_priority', 0))
+            sorted_plot_list.extend(group_plots)
+
+        # 2. Group datasets by identical X-data
+        x_groups = []
+
+        for name, plot_info in sorted_plot_list:
+            item = plot_info['item']
+            x_data, y_data = item.getData()
+            
+            if x_data is None or y_data is None: continue
+            
+            # Logic to extract STD data
+            std_data = None
+            
+            # Case A: Check if this is a Running Mean that has a separate Running Std plot linked
+            # The naming convention is "BaseName_running_mean" -> "BaseName_running_mean_std"
+            std_plot_name = name + "_std"
+            if std_plot_name in self.plots:
+                std_info = self.plots[std_plot_name]
+                # Check if the std plot actually has data (error item)
+                error_item = std_info.get('error_item')
+                if error_item:
+                    # FillBetweenItem stores curves. Curve1=y-std, Curve2=y+std.
+                    c1 = error_item.curves[0].getData()
+                    c2 = error_item.curves[1].getData()
+                    if c1[1] is not None and c2[1] is not None:
+                        std_data = np.abs(c2[1] - c1[1]) / 2.0
+            
+            # Case B: Check if this plot itself has an error item (e.g. Original data with Raw Std)
+            elif plot_info.get('error_item'):
+                error_item = plot_info.get('error_item')
+                c1 = error_item.curves[0].getData()
+                c2 = error_item.curves[1].getData()
+                if c1[1] is not None and c2[1] is not None:
+                    std_data = np.abs(c2[1] - c1[1]) / 2.0
+            
+            found_group = False
+            for group in x_groups:
+                if np.array_equal(group['x'], x_data):
+                    group['datasets'].append({
+                        'name': name,
+                        'info': plot_info,
+                        'y': y_data,
+                        'std': std_data
+                    })
+                    found_group = True
+                    break
+            
+            if not found_group:
+                x_groups.append({
+                    'x': x_data,
+                    'datasets': [{
+                        'name': name,
+                        'info': plot_info,
+                        'y': y_data,
+                        'std': std_data
+                    }]
+                })
+
+        # 3. Construct Header Rows and Data Columns
+        header_row_1 = []
+        header_row_2 = []
+        header_row_3 = []
+        data_columns = []
+        max_rows = 0
+
+        for group in x_groups:
+            rows_in_group = len(group['x'])
+            max_rows = max(max_rows, rows_in_group)
+            
+            # X Column
+            header_row_1.append('x')
+            header_row_2.append(self.x_axis_label)
+            header_row_3.append('')
+            data_columns.append(group['x'])
+
+            # Y (and STD) Columns
+            for ds in group['datasets']:
+                y_col_name = ds['info'].get('y_col', '')
+                y_axis_label = self.y_axis_labels.get(y_col_name, y_col_name)
+                
+                header_row_1.append('y')
+                header_row_2.append(y_axis_label)
+                header_row_3.append(ds['name'])
+                data_columns.append(ds['y'])
+                
+                if ds['std'] is not None:
+                    header_row_1.append('std')
+                    header_row_2.append('') # Axis label for std is empty
+                    header_row_3.append('') # Legend label for std is empty
+                    data_columns.append(ds['std'])
+
+        # 4. Write to File
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=delimiter)
+                writer.writerow(header_row_1)
+                writer.writerow(header_row_2)
+                writer.writerow(header_row_3)
+                
+                for i in range(max_rows):
+                    row_data = []
+                    for col in data_columns:
+                        if i < len(col):
+                            row_data.append(str(col[i]))
+                        else:
+                            row_data.append('')
+                    writer.writerow(row_data)
+            print(f"Data exported to {filename}")
+        except Exception as e:
+            print(f"Failed to save data: {e}")
 
     def get_current_plot_state(self) -> Dict[str, Any]:
         """Extracts current state for PopOutWindow."""
