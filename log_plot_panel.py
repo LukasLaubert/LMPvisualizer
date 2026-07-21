@@ -17,7 +17,7 @@ import os
 
 from log_parser import LogParser
 from log_data_manager import LogDataManager
-from log_controller import LogController
+from log_controller import LogController, ColoredAxis
 from settings_manager import SettingsManager
 from ui_components import ColorButton, InconsistentDataDialog, RightClickButton, NoNewLineDelegate, MissingPathResolver
 from global_label_editor_dialog import GlobalLabelEditorDialog
@@ -108,7 +108,7 @@ class LogPlotPanel(QWidget):
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0,0,0,0)
 
-        self.plot_widget = pg.PlotWidget()
+        self.plot_widget = pg.PlotWidget(axisItems={'left': ColoredAxis('left'), 'bottom': ColoredAxis('bottom')})
         self.plot_widget.setBackground('w')
         self.plot_controller = LogController(self.plot_widget)
 
@@ -1003,67 +1003,6 @@ class LogPlotPanel(QWidget):
         else:
             combo.setCurrentIndex(0)
 
-    def load_project(self, root_path, keywords, show_discovery_warnings: bool = True, force_reload: bool = False, keep_table: bool = False):
-        # Prevent redundant reloading if path is same and not forced
-        if not force_reload and self.loaded_path == root_path:
-            return
-
-        self.running_mean_setting = "symmetric_window" 
-        self.average_user_choices.clear()
-        
-        if not keywords:
-            self.data_manager.data.clear()
-            self.data_manager.available_columns = []
-            self.loaded_path = None # Clear loaded path
-            self._update_ui_state(project_loaded=False)
-            return
-
-        studies, warnings, file_map = LogParser.discover_studies_systems(root_path, keywords)
-        
-        # Hide/show study/system selectors based on project structure
-        is_flat_structure = list(studies.keys()) == ['.']
-        self.study_label_widget.setVisible(not is_flat_structure)
-        self.study_combo.setVisible(not is_flat_structure)
-        self.system_label_widget.setVisible(not is_flat_structure)
-        self.system_combo.setVisible(not is_flat_structure)
-
-        if warnings and show_discovery_warnings:
-            if not (is_flat_structure and "No standard project structure found" in warnings[0]):
-                QMessageBox.warning(self, "Project Discovery Warning", "\n".join(warnings))
-        
-        warnings, successful_keywords = self.data_manager.load_project_data(studies, root_path, keywords, file_map)
-        
-        self.main_window.chip_input.update_chip_styles(successful_keywords)
-
-        if warnings:
-            QMessageBox.warning(self, "Data Loading Warning", "\n".join(warnings))
-            
-        self.main_window.studies_label.setText(f"Studies: {len(self.data_manager.get_study_names())}")
-        
-        studies_dict = self.data_manager.data
-        if studies_dict:
-            first_study_name = next(iter(studies_dict))
-            num_systems = len(studies_dict[first_study_name])
-            self.main_window.systems_label.setText(f"Systems: {num_systems}")
-        else:
-            self.main_window.systems_label.setText("Systems: 0")
-
-        units = None
-        timestep = None
-        if root_path.is_dir():
-            units = LogParser.get_units(root_path)
-            timestep = LogParser.get_timestep(root_path)
-
-        time_units_map = {'lj': 'tau', 'real': 'fs', 'metal': 'ps', 'si': 's', 'cgs': 's', 'electron': 'fs', 'micro': 'us', 'nano': 'ns'}
-        self.main_window.units_label.setText(f"Unit: {units or 'N/A'}")
-        time_unit = time_units_map.get(units, "")
-        self.main_window.timestep_label.setText(f"Timestep: {timestep} {time_unit}" if timestep else "Timestep: N/A")
-
-        # Update state tracking
-        self.loaded_path = root_path
-        
-        self._update_ui_state(project_loaded=True)
-
     def on_keywords_changed(self, keywords):
         # Just reload if path exists
         path_str = self.main_window.path_edit.text()
@@ -1226,6 +1165,8 @@ class LogPlotPanel(QWidget):
                     system_name = parts[1]
                     if system_name == 'average':
                         short_system = 'ave'
+                    elif system_name == 'average & std':
+                        short_system = 'a&sd'
                     else:
                         short_system = shortened_systems[row] if row < len(shortened_systems) else system_name
 
@@ -1418,8 +1359,25 @@ class LogPlotPanel(QWidget):
         """Build plot name from components."""
         return f"{study} | {system} | {x_axis} | {y_axis}"
 
+    def _get_average_system_options(self, systems: list[str]) -> list[str]:
+        """Return synthetic system options for multi-system studies."""
+        if len(systems) > 1:
+            return ["average & std", "average"]
+        return []
+
+    @staticmethod
+    def _is_average_system(system: str) -> bool:
+        return system in {"average", "average & std"}
+
+    @staticmethod
+    def _uses_forced_average_std(system: str) -> bool:
+        return system == "average & std"
+
     def _update_selected_row_name_component(self, component: str, value: str):
         """Update only a specific component of the plot name for ALL selected rows."""
+        if self._is_internal_update:
+            return
+
         # Handle "Custom" interception
         if value and value.strip().lower() == "custom":
             combo = None
@@ -1472,9 +1430,11 @@ class LogPlotPanel(QWidget):
                     # CHECK VALIDITY: Does this System exist in the row's Study?
                     # If 'value' is not available for this row's study, SKIP this row.
                     available_systems = self.data_manager.get_system_names(study)
-                    
-                    # Also allow "average" if multiple systems exist
-                    if value in available_systems or (value == "average" and len(available_systems) > 1):
+
+                    allowed_values = set(available_systems)
+                    allowed_values.update(self._get_average_system_options(available_systems))
+
+                    if value in allowed_values:
                         new_system = value
                     else:
                         should_update = False # Skip unavailable property
@@ -1982,8 +1942,7 @@ class LogPlotPanel(QWidget):
         # If Study is selected, show its systems. If "Select Study", show ALL systems.
         systems = self.data_manager.get_system_names(study) if self.study_combo.currentIndex() > 0 else self.data_manager.get_all_system_names()
         
-        if len(systems) > 1:
-            self.system_combo.addItem("average")
+        self.system_combo.addItems(self._get_average_system_options(systems))
         self.system_combo.addItems(systems)
         
         # 2. Auto-selection / Preservation logic for System dropdown
@@ -1992,7 +1951,7 @@ class LogPlotPanel(QWidget):
             # Study has exactly one system -> Auto-select it
             final_sys = systems[0]
             self.system_combo.setCurrentText(final_sys)
-        elif current_sys in systems or (current_sys == "average" and len(systems) > 1):
+        elif current_sys in systems or current_sys in self._get_average_system_options(systems):
             # Keep previous selection if it still exists in the new context
             final_sys = current_sys
             self.system_combo.setCurrentText(final_sys)
@@ -2004,11 +1963,7 @@ class LogPlotPanel(QWidget):
         
         # 3. Update the selected row(s) - ONLY if this was a manual user change
         if not self._is_internal_update:
-            # Update the study component
             self._update_selected_row_name_component('study', text)
-            # If system was auto-changed, update that component too
-            if final_sys != current_sys:
-                self._update_selected_row_name_component('system', final_sys)
 
     def on_system_selected(self, text: str):
         """
@@ -2047,18 +2002,13 @@ class LogPlotPanel(QWidget):
                 self.system_combo.blockSignals(True)
                 self.system_combo.clear()
                 self.system_combo.addItem("Select System")
-                if len(systems) > 1:
-                    self.system_combo.addItem("average")
+                self.system_combo.addItems(self._get_average_system_options(systems))
                 self.system_combo.addItems(systems)
                 self.system_combo.setCurrentText(text) # Restore selection
                 self.system_combo.blockSignals(False)
 
         # 2. Update the row data - ONLY if manual user change
         if not self._is_internal_update:
-            # If we auto-selected a study, save that too
-            if final_study != "Select Study":
-                self._update_selected_row_name_component('study', final_study)
-            # Save the system component
             self._update_selected_row_name_component('system', text)
 
     def on_table_selection_changed(self):
@@ -2269,7 +2219,7 @@ class LogPlotPanel(QWidget):
             
             # --- Consistency Check (Original Logic) ---
             user_choices = None
-            if plot_info['system'] == 'average':
+            if self._is_average_system(plot_info['system']):
                 study_name = plot_info['study']
                 current_consistency = self.data_manager.check_data_consistency(study_name)
                 if current_consistency:
@@ -2288,17 +2238,18 @@ class LogPlotPanel(QWidget):
                             continue
 
             # Determine if we need to compute raw inter-system standard deviation
+            force_raw_std = self._uses_forced_average_std(plot_info['system'])
             compute_raw_std = (
-                plot_info['system'] == 'average' and 
-                plot_info['show_std'] and 
-                plot_info['mean_window'] == 0
+                self._is_average_system(plot_info['system']) and
+                (plot_info['show_std'] or force_raw_std) and
+                (plot_info['mean_window'] == 0 or force_raw_std)
             )
             
             current_x_ax = preferred_x_ax or plot_info['x_ax']
 
             # --- Fetch Data ---
             data = self.data_manager.get_plot_data(
-                plot_info['study'], plot_info['system'], current_x_ax, plot_info['y_ax'], 
+                plot_info['study'], 'average' if self._is_average_system(plot_info['system']) else plot_info['system'], current_x_ax, plot_info['y_ax'], 
                 compute_raw_std, user_choices
             )
             
@@ -2353,6 +2304,15 @@ class LogPlotPanel(QWidget):
             if plot_info['show_original']:
                 plot_data = data.copy()
                 if not compute_raw_std: plot_data['std'] = None
+                if force_raw_std:
+                    pale_std_color = QColor(plot_info['color'])
+                    h, s, v, a = pale_std_color.getHsv()
+                    muted_s = int(s * 0.45)
+                    brightened_v = min(255, int(v + (255 - v) * 0.25))
+                    pale_std_color.setHsv(h, muted_s, brightened_v, a)
+                    plot_data['error_color'] = pale_std_color
+                    plot_data['error_alpha_multiplier'] = 0.5
+                    plot_data['error_layer_priority'] = -100
                 self.plot_controller.add_or_update_plot(
                     legend_name, plot_data, plot_info['color'], 
                     plot_info['style'], thickness=plot_info['thickness'],
@@ -2721,8 +2681,10 @@ class LogPlotPanel(QWidget):
         black_color = QColor("black")
         # Only color axes if there are multiple different y-axes being shown
         if len(y_labels) > 1:
-            for info in visible_plots_info:
-                self.plot_controller.set_axis_color(info['y_ax'], info['color'])
+            # Collect unique y_ax -> color mappings to avoid redundant calls
+            axis_colors = {info['y_ax']: info['color'] for info in visible_plots_info}
+            for y_ax, color in axis_colors.items():
+                self.plot_controller.set_axis_color(y_ax, color)
         else:
             # Reset all axes to black if one or zero plots are visible
             for y_ax in self.plot_controller.y_axes.keys():

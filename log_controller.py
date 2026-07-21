@@ -4,6 +4,47 @@ from typing import Dict, Any
 import numpy as np
 import copy
 
+# Custom AxisItem that separates axis line color from grid/tick color
+class ColoredAxis(pg.AxisItem):
+    """AxisItem with separate colors for axis line and grid/ticks."""
+    
+    def __init__(self, orientation, pen=None, textPen=None, axisPen=None, linkView=None, parent=None, maxTickLength=-5, showValues=True, text='', units='', unitPrefix='', **args):
+        super().__init__(orientation, pen=pen, textPen=textPen, linkView=linkView, parent=parent, maxTickLength=maxTickLength, showValues=showValues, text=text, units=units, unitPrefix=unitPrefix, **args)
+        self.axisPen = axisPen
+        if self.axisPen is None:
+            self.axisPen = self.pen()
+    
+    def drawPicture(self, p, axisSpec, tickSpecs, textSpecs):
+        """Override drawPicture to use separate pen for axis line."""
+        p.setRenderHint(p.RenderHint.Antialiasing, False)
+        p.setRenderHint(p.RenderHint.TextAntialiasing, True)
+        
+        ## draw long line along axis line, using axisPen
+        pen, p1, p2 = axisSpec
+        p.setPen(self.axisPen)
+        p.drawLine(p1, p2)
+        
+        ## draw ticks using normal pen (grid color)
+        for pen, p1, p2 in tickSpecs:
+            p.setPen(pen)
+            p.drawLine(p1, p2)
+        
+        ## Draw all text
+        if self.style['tickFont'] is not None:
+            p.setFont(self.style['tickFont'])
+        p.setPen(self.textPen())
+        bounding = self.boundingRect().toAlignedRect()
+        p.setClipRect(bounding)
+        for rect, flags, text in textSpecs:
+            p.drawText(rect, int(flags), text)
+    
+    def setAxisPen(self, pen):
+        """Set the pen used for drawing the axis line."""
+        self.axisPen = pen
+        self.picture = None
+        self.update()
+
+
 class LogController:
     """Manages the pyqtgraph PlotWidget and its items."""
     
@@ -152,6 +193,9 @@ class LogController:
         x, y = data['x'], data['y']
         std = data.get('std')
         y_col_name = data.get('y_col')
+        error_alpha_multiplier = data.get('error_alpha_multiplier', 0.5)
+        error_layer_priority = data.get('error_layer_priority')
+        error_color = data.get('error_color', color)
 
         if not y_col_name:
             return
@@ -164,13 +208,13 @@ class LogController:
                     'axis': self.plot_item.getAxis('left'),
                     'viewbox': vb
                 }
-            else: # Create a new ViewBox and Axis on the right for subsequent plots
+            else:  # Create a new ViewBox and Axis on the right for subsequent plots
                 vb = pg.ViewBox()
-                ax = pg.AxisItem('right')
-                
+                ax = ColoredAxis('right')
+
                 # Assign a decreasing Z-value so that the first added right axis (inner) stays 'above' subsequent axes (outer) in the scene stack regarding event capture.
                 ax.setZValue(1000 - len(self.y_axes))
-                
+
                 self.plot_item.layout.addItem(ax, 2, len(self.y_axes) + 2)
                 self.plot_item.scene().addItem(vb)
                 ax.linkToView(vb)
@@ -189,8 +233,9 @@ class LogController:
         
         error_item = None
         if std is not None and np.any(std):
-            r, g, b, a = color.getRgb()
-            brush = pg.mkBrush(color=pg.mkColor(r, g, b, int(a * 0.5)))
+            r, g, b, a = error_color.getRgb()
+            brush_alpha = max(0, min(255, int(a * error_alpha_multiplier)))
+            brush = pg.mkBrush(color=pg.mkColor(r, g, b, brush_alpha))
             
             # FIX: Initialize FillBetweenItem with its required curve arguments
             error_item = pg.FillBetweenItem(
@@ -204,7 +249,10 @@ class LogController:
         
         z_value = layer_priority * 10
         if error_item:
-            error_item.setZValue(z_value)
+            if error_layer_priority is not None:
+                error_item.setZValue(error_layer_priority * 10)
+            else:
+                error_item.setZValue(z_value)
         plot_data_item.setZValue(z_value + 1)
         
         # If this plot has high priority (e.g. selected), ensure its ViewBox is also on top
@@ -294,11 +342,17 @@ class LogController:
                 self.y_axis_labels[y_col] = label  # Store for export
 
     def set_axis_color(self, y_col: str, color: QColor):
-        """Sets the color of a specific y-axis, including its label and pen."""
+        """Sets the color of a specific y-axis, including its label and axis line.
+        Grid lines remain black/gray regardless of axis color."""
         if y_col in self.y_axes:
             axis = self.y_axes[y_col]['axis']
-            axis.setPen(color)
+            # Set text color
             axis.setTextPen(color)
+            # Use setAxisPen for ColoredAxis to only affect axis line, not grid
+            if isinstance(axis, ColoredAxis):
+                axis.setAxisPen(pg.mkPen(color=color, width=1))
+            else:
+                axis.setPen(color)
             self.y_axis_colors[y_col] = color  # Store for export
 
     def export_plot(self, filename: str, figsize=None):
