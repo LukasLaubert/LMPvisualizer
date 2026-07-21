@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget,
                              QDialogButtonBox, QHeaderView, QTableWidgetItem,
                              QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog,
                              QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication, 
-                             QStyledItemDelegate, QComboBox, QSizePolicy)
+                             QStyledItemDelegate, QComboBox, QSizePolicy, QMessageBox, QFileDialog)
 from PyQt6.QtGui import QColor, QPalette, QFontMetrics, QFont
 from PyQt6.QtCore import pyqtSignal, Qt, QEvent
 
@@ -395,4 +395,77 @@ class NoNewLineDelegate(QStyledItemDelegate):
             if view and view.minimumWidth() < width:
                 view.setMinimumWidth(width)
                 
+                
         return super().sizeHint(option, index)
+
+class MissingPathDialog(QDialog):
+    def __init__(self, parent, project_path):
+        super().__init__(parent)
+        self.setWindowTitle("Project Path Missing")
+        self.setFixedWidth(500)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # Icon and Message
+        msg_layout = QHBoxLayout()
+        icon_label = QLabel()
+        icon_style = self.style().standardIcon(self.style().StandardPixmap.SP_MessageBoxWarning)
+        icon_label.setPixmap(icon_style.pixmap(32, 32))
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        msg_layout.addWidget(icon_label)
+        
+        text_label = QLabel(f"The project path specified in the session file does not exist:\n{project_path}")
+        text_label.setWordWrap(True)
+        msg_layout.addWidget(text_label, 1)
+        layout.addLayout(msg_layout)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+        
+        self.btn_relocate = QPushButton("Relocate Project")
+        self.btn_relocate.setToolTip("Choose the new location of this project and restore the session.")
+        self.btn_relocate.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
+        self.btn_change = QPushButton("Change Project")
+        self.btn_change.setToolTip("Pick a completely different project and clear the session data.")
+        self.btn_change.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
+        self.btn_fresh = QPushButton("Discard & Reset")
+        self.btn_fresh.setToolTip("Cancel loading and reset the GUI to a blank state.")
+        self.btn_fresh.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
+        btn_layout.addWidget(self.btn_relocate)
+        btn_layout.addWidget(self.btn_change)
+        btn_layout.addWidget(self.btn_fresh)
+        layout.addLayout(btn_layout)
+        
+        self.result_action = "cancel"
+        
+        self.btn_relocate.clicked.connect(lambda: self.finish("relocate"))
+        self.btn_change.clicked.connect(lambda: self.finish("change"))
+        self.btn_fresh.clicked.connect(lambda: self.finish("reset"))
+
+    def finish(self, action):
+        self.result_action = action
+        self.accept()
+
+class MissingPathResolver:
+    @staticmethod
+    def resolve(parent, project_path):
+        """
+        Handles missing project path and returns a tuple (action, new_path).
+        Actions: 'relocate', 'change', 'reset', 'cancel'
+        """
+        dialog = MissingPathDialog(parent, project_path)
+        if dialog.exec():
+            action = dialog.result_action
+            if action == 'relocate':
+                new_path = QFileDialog.getExistingDirectory(parent, "Relocate Project Folder", "")
+                return ("relocate", new_path) if new_path else ("cancel", None)
+            elif action == 'change':
+                new_path = QFileDialog.getExistingDirectory(parent, "Select New Project Folder", "")
+                return ("change", new_path) if new_path else ("cancel", None)
+            return (action, None)
+        return ("cancel", None)

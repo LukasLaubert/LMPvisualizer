@@ -19,7 +19,7 @@ from log_parser import LogParser
 from log_data_manager import LogDataManager
 from log_controller import LogController
 from settings_manager import SettingsManager
-from ui_components import ColorButton, InconsistentDataDialog, RightClickButton, NoNewLineDelegate
+from ui_components import ColorButton, InconsistentDataDialog, RightClickButton, NoNewLineDelegate, MissingPathResolver
 from global_label_editor_dialog import GlobalLabelEditorDialog
 from custom_property_dialog import CustomPropertyDialog
 from popout_window import PopOutWindow
@@ -2864,7 +2864,7 @@ class LogPlotPanel(QWidget):
     def _get_current_state_dict(self):
         """Helper to gather current state for saving."""
         config = {
-            'type': 'log_plot',  # Added type identifier
+            'type': 'log',  # Simplified type identifier
             'path': self.main_window.path_edit.text(),
             'keywords': self.main_window.chip_input.get_chips(), # Added keywords
             'average_choices': self.average_user_choices,
@@ -2999,25 +2999,41 @@ class LogPlotPanel(QWidget):
             return
 
         # --- Mismatch Check ---
-        if data.get('type') != 'log_plot':
-            msg = QMessageBox(self.main_window)
-            msg.setWindowTitle("Mode Mismatch")
-            msg.setText("Mode Mismatch. This is a Trajectory session.")
-            abort_btn = msg.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
-            switch_btn = msg.addButton("Switch to Trajectory Plot", QMessageBox.ButtonRole.AcceptRole)
-            msg.exec()
+        file_type = data.get('type')
+        if file_type not in ['log', 'log_plot']:
+            # Check for known types
+            is_dsd = file_type in ['dsd', 'dsd_plot']
+            is_trj = file_type in ['trj', 'trj_plot']
+            
+            if is_dsd or is_trj:
+                target_mode = "DSD Mode" if is_dsd else "Trajectory Plot"
+                target_idx = self.main_window.MODE_DSD if is_dsd else self.main_window.MODE_TRJ
+                target_panel = self.main_window.dsd_plot_panel if is_dsd else self.main_window.trj_plot_panel
 
-            if msg.clickedButton() == switch_btn:
-                # Save current (Log) state before switching
-                self.main_window.save_session_for_mode(self.main_window.MODE_LOG)
-                # Set flag to skip orchestration's autoload
-                self.main_window._skip_next_orchestration = True
-                # Switch to Trj Mode - this will trigger autosave/autoload orchestration
-                self.main_window.switch_to_mode(self.main_window.MODE_TRJ)
-                # After mode switch completes, force load the file in the new mode
-                self.main_window.trj_plot_panel.load_session_from_file(path)
-            # If abort, do nothing - stay in current mode
-            return
+                msg = QMessageBox(self.main_window)
+                msg.setWindowTitle("Mode Mismatch")
+                msg.setText(f"Mode Mismatch. This is a {target_mode} session.")
+                abort_btn = msg.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
+                switch_btn = msg.addButton(f"Switch to {target_mode}", QMessageBox.ButtonRole.AcceptRole)
+                msg.exec()
+
+                if msg.clickedButton() == switch_btn:
+                    # Save current (Log) state before switching
+                    self.main_window.save_session_for_mode(self.main_window.MODE_LOG)
+                    # Set flag to skip orchestration's autoload
+                    self.main_window._skip_next_orchestration = True
+                    # Switch to Target Mode
+                    self.main_window.switch_to_mode(target_idx)
+                    # After mode switch completes, force load the file in the new mode
+                    target_panel.load_session_from_file(path)
+                # If abort, do nothing - stay in current mode
+                return
+            else:
+                 # Unknown Type -> Error only
+                QMessageBox.warning(self.main_window, "Invalid Session File", 
+                                    f"The file has an unknown or invalid type: '{file_type}'.\n"
+                                    "Cannot load this session.")
+                return
 
         print(f"[System] Loading session: {path} for mode Log Plot")
 
@@ -3037,17 +3053,40 @@ class LogPlotPanel(QWidget):
 
         try:
             if project_path:
+                # Check for non-existent path
+                relocated = False
+                if not os.path.exists(project_path):
+                    action, new_path = MissingPathResolver.resolve(self, project_path)
+                    if action == 'cancel':
+                        return
+                    elif action == 'reset':
+                        # Clear path and reset panel
+                        self.main_window.path_edit.setText("")
+                        self.main_window.on_path_entered()
+                        return
+                    elif action == 'change':
+                        # Start with a new project path, clearing session
+                        self.main_window.path_edit.setText(new_path)
+                        self.main_window.on_path_entered()
+                        return
+                    elif action == 'relocate':
+                        # Use the new path but continue loading session data
+                        project_path = new_path
+                        relocated = True
+
                 self.main_window.path_edit.setText(project_path)
                 self.main_window.chip_input.set_chips(keywords)
                 
                 root_path = Path(project_path)
-                if root_path.exists():
-                    # Internal load without UI warnings
-                    self.load_project(root_path, keywords, show_discovery_warnings=False, keep_table=False)
-                    # Refresh combos
-                    self._refresh_axis_combos()
-                else:
-                    print(f"[System] Warning: Path from session does not exist: {root_path}")
+                # Internal load without UI warnings
+                self.load_project(root_path, keywords, show_discovery_warnings=False, keep_table=False)
+                # Refresh combos
+                self._refresh_axis_combos()
+
+                # If relocated and project was found, auto-update the session file
+                if relocated and self.data_manager.data:
+                    if self.save_session_to_file(path):
+                        print(f"[System] Relocation successful. Session file updated: {path}")
 
             # Restore Settings
             self.running_mean_setting = data.get('running_mean_setting', 'symmetric_window')

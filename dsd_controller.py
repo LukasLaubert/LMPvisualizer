@@ -259,7 +259,16 @@ class DSDController(QObject):
                                  g_max_x = max(g_max_x, np.max(x))
                                  g_min_y = min(g_min_y, np.min(y))
                                  g_max_y = max(g_max_y, np.max(y))
-                      
+                                 
+                                 # Include error bands
+                                 if options.get('disp_std', True) and 'std_dev' in df_res.columns:
+                                     y_err = df_res['std_dev'].values
+                                     if np.any(y_err):
+                                         g_min_y = min(g_min_y, np.min(y - y_err))
+                                         g_max_y = max(g_max_y, np.max(y + y_err))
+            
+            pass
+
         if g_min_x != float('inf'):
             pad_x = (g_max_x - g_min_x) * 0.05 if g_max_x != g_min_x else 1.0
             self.plot_item.setXRange(g_min_x - pad_x, g_max_x + pad_x, padding=0)
@@ -402,6 +411,11 @@ class DSDController(QObject):
             ts_to_load = self.timesteps[0]
         elif ref == 'Final':
             ts_to_load = self.timesteps[-1]
+        elif ref.startswith("Step "):
+            try:
+                ts_to_load = int(ref.split(" ")[1])
+            except:
+                ts_to_load = self.current_timestep
         # Else 'Current' uses self.current_timestep (default)
 
         # Load the specific frame just to get the Min/Max of the column
@@ -428,6 +442,18 @@ class DSDController(QObject):
         self.plot_item.clear()
         self.vb2.clear()
         self.plot_items = {}
+        
+        # Restore Legend (clear() removes it)
+        if self.plot_item.legend:
+            try:
+                if self.plot_item.legend.scene():
+                    self.plot_item.legend.scene().removeItem(self.plot_item.legend)
+            except Exception:
+                pass
+            finally:
+                self.plot_item.legend = None
+                
+        self.plot_item.addLegend()
         
         # Restore fundamental visual state
         self.plot_item.showGrid(x=True, y=True, alpha=0.3)
@@ -460,6 +486,12 @@ class DSDController(QObject):
         df_final = None
         if options.get('z_filter_ref') == 'Final' and len(self.timesteps) > 0:
              df_final, _ = self.data_manager.load_frame(study, system, self.timesteps[-1])
+        elif options.get('z_filter_ref', '').startswith("Step "):
+            try:
+                custom_ts = int(options.get('z_filter_ref').split(" ")[1])
+                df_final, _ = self.data_manager.load_frame(study, system, custom_ts)
+            except:
+                pass
         
         if df_init is None or df_curr is None: return
             
@@ -539,8 +571,8 @@ class DSDController(QObject):
                 color = QColor(domain.get('color', 'blue'))
                 style_str = domain.get('style', 'o')
                 symbol, pen_style = self._get_pyqtgraph_style(style_str)
-                try: width = int(domain.get('size', 5))
-                except: width = 5
+                try: width = int(domain.get('size', 3))
+                except: width = 3
 
                 # Plot Error Band
                 if y_err is not None:
@@ -588,17 +620,17 @@ class DSDController(QObject):
                     'weight': seg_weight
                 })
 
-        # Call the final part (Optimal Line + Report)
+        # Call the final part (End-to-end + Report)
         if all_pts_flat or (box_init and box_curr):
-            self._draw_optimal_line_and_report(slice_axis, observe_axis, box_init, box_curr, all_pts_flat, any_domain_pbc, report_data, options)
+            self._draw_end_to_end_and_report(slice_axis, observe_axis, box_init, box_curr, all_pts_flat, any_domain_pbc, report_data, options)
         else:
             self.errorUpdated.emit("No data points available.")
 
-    def _draw_optimal_line_and_report(self, slice_axis, observe_axis, box_init, box_curr, all_pts_flat, any_domain_pbc, report_data, options):
+    def _draw_end_to_end_and_report(self, slice_axis, observe_axis, box_init, box_curr, all_pts_flat, any_domain_pbc, report_data, options):
         s_idx = {'x':0,'y':1,'z':2}.get(slice_axis.lower())
         o_idx = {'x':0,'y':1,'z':2}.get(observe_axis.lower())
         
-        # Determine Optimal Line Coords (Target)
+        # Determine End-to-end Line Coords (Target)
         use_global_box = any_domain_pbc and (s_idx is not None) and (o_idx is not None) and box_init and box_curr
         
         x1, x2, y1, y2 = 0, 1, 0, 0
@@ -663,7 +695,7 @@ class DSDController(QObject):
         
         self.last_target_strain = slope
 
-        # Optimal Line Plotting (Independent of Menu Option)
+        # End-to-end Line Plotting (Independent of Menu Option)
         opt_settings = next((d for d in self.domains if d.get('is_optimal_line')), None)
         
         # Use 'show' from table, default to True if missing
@@ -675,13 +707,12 @@ class DSDController(QObject):
             ops = Qt.PenStyle.DashLine if os_str == '--' else Qt.PenStyle.SolidLine
             try: width = int(opt_settings.get('size', 1))
             except: width = 1
-            opt_item = self.plot_item.plot([x1, x2], [y1, y2], pen=pg.mkPen(oc, width=width, style=ops), name="Optimal Line")
+            opt_item = self.plot_item.plot([x1, x2], [y1, y2], pen=pg.mkPen(oc, width=width, style=ops), name="End-to-end")
             opt_item.setZValue(1000)
 
         # Report Generation
         headers = ["Split", "Strain", "Error", "#Parts", "#Weights"]
         data_rows = []
-        data_rows.append(["Target", f"{slope: .3e}", f"{0.0: .3e}", "-", "-"])
         
         for item in report_data:
             derivs = self.data_manager.calculate_derivatives(item['df'])
@@ -697,6 +728,9 @@ class DSDController(QObject):
             c_str = f"{int(item['count'])}"
             w_str = f"{item['weight']:.2f}"
             data_rows.append([item['name'], s_str, e_str, c_str, w_str])
+
+        # Add E2E (End-to-end) row at the bottom
+        data_rows.append(["E2E", f"{slope: .3e}", f"{0.0: .3e}", "-", "-"])
 
         widths = [len(h) for h in headers]
         for row in data_rows:
@@ -742,42 +776,34 @@ class DSDController(QObject):
         x_plot = x_full[steps_to_plot]
         
         # 3. Plot Domains
-        # Iterate over cached results, but find their CURRENT config by matching properties
-        # This handles row swapping without requiring cache invalidation/recalculation
-        for d_data in self._strain_cache['domains']:
+        # Iterate over self.domains (CURRENT Table Order) to ensure correct layering and legend order
+        for idx, domain in enumerate(self.domains):
+            if domain.get('is_optimal_line'): continue
             
-            # Identify the current domain config that matches this result
-            # Match by parent_identity (Name, Splits, Active Segments)
-            matched_domain = None
-            matched_idx = -1
-            
-            target_key = d_data.get('parent_identity')
-            
-            if target_key:
-                for idx, d in enumerate(self.domains):
-                    if d.get('is_optimal_line'): continue
-                    
-                    current_key = (d.get('name'), tuple(d.get('splits', [])), tuple(d.get('active_segments', [])))
-                    if current_key == target_key:
-                        matched_domain = d
-                        matched_idx = idx
-                        break
-            
-            # If not found (e.g. deleted), skip
-            if matched_domain is None:
-                continue
-
             # Respect Show flag
-            if not matched_domain.get('show', True):
+            if not domain.get('show', True):
                 continue
 
-            color = QColor(matched_domain.get('color', 'blue'))
-            style_str = matched_domain.get('style', 'o')
-            try: width = int(matched_domain.get('size', 2))
+            # Identify identity
+            current_id = (domain.get('name'), tuple(domain.get('splits', [])), tuple(domain.get('active_segments', [])))
+            
+            # Find matching data in cache
+            d_data = None
+            for data_item in self._strain_cache['domains']:
+                if data_item.get('parent_identity') == current_id:
+                    d_data = data_item
+                    break
+            
+            if d_data is None:
+                continue
+
+            # Visual Properties from CURRENT domain config
+            color = QColor(domain.get('color', 'blue'))
+            style_str = domain.get('style', 'o')
+            try: width = int(domain.get('size', 2))
             except: width = 2
-                
-            # Layering: Top of table (low matched index) -> Top Layer (high Z)
-            z_val = len(self.domains) - matched_idx
+                          
+            z_val = len(self.domains) - idx
 
             y_full = np.array(d_data['strains'])
             y_err_full = np.array(d_data['stds'])
@@ -802,9 +828,9 @@ class DSDController(QObject):
                 item = None
                 if symbol:
                     item = self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, symbol=symbol, 
-                                        symbolBrush=color, symbolPen=color, symbolSize=width*2, name=matched_domain['name'])
+                                        symbolBrush=color, symbolPen=color, symbolSize=width*2, name=domain['name'])
                 else:
-                    item = self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, name=matched_domain['name'])
+                    item = self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, name=domain['name'])
                 
                 if item: item.setZValue(z_val)
 
@@ -819,7 +845,7 @@ class DSDController(QObject):
                 if len(valid_x) > 0:
                     x_min, x_max = np.min(valid_x), np.max(valid_x)
                     p_item = self.plot_item.plot([x_min, x_max], [x_min, x_max], 
-                                               pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="Target")
+                                               pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="End-to-end")
                     p_item.is_opt_line = True
                     p_item.setZValue(1000)
             else: # Strain Over Step
@@ -828,7 +854,7 @@ class DSDController(QObject):
                 if np.any(mask):
                     effective_target = np.array(self._strain_cache['target_strains'])[steps_to_plot]
                     p_item = self.plot_item.plot(x_plot, effective_target, 
-                                               pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="Target")
+                                               pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="End-to-end")
                     p_item.is_opt_line = True
                     p_item.setZValue(1000)
 

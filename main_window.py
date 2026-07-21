@@ -410,19 +410,49 @@ class MainWindow(QMainWindow):
              return
              
         if path.is_file():
-             # If a specific file is entered, load its parent directory 
+             # Check for JSON Session File
+             if path.suffix.lower() == '.json':
+                 try:
+                     with open(path, 'r') as f:
+                         data = json.load(f)
+                     
+                     file_type = data.get('type')
+                     
+                     # Map type string to Mode Constant (Support legacy *_plot suffix)
+                     type_map = {
+                         'dsd': self.MODE_DSD, 'dsd_plot': self.MODE_DSD,
+                         'trj': self.MODE_TRJ, 'trj_plot': self.MODE_TRJ,
+                         'log': self.MODE_LOG, 'log_plot': self.MODE_LOG
+                     }
+                     
+                     if file_type in type_map:
+                         detected_mode = type_map[file_type]
+                         
+                         # Switch and Load
+                         self.switch_to_mode(detected_mode)
+                         current_panel = self.stacked_widget.currentWidget()
+                         if hasattr(current_panel, 'load_session_from_file'):
+                             current_panel.load_session_from_file(str(path))
+                             self.path_edit.setText(str(path))
+                             return
+                     else:
+                         QMessageBox.warning(self, "Invalid Session File", 
+                             f"The file '{path.name}' is not a valid session file OR has an unknown type.\n\n"
+                             f"Found type: '{file_type}'\n\n"
+                             "Valid types:\n"
+                             "- 'dsd' (DSD Mode)\n"
+                             "- 'trj' (Trajectory Plot)\n"
+                             "- 'log' (Log Plot)")
+                         return
+
+                 except Exception as e:
+                     QMessageBox.warning(self, "Error", f"Failed to parse JSON file:\n{e}")
+                     return
+
+             # If a specific file is entered (not JSON session), load its parent directory 
              # and request auto-selection of this file as the target system.
              self.propagate_load(path.parent, target_system=path.stem)
-             # Update the text box to show the file path still? 
-             # Or show the parent? 
-             # User said: "when a file... is entered... it shall also parse the path but autoselect the file"
-             # Usually keeping the full path in the box is confusing if we loaded the DIR.
-             # But let's keep it if the user typed it, or update to Dir?
-             # Standard behavior: Update to Dir, but here we want to remember the file.
-             # propagate_load calls panel.load_project.
-             # Let's update text to parent dir for consistency, or keep file path?
-             # If we keep file path, on_refresh_clicked might re-trigger file logic.
-             # Let's update path_edit to the directory we are actually "loading" (the root).
+             # Update path to parent for clarity
              self.path_edit.setText(str(path.parent))
              self.current_project_path = str(path.parent)
         else:

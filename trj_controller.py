@@ -294,7 +294,7 @@ class TrjController(QObject):
                     mask = get_range_mask(df[z_col], abs_ranges)
 
             else:
-                # Initial / Final Logic (Absolute filtering)
+                # Initial / Final / Step Logic (Absolute filtering)
                 # z_ranges should be a list of (min, max)
                 z_ranges = self.view_config.get('z_ranges', [])
                 if not z_ranges:
@@ -302,14 +302,26 @@ class TrjController(QObject):
                     legacy_range = self.view_config.get('z_range', (float('-inf'), float('inf')))
                     z_ranges = [legacy_range]
                 
-                if z_ref in ['Initial', 'Final']:
-                    target_key = 'initial' if z_ref == 'Initial' else 'final'
-                    if target_key == 'final' and 'final' not in self._ref_cache:
-                        df_final, _ = self.data_manager.get_frame(study, system, self.timesteps[-1])
-                        if df_final is not None:
-                            self._ref_cache['final'] = df_final
-                            
-                    ref_df = self._ref_cache.get(target_key)
+                if z_ref in ['Initial', 'Final'] or z_ref.startswith("Step "):
+                    target_key = None
+                    if z_ref == 'Initial': target_key = 'initial'
+                    elif z_ref == 'Final': target_key = 'final'
+                    
+                    if target_key:
+                        if target_key == 'final' and 'final' not in self._ref_cache:
+                            df_final, _ = self.data_manager.get_frame(study, system, self.timesteps[-1])
+                            if df_final is not None:
+                                self._ref_cache['final'] = df_final
+                        ref_df = self._ref_cache.get(target_key)
+                    elif z_ref.startswith("Step "):
+                        try:
+                            custom_ts = int(z_ref.split(" ")[1])
+                            ref_df, _ = self.data_manager.get_frame(study, system, custom_ts)
+                        except:
+                            ref_df = None
+                    else:
+                        ref_df = None
+
                     if ref_df is not None and z_col in ref_df.columns and 'id' in ref_df.columns:
                         ref_mask = get_range_mask(ref_df[z_col], z_ranges)
                         valid_ids = ref_df.loc[ref_mask, 'id'].values
@@ -335,14 +347,25 @@ class TrjController(QObject):
             self.boundsChanged.emit({'heatmap': (h_min, h_max)})
             
             vals = None
-            if ref_type in ['Initial', 'Final']:
-                target_key = 'initial' if ref_type == 'Initial' else 'final'
-                if target_key == 'final' and 'final' not in self._ref_cache:
-                    df_final, _ = self.data_manager.get_frame(study, system, self.timesteps[-1])
-                    if df_final is not None:
-                        self._ref_cache['final'] = df_final
+            if ref_type in ['Initial', 'Final'] or ref_type.startswith("Step "):
+                target_key = None
+                if ref_type == 'Initial': target_key = 'initial'
+                elif ref_type == 'Final': target_key = 'final'
                 
-                ref_df = self._ref_cache.get(target_key)
+                ref_df = None
+                if target_key:
+                    if target_key == 'final' and 'final' not in self._ref_cache:
+                        df_final, _ = self.data_manager.get_frame(study, system, self.timesteps[-1])
+                        if df_final is not None:
+                            self._ref_cache['final'] = df_final
+                    ref_df = self._ref_cache.get(target_key)
+                elif ref_type.startswith("Step "):
+                    try:
+                        custom_ts = int(ref_type.split(" ")[1])
+                        ref_df, _ = self.data_manager.get_frame(study, system, custom_ts)
+                    except:
+                        pass
+                
                 if ref_df is not None and 'id' in ref_df.columns and 'id' in df_filtered.columns:
                     if heatmap_col in ref_df.columns:
                         ref_map = ref_df.set_index('id', drop=False)[heatmap_col]
@@ -429,6 +452,15 @@ class TrjController(QObject):
             if df is not None and col in df.columns:
                 return df[col].min(), df[col].max()
         
+        elif ref_type.startswith("Step "):
+            try:
+                target_ts = int(ref_type.split(" ")[1])
+                df, _ = self.data_manager.get_frame(study, system, target_ts)
+                if df is not None and col in df.columns:
+                    return df[col].min(), df[col].max()
+            except:
+                pass
+        
         # 'Current' (Default): Return limits of the current timestep
         df, _ = self.data_manager.get_frame(study, system, self.current_timestep)
         if df is not None and col in df.columns:
@@ -460,6 +492,15 @@ class TrjController(QObject):
             df = self._ref_cache.get('final')
             if df is not None and col in df.columns:
                 return df[col].min(), df[col].max()
+
+        elif ref_type.startswith("Step "):
+            try:
+                target_ts = int(ref_type.split(" ")[1])
+                df, _ = self.data_manager.get_frame(study, system, target_ts)
+                if df is not None and col in df.columns:
+                    return df[col].min(), df[col].max()
+            except:
+                pass
 
         # 3. Current Frame (Default case)
         df, _ = self.data_manager.get_frame(study, system, self.current_timestep)

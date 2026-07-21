@@ -591,9 +591,9 @@ class DSDAddDomainDialog(QDialog):
             self.chk_weighted.setChecked(current_data.get('weighted', False))
         lay_calc.addWidget(self.chk_weighted, 2, 1)
         
-        # Barycenter Mode (Independent)
-        self.chk_bary = QCheckBox("Barycenter Mode")
-        self.chk_bary.setToolTip("Uses particle center of mass instead of geometric center for binning.")
+        # Geometric center Mode (Independent)
+        self.chk_bary = QCheckBox("Centroid Mode")
+        self.chk_bary.setToolTip("Ensures box centers match the mean geometric position of particles in the bin.")
         if current_data:
             self.chk_bary.setChecked(current_data.get('bary_mid_twoside_weight', False))
         else:
@@ -708,7 +708,7 @@ class DSDTableWidget(QTableWidget):
         self.opt_line_row = -1 # Track optimal line position
         
     def add_domain(self, name, settings, is_optimal_line=False):
-        if settings.get('is_optimal_line', False) or name == "Optimal Line":
+        if settings.get('is_optimal_line', False) or name in ["Optimal Line", "End-to-end"]:
             is_optimal_line = True
             
         # Optimal line always at the BOTTOM
@@ -751,7 +751,7 @@ class DSDTableWidget(QTableWidget):
             
         # Col 1: Name Button / Label
         if is_optimal_line:
-            lbl = QLabel("Optimal Line")
+            lbl = QLabel("End-to-end")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setStyleSheet("font-weight: bold;")
             self.setCellWidget(row, 1, lbl)

@@ -279,10 +279,10 @@ class DSDDataManager:
                 if z_col in df_init_geo.columns:
                     z_vals = df_init_geo[z_col].values
                     
-            elif z_ref == 'Final':
-                # Filter based on values in the Final Frame
+            elif z_ref == 'Final' or (isinstance(z_ref, str) and z_ref.startswith("Step ")):
+                # Filter based on values in a fixed reference frame (Final or Custom Step)
                 if df_final is not None:
-                     # Join Final frame on the existing Geometry IDs
+                     # Join fixed frame on the existing Geometry IDs
                      df_final_sub = df_final[df_final['id'].isin(df_init_geo.index)]
                      df_final_sub = df_final_sub.set_index('id').reindex(df_init_geo.index)
                      if z_col in df_final_sub.columns:

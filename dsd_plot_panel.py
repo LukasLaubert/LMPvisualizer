@@ -16,7 +16,7 @@ from dsd_data_manager import DSDDataManager
 from dsd_controller import DSDController
 from dsd_widgets import DSDTableWidget, DSDAddDomainDialog
 from trj_widgets import FilterBarWidget, PlayerControlWidget
-from ui_components import ColorButton, NoNewLineDelegate, RightClickButton
+from ui_components import ColorButton, NoNewLineDelegate, RightClickButton, MissingPathResolver
 from settings_manager import SettingsManager
 from log_parser import LogParser
 from popout_window import PopOutWindow
@@ -101,7 +101,7 @@ class DSDPlotPanel(QWidget):
         self.zfilter_combo.setMinimumWidth(middle_min_width)
         self.right_grid.addWidget(self.zfilter_combo, 0, 1)
 
-        self.zfilter_ref_combo = self._create_combo("Initial", ["Initial", "Current", "Final"])
+        self.zfilter_ref_combo = self._create_combo("Initial", ["Initial", "Current", "Final", "Set step"])
         self.zfilter_ref_combo.setFixedWidth(far_right_fixed_width)
         self.right_grid.addWidget(self.zfilter_ref_combo, 0, 2)
 
@@ -348,16 +348,6 @@ class DSDPlotPanel(QWidget):
         self.player_controls.jumpToStepRequested.connect(self._on_jump_to_step)
         
         self.popout_btn.clicked.connect(self.launch_popout)
-
-    def _on_jump_to_step(self, val):
-        if not self.controller.timesteps: return
-        # Find closest step
-        arr = np.array(self.controller.timesteps)
-        idx = (np.abs(arr - val)).argmin()
-        
-        # Set in controller and player controls
-        self.controller.set_timestep_index(idx)
-        self.player_controls.set_step_index(idx)
         self.export_btn.clicked.connect(self.quick_export)
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
@@ -371,6 +361,16 @@ class DSDPlotPanel(QWidget):
         
         # Table Signals
         self.plot_table.rowMoved.connect(self.update_plot)
+
+    def _on_jump_to_step(self, val):
+        if not self.controller.timesteps: return
+        # Find closest step
+        arr = np.array(self.controller.timesteps)
+        idx = (np.abs(arr - val)).argmin()
+        
+        # Set in controller and player controls
+        self.controller.set_timestep_index(idx)
+        self.player_controls.set_step_index(idx)
 
     def _on_stats_updated(self, data):
         self.stats_table.setRowCount(0)
@@ -511,6 +511,9 @@ class DSDPlotPanel(QWidget):
             
             studies = sorted(list(self.data_manager.parsers.keys()))
             self._populate_combo(self.study_combo, "Select Study", studies)
+            
+            # Force trigger because _populate_combo blocks signals
+            self.on_study_changed(self.study_combo.currentText())
         else:
             self.add_btn.setEnabled(False)
 
@@ -605,7 +608,7 @@ class DSDPlotPanel(QWidget):
             if self.plot_table.opt_line_row == -1:
                 real_domains = [d for d in domains if not d.get('is_optimal_line')]
                 if real_domains:
-                    self.plot_table.add_domain("Optimal Line", {'color': 'black', 'style': '--', 'size': '1'}, is_optimal_line=True)
+                    self.plot_table.add_domain("End-to-end", {'color': 'black', 'style': '--', 'size': '1'}, is_optimal_line=True)
                     domains = self.plot_table.get_domains() 
         else:
             if self.plot_table.opt_line_row != -1:
@@ -693,9 +696,30 @@ class DSDPlotPanel(QWidget):
             item_w.setText(txt_w)
 
     def _on_zfilter_changed(self, text):
+        if self._updating_from_code: return
+        
         col = self.zfilter_combo.currentText()
         ref = self.zfilter_ref_combo.currentText()
         
+        # Handle "Set step" trigger
+        if ref == "Set step":
+            curr_step = self.controller.current_timestep
+            new_label = f"Step {curr_step}"
+            
+            self._updating_from_code = True
+            # Remove any existing "Step ..." entry
+            for i in range(self.zfilter_ref_combo.count()):
+                if self.zfilter_ref_combo.itemText(i).startswith("Step "):
+                    self.zfilter_ref_combo.removeItem(i)
+                    break
+            
+            # Add the new step and select it
+            current_count = self.zfilter_ref_combo.count()
+            self.zfilter_ref_combo.insertItem(current_count - 1, new_label) # Insert before "Set step"
+            self.zfilter_ref_combo.setCurrentText(new_label)
+            self._updating_from_code = False
+            ref = new_label
+
         study = self.study_combo.currentText()
         system = self.system_combo.currentText()
 
@@ -707,7 +731,6 @@ class DSDPlotPanel(QWidget):
             if study and system and "Select" not in study and "Select" not in system:
                  limits = self.controller.get_scope_min_max(study, system, col, ref)
                  if limits:
-                     # This updates the UI widget range (labels at top/bottom)
                      self.filter_bar.set_data_range(limits[0], limits[1])
         else:
             self.filter_bar.setVisible(False)
@@ -818,7 +841,7 @@ class DSDPlotPanel(QWidget):
         if not p_path: return False
         
         session_data = {
-            'type': 'dsd_plot',
+            'type': 'dsd',
             'project_path': self.main_window.path_edit.text(),
             'keywords': self.main_window.chip_input.get_chips(),
             'domains': self.plot_table.get_domains(),
@@ -856,30 +879,41 @@ class DSDPlotPanel(QWidget):
             return
             
         # --- Mismatch Check ---
-        if data.get('type') != 'dsd_plot':
-            msg = QMessageBox(self.main_window)
-            msg.setWindowTitle("Mode Mismatch")
+        file_type = data.get('type')
+        if file_type not in ['dsd', 'dsd_plot']:
+            # Check if it is a known OTHER type
+            is_trj = file_type in ['trj', 'trj_plot']
+            is_log = file_type in ['log', 'log_plot']
             
-            # Determine which mode it belongs to
-            target_mode = "Trajectory Plot" if data.get('type') == 'trj_plot' else "Log Plot"
-            target_idx = self.main_window.MODE_TRJ if data.get('type') == 'trj_plot' else self.main_window.MODE_LOG
-            target_panel = self.main_window.trj_plot_panel if data.get('type') == 'trj_plot' else self.main_window.log_plot_panel
+            if is_trj or is_log:
+                # It IS a known other mode -> Offer Switch
+                target_mode = "Trajectory Plot" if is_trj else "Log Plot"
+                target_idx = self.main_window.MODE_TRJ if is_trj else self.main_window.MODE_LOG
+                target_panel = self.main_window.trj_plot_panel if is_trj else self.main_window.log_plot_panel
 
-            msg.setText(f"Mode Mismatch. This is a {target_mode} session.")
-            abort_btn = msg.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
-            switch_btn = msg.addButton(f"Switch to {target_mode}", QMessageBox.ButtonRole.AcceptRole)
-            msg.exec()
+                msg = QMessageBox(self.main_window)
+                msg.setWindowTitle("Mode Mismatch")
+                msg.setText(f"Mode Mismatch. This is a {target_mode} session.")
+                abort_btn = msg.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
+                switch_btn = msg.addButton(f"Switch to {target_mode}", QMessageBox.ButtonRole.AcceptRole)
+                msg.exec()
 
-            if msg.clickedButton() == switch_btn:
-                # Save current (DSD) state
-                self.main_window.save_session_for_mode(self.main_window.MODE_DSD)
-                # Set flag to skip orchestration's autoload
-                self.main_window._skip_next_orchestration = True
-                # Switch to Target Mode
-                self.main_window.switch_to_mode(target_idx)
-                # Force load
-                target_panel.load_session_from_file(path)
-            return
+                if msg.clickedButton() == switch_btn:
+                    # Save current (DSD) state
+                    self.main_window.save_session_for_mode(self.main_window.MODE_DSD)
+                    # Set flag to skip orchestration's autoload
+                    self.main_window._skip_next_orchestration = True
+                    # Switch to Target Mode
+                    self.main_window.switch_to_mode(target_idx)
+                    # Force load
+                    target_panel.load_session_from_file(path)
+                return
+            else:
+                # Unknown Type -> Error only, NO Switch
+                QMessageBox.warning(self.main_window, "Invalid Session File", 
+                                    f"The file has an unknown or invalid type: '{file_type}'.\n"
+                                    "Cannot load this session.")
+                return
         
         print(f"[System] Loading session: {path} for mode DSD Mode")
 
@@ -890,9 +924,36 @@ class DSDPlotPanel(QWidget):
             # 1. Load Project Data
             project_path = data.get('project_path', '')
             keywords = data.get('keywords', [])
+
+            # Check for non-existent path
+            relocated = False
+            if project_path and not os.path.exists(project_path):
+                action, new_path = MissingPathResolver.resolve(self, project_path)
+                if action == 'cancel':
+                    return
+                elif action == 'reset':
+                    # Clear path and reset panel
+                    self.main_window.path_edit.setText("")
+                    self.main_window.on_path_entered()
+                    return
+                elif action == 'change':
+                    # Start with a new project path, clearing session domains
+                    self.main_window.path_edit.setText(new_path)
+                    self.main_window.on_path_entered()
+                    return
+                elif action == 'relocate':
+                    # Use the new path but continue loading session data
+                    project_path = new_path
+                    relocated = True
+
             self.main_window.path_edit.setText(project_path)
             self.main_window.chip_input.set_chips(keywords)
             self.load_project(Path(project_path), keywords, force_reload=True, keep_table=True)
+            
+            # If relocated and project was found, auto-update the session file
+            if relocated and self.data_manager.parsers:
+                if self.save_session_to_file(path):
+                    print(f"[System] Relocation successful. Session file updated: {path}")
             
             # 2. Establish System Selection
             g_opts = data.get('global_options', {})
@@ -918,6 +979,17 @@ class DSDPlotPanel(QWidget):
             # Block signals temporarily to prevent multiple intermediate redraws
             self.zfilter_combo.blockSignals(True)
             self.zfilter_ref_combo.blockSignals(True)
+            
+            # Restore custom "Step ..." entry if needed
+            if z_ref.startswith("Step "):
+                # Remove any existing step first
+                for i in range(self.zfilter_ref_combo.count()):
+                    if self.zfilter_ref_combo.itemText(i).startswith("Step "):
+                        self.zfilter_ref_combo.removeItem(i)
+                        break
+                # Insert before "Set step"
+                self.zfilter_ref_combo.insertItem(self.zfilter_ref_combo.count() - 1, z_ref)
+
             self.zfilter_combo.setCurrentText(z_col)
             self.zfilter_ref_combo.setCurrentText(z_ref)
             self.zfilter_combo.blockSignals(False)

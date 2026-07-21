@@ -17,7 +17,7 @@ import numpy as np
 from trj_data_manager import TrjDataManager
 from trj_controller import TrjController
 from trj_widgets import FilterBarWidget, HeatmapBarWidget, PlayerControlWidget
-from ui_components import ColorButton, NoNewLineDelegate, RightClickButton
+from ui_components import ColorButton, NoNewLineDelegate, RightClickButton, MissingPathResolver
 from settings_manager import SettingsManager
 from log_parser import LogParser
 from global_label_editor_dialog import GlobalLabelEditorDialog
@@ -105,7 +105,12 @@ class TrjPlotPanel(QWidget):
         self.right_grid.addWidget(self.zfilter_combo, 0, 1)
         
         ref_options = ["Initial", "Final"]
-        self.zfilter_ref_combo = self._create_combo("Current", ref_options)
+        # self.zfilter_ref_combo = self._create_combo("Current", ref_options) # Replaced for order control
+        
+        self.zfilter_ref_combo = QComboBox()
+        self.zfilter_ref_combo.setItemDelegate(NoNewLineDelegate(self.zfilter_ref_combo))
+        self.zfilter_ref_combo.addItems(["Initial", "Current", "Final", "Set step"])
+        self.zfilter_ref_combo.setCurrentText("Current")
         self.zfilter_ref_combo.setFixedWidth(120)
         self.zfilter_ref_combo.setEnabled(False)
         self.right_grid.addWidget(self.zfilter_ref_combo, 0, 2)
@@ -114,8 +119,10 @@ class TrjPlotPanel(QWidget):
         self.heatmap_combo = self._create_combo("No Heatmap")
         self.right_grid.addWidget(self.heatmap_combo, 1, 1)
         
-        hm_ref_options = ["Initial", "Current", "Final"]
-        self.heatmap_ref_combo = self._create_combo("Current", hm_ref_options)
+        self.heatmap_ref_combo = QComboBox()
+        self.heatmap_ref_combo.setItemDelegate(NoNewLineDelegate(self.heatmap_ref_combo))
+        self.heatmap_ref_combo.addItems(["Initial", "Current", "Final", "Set step"])
+        self.heatmap_ref_combo.setCurrentText("Current")
         self.heatmap_ref_combo.setFixedWidth(120)
         self.heatmap_ref_combo.setEnabled(False)
         self.right_grid.addWidget(self.heatmap_ref_combo, 1, 2)
@@ -820,8 +827,16 @@ class TrjPlotPanel(QWidget):
             # We use a helper to find the text or default to index 0
             def safe_set(combo, val):
                 combo.blockSignals(True)
-                if val and combo.findText(val) >= 0:
-                    combo.setCurrentText(val)
+                if val:
+                    # Dynamically restore "Step X" entry if it exists in saved state but not in combo
+                    if val.startswith("Step ") and combo.findText(val) == -1:
+                        # Insert before "Set step"
+                        combo.insertItem(combo.count() - 1, val)
+                    
+                    if combo.findText(val) >= 0:
+                        combo.setCurrentText(val)
+                    else:
+                        combo.setCurrentIndex(0)
                 else:
                     combo.setCurrentIndex(0)
                 combo.blockSignals(False)
@@ -920,6 +935,30 @@ class TrjPlotPanel(QWidget):
         if row < 0: return
         
         state = self._capture_dropdown_state()
+        
+        # --- Handle "Set step" Triggers ---
+        re_sync_state = False
+        for combo, key in [(self.zfilter_ref_combo, 'z_ref'), (self.heatmap_ref_combo, 'h_ref')]:
+            if state.get(key) == "Set step":
+                curr_step = self.controller.current_timestep
+                new_label = f"Step {curr_step}"
+                
+                self._updating_from_code = True
+                # Remove any existing step
+                for i in range(combo.count()):
+                    if combo.itemText(i).startswith("Step "):
+                        combo.removeItem(i)
+                        break
+                # Insert before last item ("Set step")
+                combo.insertItem(combo.count() - 1, new_label)
+                combo.setCurrentText(new_label)
+                self._updating_from_code = False
+                
+                state[key] = new_label
+                re_sync_state = True
+        
+        # If we updated the dropdowns, we should update the 'state' stored in item
+        # but let's continue with the rest of the logic using the modified 'state'
         
         if state['z_col'] != "No Z-Filter":
             item = self.plot_table.item(row, 1)
@@ -1166,7 +1205,7 @@ class TrjPlotPanel(QWidget):
              return False
         
         session_data = {
-            'type': 'trj_plot', 
+            'type': 'trj', 
             'project_path': self.main_window.path_edit.text(),
             'keywords': self.main_window.chip_input.get_chips(),
             'rows': [],
@@ -1220,24 +1259,40 @@ class TrjPlotPanel(QWidget):
             return
         
         # --- Mismatch Check ---
-        if data.get('type') != 'trj_plot':
-            msg = QMessageBox(self.main_window)
-            msg.setWindowTitle("Mode Mismatch")
-            msg.setText("Mode Mismatch. This is a Log Plot session.")
-            abort_btn = msg.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
-            switch_btn = msg.addButton("Switch to Log Plot", QMessageBox.ButtonRole.AcceptRole)
-            msg.exec()
+        file_type = data.get('type')
+        if file_type not in ['trj', 'trj_plot']:
+            # Check for known types
+            is_dsd = file_type in ['dsd', 'dsd_plot']
+            is_log = file_type in ['log', 'log_plot']
+            
+            if is_dsd or is_log:
+                target_mode = "DSD Mode" if is_dsd else "Log Plot"
+                target_idx = self.main_window.MODE_DSD if is_dsd else self.main_window.MODE_LOG
+                target_panel = self.main_window.dsd_plot_panel if is_dsd else self.main_window.log_plot_panel
 
-            if msg.clickedButton() == switch_btn:
-                # Save current (Trj) state
-                self.main_window.save_session_for_mode(self.main_window.MODE_TRJ)
-                # Set flag to skip orchestration's autoload
-                self.main_window._skip_next_orchestration = True
-                # Switch to Log Mode
-                self.main_window.switch_to_mode(self.main_window.MODE_LOG)
-                # Force load
-                self.main_window.log_plot_panel.load_session_from_file(path)
-            return
+                msg = QMessageBox(self.main_window)
+                msg.setWindowTitle("Mode Mismatch")
+                msg.setText(f"Mode Mismatch. This is a {target_mode} session.")
+                abort_btn = msg.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
+                switch_btn = msg.addButton(f"Switch to {target_mode}", QMessageBox.ButtonRole.AcceptRole)
+                msg.exec()
+                
+                if msg.clickedButton() == switch_btn:
+                    # Save current (Trj) state
+                    self.main_window.save_session_for_mode(self.main_window.MODE_TRJ)
+                    # Set flag to skip orchestration's autoload
+                    self.main_window._skip_next_orchestration = True
+                    # Switch to Target Mode
+                    self.main_window.switch_to_mode(target_idx)
+                    # Force load
+                    target_panel.load_session_from_file(path)
+                return
+            else:
+                 # Unknown Type -> Error only
+                QMessageBox.warning(self.main_window, "Invalid Session File", 
+                                    f"The file has an unknown or invalid type: '{file_type}'.\n"
+                                    "Cannot load this session.")
+                return
 
         print(f"[System] Loading session: {path} for mode Trajectory Plot")
 
@@ -1252,11 +1307,37 @@ class TrjPlotPanel(QWidget):
 
         try:
             if project_path:
+                # Check for non-existent path
+                relocated = False
+                if not os.path.exists(project_path):
+                    action, new_path = MissingPathResolver.resolve(self, project_path)
+                    if action == 'cancel':
+                        return
+                    elif action == 'reset':
+                        # Clear path and reset panel
+                        self.main_window.path_edit.setText("")
+                        self.main_window.on_path_entered()
+                        return
+                    elif action == 'change':
+                        # Start with a new project path, clearing session rows
+                        self.main_window.path_edit.setText(new_path)
+                        self.main_window.on_path_entered()
+                        return
+                    elif action == 'relocate':
+                        # Use the new path but continue loading session data
+                        project_path = new_path
+                        relocated = True
+
                 self.main_window.path_edit.setText(project_path)
                 self.main_window.chip_input.set_chips(keywords)
                 
                 # Load project data (Force reload to ensure consistency)
                 self.load_project(Path(project_path), keywords, force_reload=True, keep_table=False)
+
+                # If relocated and project was found, auto-update the session file
+                if relocated and self.data_manager.parsers:
+                    if self.save_session_to_file(path):
+                        print(f"[System] Relocation successful. Session file updated: {path}")
             
             self.plot_table.setRowCount(0)
             for entry in data.get('rows', []):
