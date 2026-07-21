@@ -47,6 +47,7 @@ class LogPlotPanel(QWidget):
         self.fit_results = {} # row_id -> result dict (x, y, error, params)
         self.fit_table_visible = False
         self.next_fit_id = 0 # Unique ID for fit rows to track dialogs reliably
+        self.next_plot_id = 0 # Unique ID for plot rows
 
         # Track loaded path to prevent clearing data on mode switch
         self.loaded_path = None 
@@ -322,7 +323,7 @@ class LogPlotPanel(QWidget):
         
         # Plot Combo
         plot_combo = QComboBox()
-        plot_combo.currentIndexChanged.connect(self.update_plots)
+        plot_combo.currentIndexChanged.connect(self._on_fit_type_changed)
         self.fit_table.setCellWidget(row, 1, plot_combo)
         
         # Type Combo
@@ -387,20 +388,8 @@ class LogPlotPanel(QWidget):
         
         fit_id = sender.property("fit_id")
         text = sender.currentText()
+        self.update_plots()
         
-        if text == "Off":
-            # Just update plots to hide it
-            self.update_plots()
-        else:
-            # 1. Update plots to ensure the Dialog receives the correct Data (Mean vs Orig)
-            #    based on the new selection.
-            self.update_plots()
-            
-            # 2. Trigger calculation automatically
-            if fit_id in self.fit_dialogs:
-                # The dialog data was updated by the call to self.update_plots() above
-                self.fit_dialogs[fit_id].calculate_fit()
-
     def delete_fit_row(self):
         btn = self.sender()
         if not btn: return
@@ -529,10 +518,13 @@ class LogPlotPanel(QWidget):
         self.update_plots()
 
     def _update_fit_source_combos(self):
+        # 1. Gather all plot row options (Text + ID)
         options = []
         for r in range(self.plot_table.rowCount()):
             text = self._get_row_display_name(r)
-            options.append(text)
+            item = self.plot_table.item(r, 1)
+            pid = item.data(Qt.ItemDataRole.UserRole + 1) if item else None
+            options.append((text, pid))
             
         for r in range(self.fit_table.rowCount()):
             combo = self.fit_table.cellWidget(r, 1)
@@ -540,14 +532,35 @@ class LogPlotPanel(QWidget):
             if not isinstance(combo.view().itemDelegate(), NoNewLineDelegate):
                 combo.setItemDelegate(NoNewLineDelegate(combo))
             
-            current = combo.currentText()
+            # Save current selection
+            current_id = combo.currentData()
+            current_text = combo.currentText()
+
             combo.blockSignals(True)
             combo.clear()
-            combo.addItems(options)
-            if current in options:
-                combo.setCurrentText(current)
-            elif options:
-                combo.setCurrentIndex(0)
+            
+            # Repopulate
+            target_index = 0
+            found_id = False
+            
+            for i, (text, pid) in enumerate(options):
+                combo.addItem(text, pid) # pid stored in UserRole
+                
+                # Check match
+                # Priority 1: Match by ID (robust to renaming)
+                if current_id is not None and pid == current_id:
+                    target_index = i
+                    found_id = True
+            
+            # Priority 2: Match by Text (fallback for loaded sessions or fresh rows)
+            if not found_id and current_text:
+                index = combo.findText(current_text)
+                if index != -1:
+                    target_index = index
+
+            if combo.count() > 0:
+                combo.setCurrentIndex(target_index)
+                
             combo.blockSignals(False)
 
     def _on_fit_fun_clicked(self):
@@ -588,7 +601,8 @@ class LogPlotPanel(QWidget):
                     btn.setText(display_text)
                 break
         
-        self.update_plots()
+        # Call update_plots with auto_trigger_fits=False to prevent recursive calculations
+        self.update_plots(auto_trigger_fits=False)
 
     # --- Public Interface for MainWindow ---
     
@@ -985,7 +999,10 @@ class LogPlotPanel(QWidget):
         item = self.plot_table.item(row_index, 1)
         # Column 1: Plot name (QTableWidgetItem)
         data['plot_name'] = item.data(Qt.ItemDataRole.UserRole) or item.text() if item else "N/A | N/A | N/A | N/A"
-        
+        # Extract ID (UserRole + 1)
+        if item:
+            data['plot_id'] = item.data(Qt.ItemDataRole.UserRole + 1)
+
         # Column 2: Show (QCheckBox)
         show_widget = self.plot_table.cellWidget(row_index, 2)
         data['show'] = show_widget.findChild(QCheckBox).isChecked() if show_widget else True
@@ -1019,6 +1036,8 @@ class LogPlotPanel(QWidget):
         # Column 1: Plot name
         name_item = QTableWidgetItem(data['plot_name'])
         name_item.setData(Qt.ItemDataRole.UserRole, data['plot_name'])
+        if 'plot_id' in data:
+            name_item.setData(Qt.ItemDataRole.UserRole + 1, data['plot_id'])
         self.plot_table.setItem(row_index, 1, name_item)
 
         # Column 2: Show
@@ -1712,8 +1731,10 @@ class LogPlotPanel(QWidget):
             'std': False,
             'color': new_color.name(),
             'style': "Solid",
-            'thickness': "1"
+            'thickness': "1",
+            'plot_id': self.next_plot_id
         }
+        self.next_plot_id += 1
         
         copied_from_selection = False
         # If a row was selected, copy its Study, System, X-Axis, and Y-Axis
@@ -1753,11 +1774,15 @@ class LogPlotPanel(QWidget):
         self._update_move_buttons_visibility()
         self._update_plot_labels()
 
-    def update_plots(self):
+    def update_plots(self, auto_trigger_fits=True):
         """
         Main function to refresh the plot widget. 
         It handles data fetching, processing (averaging/smoothing), 
         caching for curve fitting, and rendering both original data and fits.
+        
+        Args:
+            auto_trigger_fits: If False, prevents automatic fit calculation triggers.
+                              Used to prevent recursive calculations when called from fit callbacks.
         """
         # 1. Clear existing plots and reset view
         self.plot_controller.clear_all_plots()
@@ -2028,7 +2053,12 @@ class LogPlotPanel(QWidget):
 
                     # Push Data to Dialog
                     if fit_id in self.fit_dialogs:
-                        self.fit_dialogs[fit_id].set_data(x_fit_src, y_fit_src)
+                        dialog = self.fit_dialogs[fit_id]
+                        data_changed = dialog.set_data(x_fit_src, y_fit_src)
+                        
+                        # Auto-calculate if data changed and idle, BUT only if auto_trigger_fits is True
+                        if auto_trigger_fits and data_changed and dialog.current_worker is None:
+                            dialog.calculate_fit()
                     
                     # Plot Result
                     if fit_id in self.fit_results:
@@ -2051,6 +2081,8 @@ class LogPlotPanel(QWidget):
                                 legend, fit_plot_data, fit_color, style, 
                                 layer_priority=200, thickness=thickness
                             )
+                except (ValueError, AttributeError, IndexError):
+                    continue
                 except Exception as e:
                     print(f"Fit Plotting Error row {r}: {e}")
                     continue
@@ -2437,6 +2469,7 @@ class LogPlotPanel(QWidget):
 
                 # Restore Plots
                 self.plot_table.setRowCount(0)
+                self.next_plot_id = 0
                 for plot_info in config.get('plots', []):
                     row = self.plot_table.rowCount()
                     self.plot_table.insertRow(row)
@@ -2448,8 +2481,10 @@ class LogPlotPanel(QWidget):
                         'std': plot_info.get('std', False),
                         'color': plot_info.get('color', QColor("black").name()),
                         'style': plot_info.get('style', "Solid"),
-                        'thickness': plot_info.get('thickness', "1")
+                        'thickness': plot_info.get('thickness', "1"),
+                        'plot_id': self.next_plot_id
                     }
+                    self.next_plot_id += 1
                     self._populate_row_data(row, plot_data)
                 
                 if self.plot_table.rowCount() > 0:
@@ -2508,17 +2543,6 @@ class LogPlotPanel(QWidget):
                 # Explicit update if fit visibility didn't trigger it
                 if not fit_visible:
                     self.update_plots()
-                
-                # CRITICAL: Re-Calculate Active Fits
-                # update_plots() has just run and pushed source data to the dialogs.
-                # Now we must trigger the calculation to generate results and plots.
-                if fit_visible:
-                    for fid, dialog in self.fit_dialogs.items():
-                        # We can check if the row is "active" (not Off), but calculate_fit 
-                        # handles empty data gracefully. It will emit _on_fit_finished
-                        # which will update the UI and call update_plots again to show the line.
-                        if dialog.x_data is not None and len(dialog.x_data) > 0:
-                            dialog.calculate_fit()
 
             except FileNotFoundError as e:
                 QMessageBox.critical(self, "Error", f"Could not find project path from session file:\n{e}")

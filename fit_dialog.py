@@ -366,6 +366,35 @@ class FitFunctionDialog(QWidget):
             self.param_table.setCellWidget(i, 2, container)
 
     def set_data(self, x_data, y_data):
+        # Check for change
+        changed = False
+        
+        # Helper to compare arrays handling None
+        def arrays_different(a, b):
+            if a is None and b is None: return False
+            if a is None or b is None: return True
+            
+            # Convert to numpy for comparison if not already
+            # (Safety for lists vs arrays)
+            try:
+                a_arr = np.asanyarray(a)
+                b_arr = np.asanyarray(b)
+            except Exception:
+                return True # Cannot convert, assume changed
+            
+            if a_arr.shape != b_arr.shape: return True
+            if a_arr.size == 0 and b_arr.size == 0: return False
+            
+            try:
+                # Use array_equal for exact match (fast and robust)
+                # equal_nan=True ensures NaN == NaN
+                return not np.array_equal(a_arr, b_arr, equal_nan=True)
+            except Exception:
+                return True
+
+        if arrays_different(self.x_data, x_data) or arrays_different(self.y_data, y_data):
+            changed = True
+
         self.x_data = x_data
         self.y_data = y_data
         
@@ -378,6 +407,8 @@ class FitFunctionDialog(QWidget):
                 else:
                     self.min_spin.setValue(float(np.min(x_data)))
                     self.max_spin.setValue(float(np.max(x_data)))
+        
+        return changed
 
     def _shuffle_params(self):
         """Randomize all unlocked parameters by a factor of 0.01 to 100."""
