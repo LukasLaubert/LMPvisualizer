@@ -2,9 +2,10 @@
 
 from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget, 
                              QDialogButtonBox, QHeaderView, QTableWidgetItem, 
-                             QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog)
+                             QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog,
+                             QWidget, QHBoxLayout, QLineEdit, QFrame)
 from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, Qt, QEvent
 
 class ColorButton(QPushButton):
     """A button that displays a color and opens a color dialog on click."""
@@ -101,3 +102,104 @@ class InconsistentDataDialog(QDialog):
             'truncate_len': self.truncate_box.value(),
             'exclude': excluded
         }
+
+class Chip(QFrame):
+    """A single chip widget with a label and a delete button."""
+    removed = pyqtSignal(str)
+
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #e1e1e1;
+                border-radius: 8px;
+                padding: 1px 4px;
+                margin: 1px;
+            }
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                font-weight: bold;
+                color: #555;
+            }
+            QPushButton:hover {
+                color: black;
+            }
+        """)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 1, 4, 1)
+        layout.setSpacing(4)
+
+        label = QLabel(text)
+        layout.addWidget(label)
+
+        remove_button = QPushButton("x")
+        remove_button.setFixedSize(14, 14)
+        remove_button.clicked.connect(self.on_remove)
+        layout.addWidget(remove_button)
+
+    def on_remove(self):
+        self.removed.emit(self.text)
+        self.deleteLater()
+
+class ChipInputWidget(QWidget):
+    """A widget for inputting text that becomes 'chips'."""
+    chipsChanged = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._chips = []
+
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+
+        self.input_line = QLineEdit()
+        self.input_line.setPlaceholderText("Add log file keywords...")
+        self.input_line.installEventFilter(self)
+        self.input_line.returnPressed.connect(self.add_chip_from_input)
+
+        self.chip_container = QWidget()
+        self.chip_layout = QHBoxLayout(self.chip_container)
+        self.chip_layout.setContentsMargins(0,0,0,0)
+        self.chip_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.layout.addWidget(self.chip_container)
+        self.layout.addWidget(self.input_line)
+        self.layout.setStretchFactor(self.input_line, 1)
+
+
+    def eventFilter(self, source, event):
+        if source is self.input_line and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Tab):
+                if self.input_line.text().strip():
+                    self.add_chip_from_input()
+                    return True # Event handled
+        return super().eventFilter(source, event)
+
+    def add_chip_from_input(self):
+        text = self.input_line.text().strip()
+        if not text or ' ' in text or text in self._chips:
+            self.input_line.clear()
+            return
+
+        self._chips.append(text)
+        chip_widget = Chip(text)
+        chip_widget.removed.connect(self.remove_chip)
+        self.chip_layout.addWidget(chip_widget)
+        self.chipsChanged.emit(self._chips)
+        self.input_line.clear()
+
+    def remove_chip(self, text):
+        if text in self._chips:
+            self._chips.remove(text)
+            for i in range(self.chip_layout.count()):
+                widget = self.chip_layout.itemAt(i).widget()
+                if isinstance(widget, Chip) and widget.text == text:
+                    widget.deleteLater()
+                    break
+            self.chipsChanged.emit(self._chips)
+
+    def get_chips(self) -> list:
+        return self._chips.copy()

@@ -11,7 +11,7 @@ class DataManager:
         self.warnings = []
         self.available_columns = []
 
-    def load_project_data(self, studies: Dict[str, List[str]], root_path):
+    def load_project_data(self, studies: Dict[str, List[str]], root_path, log_keywords: List[str] = None):
         """Loads all log file data for the discovered studies and systems."""
         from lammps_parser import LammpsParser # Local import
         self.data.clear()
@@ -24,13 +24,20 @@ class DataManager:
             self.data[study_name] = {}
             for system_name in system_list:
                 log_path = root_path / study_name / system_name
-                # Find any log.lammps file in the directory
-                log_files = list(log_path.glob("log.lammps"))
+                
+                log_files = []
+                if not log_keywords:
+                    log_files = list(log_path.glob("log.lammps"))
+                else:
+                    for keyword in log_keywords:
+                        log_files.extend(log_path.glob(f"*{keyword}*"))
+                    log_files = sorted(list(set(log_files))) # sort for consistency
+
                 if not log_files:
-                    self.warnings.append(f"No .log file found for: {study_name}/{system_name}")
+                    self.warnings.append(f"No log files found for: {study_name}/{system_name}")
                     continue
                 
-                df = LammpsParser.extract_thermo_data(log_files[0])
+                df = LammpsParser.parse_multiple_logs(log_files)
                 if df is not None and not df.empty:
                     self.data[study_name][system_name] = df
                     for col in df.columns:

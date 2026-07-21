@@ -134,6 +134,30 @@ class LammpsParser:
             return None
 
     @staticmethod
+    def parse_multiple_logs(log_files: List[Path]) -> Optional[pd.DataFrame]:
+        """
+        Parses multiple LAMMPS log files, concatenates them, and removes duplicates.
+        """
+        all_dfs = []
+        for log_file in log_files:
+            df = LammpsParser.extract_thermo_data(log_file)
+            if df is not None and not df.empty:
+                all_dfs.append(df)
+
+        if not all_dfs:
+            return None
+
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+        
+        # Final deduplication across all concatenated files
+        if 'Step' in combined_df.columns:
+            combined_df.drop_duplicates(subset='Step', keep='last', inplace=True)
+            combined_df.sort_values(by='Step', inplace=True)
+            combined_df.reset_index(drop=True, inplace=True)
+
+        return combined_df
+
+    @staticmethod
     def get_timestep(root_path: Path) -> Optional[float]:
         """Scans for a base_input.in or single .in file to find the timestep."""
         in_files = list(root_path.glob("*.in"))

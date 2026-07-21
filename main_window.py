@@ -17,7 +17,7 @@ from lammps_parser import LammpsParser
 from data_manager import DataManager
 from plotting_controller import PlottingController
 from settings_manager import SettingsManager
-from ui_components import ColorButton, InconsistentDataDialog
+from ui_components import ColorButton, InconsistentDataDialog, ChipInputWidget
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -44,21 +44,25 @@ class MainWindow(QMainWindow):
         self.browse_btn = QPushButton("Browse...")
         top_controls_layout.addWidget(self.browse_btn, 0, 4)
 
-        top_controls_layout.addWidget(QLabel("Study"), 1, 0)
+        top_controls_layout.addWidget(QLabel("Log Keywords:"), 1, 0)
+        self.chip_input = ChipInputWidget()
+        top_controls_layout.addWidget(self.chip_input, 1, 1, 1, 3)
+
+        top_controls_layout.addWidget(QLabel("Study"), 2, 0)
         self.study_combo = self._create_combo("Select Study")
-        top_controls_layout.addWidget(self.study_combo, 1, 1)
+        top_controls_layout.addWidget(self.study_combo, 2, 1)
 
-        top_controls_layout.addWidget(QLabel("System"), 2, 0)
+        top_controls_layout.addWidget(QLabel("System"), 3, 0)
         self.system_combo = self._create_combo("Select System")
-        top_controls_layout.addWidget(self.system_combo, 2, 1)
+        top_controls_layout.addWidget(self.system_combo, 3, 1)
 
-        top_controls_layout.addWidget(QLabel("X-Axis"), 1, 2)
+        top_controls_layout.addWidget(QLabel("X-Axis"), 2, 2)
         self.xaxis_combo = self._create_combo("Select X-Axis")
-        top_controls_layout.addWidget(self.xaxis_combo, 1, 3)
+        top_controls_layout.addWidget(self.xaxis_combo, 2, 3)
 
-        top_controls_layout.addWidget(QLabel("Y-Axis"), 2, 2)
+        top_controls_layout.addWidget(QLabel("Y-Axis"), 3, 2)
         self.yaxis_combo = self._create_combo("Select Y-Axis")
-        top_controls_layout.addWidget(self.yaxis_combo, 2, 3)
+        top_controls_layout.addWidget(self.yaxis_combo, 3, 3)
 
         info_widget = QWidget()
         info_layout = QVBoxLayout(info_widget)
@@ -72,7 +76,7 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(self.units_label)
         info_layout.addWidget(self.timestep_label)
         info_layout.addStretch()
-        top_controls_layout.addWidget(info_widget, 1, 4, 2, 1)
+        top_controls_layout.addWidget(info_widget, 2, 4, 2, 1)
 
         top_controls_layout.setColumnStretch(1, 1)
         top_controls_layout.setColumnStretch(3, 1)
@@ -161,6 +165,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.browse_btn.clicked.connect(self.browse_for_directory)
         self.path_edit.editingFinished.connect(self.on_path_entered)
+        self.chip_input.chipsChanged.connect(self.on_log_keywords_changed)
         
         self.plot_table.itemSelectionChanged.connect(self.on_table_selection_changed)
         
@@ -178,8 +183,10 @@ class MainWindow(QMainWindow):
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
         self.export_btn.clicked.connect(self.export_plot)
+
     
     def browse_for_directory(self):
+        self.chip_input.add_chip_from_input()
         start_path = self.path_edit.text()
         start_path = os.path.expanduser(start_path)
         if not os.path.isdir(start_path):
@@ -191,6 +198,7 @@ class MainWindow(QMainWindow):
             self.on_path_entered()
     
     def on_path_entered(self):
+        self.chip_input.add_chip_from_input()
         path = self.path_edit.text()
         if not path:
             return
@@ -201,12 +209,17 @@ class MainWindow(QMainWindow):
         except FileNotFoundError as e:
             QMessageBox.critical(self, "Error", str(e))
 
+    def on_log_keywords_changed(self, keywords):
+        if self.path_edit.text():
+            self.on_path_entered()
+
     def load_project(self, root_path):
         studies, warnings = LammpsParser.discover_studies_systems(root_path)
         if warnings:
             QMessageBox.warning(self, "Project Discovery Warning", "\n".join(warnings))
         
-        self.data_manager.load_project_data(studies, root_path)
+        keywords = self.chip_input.get_chips()
+        self.data_manager.load_project_data(studies, root_path, keywords)
         if self.data_manager.warnings:
             QMessageBox.warning(self, "Data Loading Warning", "\n".join(self.data_manager.warnings))
             
