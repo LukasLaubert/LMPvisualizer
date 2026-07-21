@@ -315,20 +315,10 @@ class MainWindow(QMainWindow):
         item.setData(Qt.ItemDataRole.UserRole, 'permanent')
         item.setForeground(Qt.GlobalColor.black)
 
-        # Get the widgets that were disabled
-        color_btn = self.plot_table.cellWidget(temp_row, 1)
-        style_combo = self.plot_table.cellWidget(temp_row, 2)
+        # The widgets for color and style are already connected and enabled.
+        # We just need to enable the 'Show' checkbox container.
         show_check_widget = self.plot_table.cellWidget(temp_row, 3)
-        show_check = show_check_widget.findChild(QCheckBox)
-
-        # Enable and connect them
-        color_btn.setEnabled(True)
-        color_btn.colorChanged.connect(self.update_plots)
-        style_combo.setEnabled(True)
-        style_combo.currentTextChanged.connect(self.update_plots)
         show_check_widget.setEnabled(True)
-        show_check.setChecked(True)
-        show_check.stateChanged.connect(self.update_plots)
 
         # Replace placeholder with a real delete button
         del_btn = QPushButton("X")
@@ -336,27 +326,32 @@ class MainWindow(QMainWindow):
         del_btn.clicked.connect(lambda checked, name=plot_name: self.delete_plot_row(name))
         self.plot_table.setCellWidget(temp_row, 4, self._create_centered_widget(del_btn))
 
+        # Reset dropdowns to consume the selection
+        self.system_combo.setCurrentIndex(0)
+        self.xaxis_combo.setCurrentIndex(0)
+        self.yaxis_combo.setCurrentIndex(0)
+
         self.update_plots()
 
     def update_plots(self):
-        # Clear all plots from the controller
-        self.plot_controller.remove_plot("_temp_")
-        for name in list(self.plot_controller.plots.keys()):
-            self.plot_controller.remove_plot(name)
-
-        # Remove any existing temporary row from the table
+        # --- Preserve state of the temporary row before deleting it ---
+        temp_state = {'color': QColor('gray'), 'style': 'Dash'}
         for row in reversed(range(self.plot_table.rowCount())):
             item = self.plot_table.item(row, 0)
             if item and item.data(Qt.ItemDataRole.UserRole) == 'temp':
+                temp_state['color'] = self.plot_table.cellWidget(row, 1).color()
+                temp_state['style'] = self.plot_table.cellWidget(row, 2).currentText()
                 self.plot_table.removeRow(row)
                 break
+
+        # --- Rebuild the entire plot from the table state ---
+        self.plot_controller.clear_all_plots()
 
         # --- Draw permanent plots ---
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 0)
             show_widget = self.plot_table.cellWidget(row, 3)
-            if not (item and show_widget):
-                continue
+            if not (item and show_widget): continue
             
             show_checkbox = show_widget.findChild(QCheckBox)
             if item.data(Qt.ItemDataRole.UserRole) == 'permanent' and show_checkbox and show_checkbox.isChecked():
@@ -371,7 +366,7 @@ class MainWindow(QMainWindow):
                         if dialog.exec():
                             user_choices = dialog.get_choices()
                         else:
-                            continue # User cancelled
+                            continue
                 
                 data = self.data_manager.get_plot_data(study, system, x_ax, y_ax, self.std_checkbox.isChecked(), user_choices)
                 
@@ -379,6 +374,8 @@ class MainWindow(QMainWindow):
                     color = self.plot_table.cellWidget(row, 1).color()
                     style_text = self.plot_table.cellWidget(row, 2).currentText()
                     style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
+                    # Pass y_ax name for multi-axis handling
+                    data['y_col'] = y_ax
                     self.plot_controller.add_or_update_plot(plot_name, data, color, style)
 
         # --- Draw temporary plot and add temporary table row ---
@@ -399,19 +396,31 @@ class MainWindow(QMainWindow):
             name_item.setForeground(Qt.GlobalColor.gray)
             self.plot_table.setItem(row, 0, name_item)
 
-            # Add disabled widgets for the temp row
-            self.plot_table.setCellWidget(row, 1, ColorButton(QColor('gray')))
-            self.plot_table.cellWidget(row, 1).setEnabled(False)
-            self.plot_table.setCellWidget(row, 2, self._create_style_combo())
-            self.plot_table.cellWidget(row, 2).setEnabled(False)
-            self.plot_table.setCellWidget(row, 3, self._create_centered_widget(QCheckBox()))
+            # Add enabled widgets for the temp row and connect them
+            color_btn = ColorButton(temp_state['color'])
+            color_btn.colorChanged.connect(self.update_plots)
+            self.plot_table.setCellWidget(row, 1, color_btn)
+            
+            style_combo = self._create_style_combo()
+            style_combo.setCurrentText(temp_state['style'])
+            style_combo.currentTextChanged.connect(self.update_plots)
+            self.plot_table.setCellWidget(row, 2, style_combo)
+
+            show_check = QCheckBox()
+            show_check.setChecked(True)
+            self.plot_table.setCellWidget(row, 3, self._create_centered_widget(show_check))
             self.plot_table.cellWidget(row, 3).setEnabled(False)
+
             self.plot_table.setCellWidget(row, 4, self._create_centered_widget(QLabel("-")))
 
             # Draw temporary plot line
             data = self.data_manager.get_plot_data(study, system, x_ax, y_ax, self.std_checkbox.isChecked())
             if data:
-                self.plot_controller.add_or_update_plot("_temp_", data, QColor('gray'), Qt.PenStyle.DashLine, is_temp=True)
+                temp_color = color_btn.color()
+                temp_style_text = style_combo.currentText()
+                temp_style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(temp_style_text)
+                data['y_col'] = y_ax # Pass y_ax name for multi-axis handling
+                self.plot_controller.add_or_update_plot("_temp_", data, temp_color, temp_style)
 
         self._update_axis_labels()
 

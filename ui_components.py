@@ -25,9 +25,13 @@ class ColorButton(QPushButton):
         return self._color
 
     def on_click(self):
-        new_color = QColorDialog.getColor(self._color, self, "Select Plot Color")
-        if new_color.isValid():
-            self.set_color(new_color)
+        dialog = QColorDialog(self)
+        dialog.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+        dialog.setCurrentColor(self._color)
+        if dialog.exec():
+            new_color = dialog.selectedColor()
+            if new_color.isValid():
+                self.set_color(new_color)
 
 class InconsistentDataDialog(QDialog):
     """Dialog to resolve averaging of data with different lengths."""
