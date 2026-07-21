@@ -252,7 +252,7 @@ class TrjController(QObject):
                 ref_df = self._ref_cache.get(target_key)
                 if ref_df is not None and 'id' in ref_df.columns and 'id' in df_filtered.columns:
                     if heatmap_col in ref_df.columns:
-                        ref_map = ref_df.set_index('id')[heatmap_col]
+                        ref_map = ref_df.set_index('id', drop=False)[heatmap_col]
                         vals = df_filtered['id'].map(ref_map).values
                         vals = np.nan_to_num(vals, nan=h_min)
                     else:

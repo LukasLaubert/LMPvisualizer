@@ -490,6 +490,17 @@ class PopOutWindow(QMainWindow):
         if not y_cols:
             self.canvas.draw()
             return
+            
+        # Calculate max priority for each axis to determine draw order (z-order)
+        axis_priorities = {}
+        for y_col in y_cols:
+            max_prio = 0
+            for series in self.plot_data['y_axes'][y_col]['series']:
+                max_prio = max(max_prio, series.get('layer_priority', 0))
+            axis_priorities[y_col] = max_prio
+            
+        # Sort y_cols so axes with higher priority plots are drawn later (on top)
+        y_cols.sort(key=lambda y: axis_priorities[y], reverse=False)
 
         axes_map = {y_cols[0]: ax_primary}
         

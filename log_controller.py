@@ -207,6 +207,11 @@ class LogController:
             error_item.setZValue(z_value)
         plot_data_item.setZValue(z_value + 1)
         
+        # If this plot has high priority (e.g. selected), ensure its ViewBox is also on top
+        # to prevent it from being obscured by other ViewBoxes (axes).
+        if layer_priority > 0:
+            view_box.setZValue(100)
+        
         self.plots[name] = {
             'item': plot_data_item, 
             'error_item': error_item, 
@@ -251,6 +256,10 @@ class LogController:
         self.y_axis_colors.clear()  # Clear stored colors
         self.y_axis_labels.clear()  # Clear stored labels
         self.x_axis_label = ""       # Clear x-axis label
+        
+        # Reset main ViewBox Z-value to default
+        self.plot_item.getViewBox().setZValue(0)
+        
         # Note: axes_locked and scale_locked flags are preserved
 
     def update_views(self):
@@ -300,6 +309,9 @@ class LogController:
             return
 
         plots_by_yaxis = {}
+        # Track max priority per axis to sort axes later
+        axis_max_priority = {}
+        
         for name, plot_info in self.plots.items():
             item = plot_info.get('item')
             if not item or not item.isVisible(): continue
@@ -307,6 +319,12 @@ class LogController:
             if not y_col: continue
             if y_col not in plots_by_yaxis: plots_by_yaxis[y_col] = []
             plots_by_yaxis[y_col].append((name, plot_info))
+            
+            prio = plot_info.get('layer_priority', 0)
+            if y_col not in axis_max_priority:
+                axis_max_priority[y_col] = prio
+            else:
+                axis_max_priority[y_col] = max(axis_max_priority[y_col], prio)
         
         for y_col in plots_by_yaxis:
             plots_by_yaxis[y_col].sort(key=lambda x: x[1].get('layer_priority', 0))
@@ -314,6 +332,9 @@ class LogController:
         if not plots_by_yaxis: return
         
         y_axis_order = [y_col for y_col in self.y_axes.keys() if y_col in plots_by_yaxis]
+        # Sort axes so that higher priority ones are drawn later (on top)
+        y_axis_order.sort(key=lambda y: axis_max_priority.get(y, 0))
+        
         if not y_axis_order: return
         
         fig, ax_primary = plt.subplots(figsize=figsize if figsize else (10, 6))

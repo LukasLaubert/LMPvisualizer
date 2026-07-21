@@ -1209,10 +1209,13 @@ class LogPlotPanel(QWidget):
         
         # Determine the primary X-axis from the selected row
         preferred_x_ax = None
+        selected_y_ax = None # To track the selected Y-axis for sorting
+
         if selected_row_idx != -1 and selected_row_idx < len(all_plot_info):
             selected_plot_info = all_plot_info[selected_row_idx]
             if selected_plot_info['is_active'] and selected_plot_info['is_valid']:
                 preferred_x_ax = selected_plot_info['x_ax']
+                selected_y_ax = selected_plot_info['y_ax']
 
         # Fallback to the first active and valid plot if none is selected
         if not preferred_x_ax:
@@ -1221,6 +1224,12 @@ class LogPlotPanel(QWidget):
                     preferred_x_ax = info['x_ax']
                     break
         
+        # Sort plots to control Axis creation order in LogController.
+        # Logic: Process plots with the selected Y-axis LAST.
+        # This ensures the selected Y-axis becomes the "Right-most" (top-most) axis in the layout.
+        # Secondary sort by row index preserves table order within the same axis group.
+        all_plot_info.sort(key=lambda x: (x['y_ax'] == selected_y_ax if selected_y_ax else False, x['row']))
+
         for plot_info in all_plot_info:
             if not (plot_info['is_valid'] and plot_info['is_active']):
                 continue
