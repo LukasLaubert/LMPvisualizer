@@ -1274,6 +1274,11 @@ class MainWindow(QMainWindow):
                         else:
                             continue # Skip this plot if user cancels dialog
             
+            # Determine if we need to compute/fetch the raw inter-system standard deviation.
+            # This is True ONLY if:
+            # 1. System is 'average'
+            # 2. 'Std' checkbox is checked
+            # 3. Running mean window is 0 (or empty)
             compute_raw_std = (
                 plot_info['system'] == 'average' and 
                 plot_info['show_std'] and 
@@ -1303,6 +1308,9 @@ class MainWindow(QMainWindow):
 
             if plot_info['show_original']:
                 plot_data = data.copy()
+                # If compute_raw_std is False (e.g., mean_window > 0), explicitly remove any std data
+                # so we don't plot the raw inter-system variation.
+                # If it is True, the 'std' key in data will be used to plot the band.
                 if not compute_raw_std:
                     plot_data['std'] = None
                 
@@ -1324,6 +1332,7 @@ class MainWindow(QMainWindow):
                 else:
                     running_mean_x = original_x_np
 
+                # For running mean (mean > 0), Std checkbox controls the running window std deviation
                 if plot_info['show_std']:
                     running_std = self._calculate_running_average(original_y_np, plot_info['mean_window'], 'std')
                     if running_std is not None and len(running_std) == len(running_mean_y):
