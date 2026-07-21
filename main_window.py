@@ -21,6 +21,7 @@ from data_manager import DataManager
 from plotting_controller import PlottingController
 from settings_manager import SettingsManager
 from ui_components import ColorButton, InconsistentDataDialog, ChipInputWidget
+from global_label_editor_dialog import GlobalLabelEditorDialog
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -36,12 +37,13 @@ class MainWindow(QMainWindow):
         self.synchronized_columns = set()
         self.average_user_choices = {}
         self.current_x_axis = None
+        self.global_label_map = {}
 
         self.add_btn = QPushButton("Add")
         self.load_btn = QPushButton("Load")
         self.popout_btn = QPushButton("Pop Out")
         self.save_btn = QPushButton("Save")
-        self.export_btn = QPushButton("Export")
+        self.export_btn = QPushButton("Quick Export")
         self.exit_btn = QPushButton("Exit")
 
         central_widget = QWidget()
@@ -378,8 +380,7 @@ class MainWindow(QMainWindow):
         data['mean'] = mean_edit.findChild(QLineEdit).text() if mean_edit else "0"
 
         # Column 4: Std (QCheckBox)
-        std_widget = self.plot_table.cellWidget(row_index, 4)
-        data['std'] = std_widget.findChild(QCheckBox).isChecked() if std_widget else False
+        data['std'] = self.plot_table.cellWidget(row_index, 4).findChild(QCheckBox).isChecked()
 
         # Column 5: Color (ColorButton)
         color_btn = self.plot_table.cellWidget(row_index, 5)
@@ -445,6 +446,7 @@ class MainWindow(QMainWindow):
         del_btn.clicked.connect(self.delete_plot_row)
         self.plot_table.setCellWidget(row_index, 8, self._create_centered_widget(del_btn))
         
+        self._update_row_display(row_index)
         self._update_row_visual_state(row_index) # Set initial color
 
     def swap_rows(self, r1, r2):
@@ -467,6 +469,119 @@ class MainWindow(QMainWindow):
         combo.setCurrentIndex(0)
         return combo
 
+    def _parse_plot_name(self, plot_name: str) -> tuple:
+        """Safely parse plot name into 4 components: study, system, x_axis, y_axis."""
+        parts = plot_name.split(' | ')
+        if len(parts) >= 4:
+            return parts[0], parts[1], parts[2], parts[3]
+        # Fallback for malformed names
+        return (parts + ['N/A', 'N/A', 'N/A', 'N/A'])[:4]
+
+    def _get_row_display_name(self, row: int) -> str:
+        """Get the display name for a row, using global custom labels if set."""
+        item = self.plot_table.item(row, 1)
+        if not item:
+            return "N/A | N/A | N/A | N/A"
+        
+        full_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+        study, system, x_prop, y_prop = self._parse_plot_name(full_name)
+        
+        # Use global labels if set, otherwise use properties
+        x_display = self.global_label_map.get(x_prop, x_prop)
+        y_display = self.global_label_map.get(y_prop, y_prop)
+        
+        return f"{study} | {system} | {x_display} | {y_display}"
+
+    def _update_row_display(self, row: int):
+        """Update the displayed text in the table for a row."""
+        item = self.plot_table.item(row, 1)
+        if not item:
+            return
+        
+        display_name = self._get_row_display_name(row)
+        item.setText(display_name)
+        item.setToolTip("") # Clear old tooltips
+
+    def _update_all_row_displays(self):
+        """Update the display text for all rows in the table."""
+        for row in range(self.plot_table.rowCount()):
+            self._update_row_display(row)
+
+    def _get_all_unique_properties(self) -> list[str]:
+        """Scans the table and returns a list of unique property names used in axes."""
+        properties = set()
+        for row in range(self.plot_table.rowCount()):
+            item = self.plot_table.item(row, 1)
+            if not item:
+                continue
+            
+            full_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+            _, _, x_prop, y_prop = self._parse_plot_name(full_name)
+            
+            if x_prop and x_prop != "N/A":
+                properties.add(x_prop)
+            if y_prop and y_prop != "N/A":
+                properties.add(y_prop)
+        return list(properties)
+
+    def _edit_global_labels(self):
+        """Open a dialog to edit global property labels."""
+        unique_properties = self._get_all_unique_properties()
+        if not unique_properties:
+            QMessageBox.information(self, "No Properties", 
+                                  "No plot properties found to label. Add plots first.")
+            return
+
+        dialog = GlobalLabelEditorDialog(unique_properties, self.global_label_map, self)
+        if dialog.exec():
+            self.global_label_map = dialog.get_updated_map()
+            self._update_all_row_displays()
+            self.update_plots()
+            self._update_plot_labels()
+
+    def _build_plot_name(self, study: str, system: str, x_axis: str, y_axis: str) -> str:
+        """Build plot name from components."""
+        return f"{study} | {system} | {x_axis} | {y_axis}"
+
+    def _update_selected_row_name_component(self, component: str, value: str):
+        """Update only a specific component of the selected row's plot name.
+        
+        Args:
+            component: One of 'study', 'system', 'x_axis', 'y_axis'
+            value: New value for that component
+        """
+        if self.plot_table.currentRow() == -1:
+            return
+        
+        selected_row = self.plot_table.currentRow()
+        plot_name_item = self.plot_table.item(selected_row, 1)
+        if not plot_name_item:
+            return
+        
+        # Get current name and parse it
+        current_name = plot_name_item.data(Qt.ItemDataRole.UserRole) or plot_name_item.text()
+        study, system, x_axis, y_axis = self._parse_plot_name(current_name)
+        
+        # Update only the specified component
+        if component == 'study':
+            study = value if value and value != "Select Study" else "N/A"
+        elif component == 'system':
+            system = value if value and value != "Select System" else "N/A"
+        elif component == 'x_axis':
+            x_axis = value if value and value != "Select X-Axis" else "N/A"
+        elif component == 'y_axis':
+            y_axis = value if value and value != "Select Y-Axis" else "N/A"
+        
+        # Rebuild name
+        new_name = self._build_plot_name(study, system, x_axis, y_axis)
+        plot_name_item.setData(Qt.ItemDataRole.UserRole, new_name)
+        
+        self._update_row_display(selected_row)
+        
+        self._update_row_visual_state(selected_row)
+        self.update_plots()
+        self._update_plot_labels()
+
     def _connect_signals(self):
         self.browse_btn.clicked.connect(self.browse_for_path)
         self.path_edit.editingFinished.connect(self.on_path_entered)
@@ -477,14 +592,23 @@ class MainWindow(QMainWindow):
         self.exit_btn.clicked.connect(self.close)
         self.lock_axes_btn.toggled.connect(self._on_lock_axes_toggled)
 
-        # Connect study and system selection to update available systems and selected row
+        # Connect study selection to update available systems
         self.study_combo.currentTextChanged.connect(self.on_study_selected)
-        self.system_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
-        self.xaxis_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
-        self.yaxis_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
+        
+        # Connect each dropdown to update only its component
+        self.system_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('system', text))
+        self.xaxis_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('x_axis', text))
+        self.yaxis_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('y_axis', text))
 
         # Connect table selection changes to update dropdowns and potentially the plot
         self.plot_table.itemSelectionChanged.connect(self.on_table_selection_changed)
+
+        # Connect double-click to edit labels
+        self.plot_table.cellDoubleClicked.connect(self._on_table_double_click)
+
+    def _on_table_double_click(self, row: int, column: int):
+        """Handle double-click on table row to edit labels."""
+        self._edit_global_labels()
 
     def _on_lock_axes_toggled(self, checked):
         if checked:
@@ -753,7 +877,7 @@ class MainWindow(QMainWindow):
                 other_files = [f for f in p.parent.glob(f"*{p.suffix}") if f.is_file()]
                 if len(other_files) > 1:
                     reply = QMessageBox.question(self, "Multiple Files Found",
-                                                 f"Found {len(other_files)} files with '{p.suffix}' extension in this directory.\n\n"
+                                                 f"Found {len(other_files)} files with '{p.suffix}' extension in this directory.\n\n" 
                                                  "Do you want to load all of them as separate plots?",
                                                  QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                                  QMessageBox.StandardButton.No)
@@ -919,7 +1043,8 @@ class MainWindow(QMainWindow):
         systems = self.data_manager.get_system_names(study) if self.study_combo.currentIndex() > 0 else self.data_manager.get_all_system_names()
         reset_combo_with_systems(self.system_combo, "Select System", systems)
 
-        self.update_selected_row_from_dropdowns()
+        # Update only the study component of the selected row
+        self._update_selected_row_name_component('study', text)
 
     def on_table_selection_changed(self):
         # Update dropdowns to match selected row
@@ -967,28 +1092,6 @@ class MainWindow(QMainWindow):
         
         # Trigger plot update because x-axis might need to change
         self.update_plots()
-
-    def update_selected_row_from_dropdowns(self, text=""):
-        if not self.plot_table.selectedItems() or self.plot_table.currentRow() == -1:
-            return
-
-        selected_row = self.plot_table.currentRow()
-        plot_name_item = self.plot_table.item(selected_row, 1)
-        if not plot_name_item:
-            return
-
-        study = self.study_combo.currentText() if self.study_combo.currentIndex() > 0 else "N/A"
-        system = self.system_combo.currentText() if self.system_combo.currentIndex() > 0 else "N/A"
-        x_ax = self.xaxis_combo.currentText() if self.xaxis_combo.currentIndex() > 0 else "N/A"
-        y_ax = self.yaxis_combo.currentText() if self.yaxis_combo.currentIndex() > 0 else "N/A"
-        
-        plot_name = f"{study} | {system} | {x_ax} | {y_ax}"
-        plot_name_item.setText(plot_name)
-        plot_name_item.setData(Qt.ItemDataRole.UserRole, plot_name)
-
-        self._update_row_visual_state(selected_row)
-        self.update_plots()
-        self._update_plot_labels()
 
     def add_new_plot_row(self):
         source_row_index = self.plot_table.currentRow()
@@ -1081,11 +1184,15 @@ class MainWindow(QMainWindow):
 
                 is_active = show_original or (mean_window > 0) or show_std
 
+                x_label = self.global_label_map.get(x_ax, x_ax)
+                y_label = self.global_label_map.get(y_ax, y_ax)
+
                 plot_info = {
                     'row': row, 'plot_name': plot_name, 'study': study, 'system': system,
                     'x_ax': x_ax, 'y_ax': y_ax, 'color': color, 'style': style, 'thickness': thickness,
                     'show_original': show_original, 'mean_window': mean_window, 'show_std': show_std,
-                    'is_valid': is_valid, 'is_active': is_active
+                    'is_valid': is_valid, 'is_active': is_active,
+                    'x_label': x_label, 'y_label': y_label
                 }
                 all_plot_info.append(plot_info)
             except (ValueError, AttributeError, IndexError):
@@ -1109,6 +1216,10 @@ class MainWindow(QMainWindow):
             if not (plot_info['is_valid'] and plot_info['is_active']):
                 continue
 
+            # Get custom labels for this row
+            x_label = self.global_label_map.get(plot_info['x_ax'], plot_info['x_ax'])
+            y_label = self.global_label_map.get(plot_info['y_ax'], plot_info['y_ax'])
+            
             z_offset = 100 if plot_info['row'] == selected_row_idx else 0
             user_choices = None
             if plot_info['system'] == 'average':
@@ -1150,6 +1261,13 @@ class MainWindow(QMainWindow):
             if not data: continue
 
             data['y_col'] = plot_info['y_ax']
+            data['y_label'] = y_label if y_label else plot_info['y_ax']
+            
+            # Build legend name with custom labels
+            display_x = x_label if x_label else plot_info['x_ax']
+            display_y = y_label if y_label else plot_info['y_ax']
+            legend_name = f"{plot_info['study']} | {plot_info['system']} | {display_x} | {display_y}"
+
             original_x_np = data['x'].to_numpy() if hasattr(data['x'], 'to_numpy') else np.array(data['x'])
             original_y_np = data['y'].to_numpy() if hasattr(data['y'], 'to_numpy') else np.array(data['y'])
 
@@ -1159,7 +1277,7 @@ class MainWindow(QMainWindow):
                     plot_data['std'] = None
                 
                 self.plot_controller.add_or_update_plot(
-                    plot_info['plot_name'], plot_data, plot_info['color'], 
+                    legend_name, plot_data, plot_info['color'], 
                     plot_info['style'], thickness=plot_info['thickness'],
                     layer_priority=z_offset
                 )
@@ -1181,12 +1299,12 @@ class MainWindow(QMainWindow):
                     if running_std is not None and len(running_std) == len(running_mean_y):
                         std_data = {
                             'x': running_mean_x, 'y': running_mean_y, 'std': running_std,
-                            'y_col': plot_info['y_ax']
+                            'y_col': plot_info['y_ax'], 'y_label': data['y_label']
                         }
                         std_color = QColor(plot_info['color'])
                         std_color.setHsv(std_color.hue(), int(std_color.saturation() * 0.66), int(std_color.value() * 0.5), int(std_color.alpha() * 0.5))
                         self.plot_controller.add_or_update_plot_with_custom_colors(
-                            plot_info['plot_name'] + "_running_mean_std", std_data, std_color, 
+                            legend_name + "_running_mean_std", std_data, std_color, 
                             plot_info['style'], layer_priority=1 + z_offset
                         )
                 
@@ -1201,9 +1319,10 @@ class MainWindow(QMainWindow):
                     else:
                         # New behavior: only 20% darker
                         mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.8, mean_color.alphaF())
-                    mean_data = {'x': running_mean_x, 'y': running_mean_y, 'std': None, 'y_col': plot_info['y_ax']}
+                    mean_data = {'x': running_mean_x, 'y': running_mean_y, 'std': None, 
+                                'y_col': plot_info['y_ax'], 'y_label': data['y_label']}
                     self.plot_controller.add_or_update_plot_with_custom_colors(
-                        plot_info['plot_name'] + "_running_mean", mean_data, mean_color,
+                        legend_name + "_running_mean", mean_data, mean_color,
                         plot_info['style'], layer_priority=2 + z_offset, thickness=plot_info['thickness']
                     )
 
@@ -1285,11 +1404,13 @@ class MainWindow(QMainWindow):
             return result
 
     def _update_axis_properties(self, visible_plots_info, x_label_override: str = None):
-        x_label = x_label_override or ""
+        # x_label_override is the x-property from the selected row.
+        x_label = self.global_label_map.get(x_label_override, x_label_override) if x_label_override else ""
+
         y_labels = {}
         for info in visible_plots_info:
-            if not x_label: x_label = info['x_ax']
-            if info['y_ax'] not in y_labels: y_labels[info['y_ax']] = info['y_ax']
+            if info['y_ax'] not in y_labels:
+                y_labels[info['y_ax']] = self.global_label_map.get(info['y_ax'], info['y_ax'])
 
         self.plot_controller.set_axis_labels(x_label, y_labels)
 
@@ -1424,7 +1545,8 @@ class MainWindow(QMainWindow):
             'path': self.path_edit.text(),
             'plots': [],
             'average_choices': self.average_user_choices,
-            'running_mean_setting': self.running_mean_setting
+            'running_mean_setting': self.running_mean_setting,
+            'global_label_map': self.global_label_map
         }
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
@@ -1456,7 +1578,8 @@ class MainWindow(QMainWindow):
             'path': self.path_edit.text(),
             'plots': [],
             'average_choices': self.average_user_choices,
-            'running_mean_setting': self.running_mean_setting
+            'running_mean_setting': self.running_mean_setting,
+            'global_label_map': self.global_label_map
         }
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
@@ -1480,6 +1603,7 @@ class MainWindow(QMainWindow):
             
     def load_state_on_startup(self):
         config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
+        os.makedirs(config_dir, exist_ok=True)
         path = os.path.join(config_dir, 'autosave.json')
         if os.path.exists(path):
             self.load_session_from_file(path)
@@ -1499,6 +1623,7 @@ class MainWindow(QMainWindow):
             return
 
         self.average_user_choices = config.get('average_choices', {})
+        self.global_label_map = config.get('global_label_map', {})
 
         project_path = config.get('path')
         if project_path:
@@ -1531,6 +1656,8 @@ class MainWindow(QMainWindow):
                 
                 if self.plot_table.rowCount() > 0:
                     self.plot_table.selectRow(0)
+
+                self._update_all_row_displays()
                 self._update_move_buttons_visibility()
                 self.update_plots()
                 self._update_plot_labels()

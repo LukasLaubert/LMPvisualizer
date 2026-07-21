@@ -20,6 +20,11 @@ class PlottingController:
         self.plots: Dict[str, Dict[str, Any]] = {}
         # Dictionary to manage y-axes and their associated viewboxes
         self.y_axes: Dict[str, Dict[str, Any]] = {}
+        # Store axis colors and labels for export
+        self.y_axis_colors: Dict[str, QColor] = {}
+        self.y_axis_labels: Dict[str, str] = {}
+        self.x_axis_label: str = ""
+        
         self.axes_locked = False
         self._is_syncing_axes = False # Flag to prevent recursive signal handling
 
@@ -160,7 +165,9 @@ class PlottingController:
             'item': plot_data_item, 
             'error_item': error_item, 
             'view_box': view_box,
-            'layer_priority': layer_priority
+            'layer_priority': layer_priority,
+            'y_col': y_col_name,  # Store y_col for export
+            'y_label': data.get('y_label', y_col_name)
         }
         self.update_views()
 
@@ -190,6 +197,9 @@ class PlottingController:
 
         self.plots.clear()
         self.y_axes.clear()
+        self.y_axis_colors.clear()  # Clear stored colors
+        self.y_axis_labels.clear()  # Clear stored labels
+        self.x_axis_label = ""       # Clear x-axis label
 
     def update_views(self):
         """Updates the geometry of all viewboxes to match the main one."""
@@ -210,6 +220,7 @@ class PlottingController:
 
     def set_axis_labels(self, x_label: str, y_labels: Dict[str, str]):
         self.plot_item.setLabel('bottom', text=x_label)
+        self.x_axis_label = x_label  # Store for export
         
         # Reset labels for all managed axes
         for axis_info in self.y_axes.values():
@@ -219,6 +230,7 @@ class PlottingController:
         for y_col, label in y_labels.items():
             if y_col in self.y_axes:
                 self.y_axes[y_col]['axis'].setLabel(text=label)
+                self.y_axis_labels[y_col] = label  # Store for export
 
     def set_axis_color(self, y_col: str, color: QColor):
         """Sets the color of a specific y-axis, including its label and pen."""
@@ -226,51 +238,138 @@ class PlottingController:
             axis = self.y_axes[y_col]['axis']
             axis.setPen(color)
             axis.setTextPen(color)
+            self.y_axis_colors[y_col] = color  # Store for export
 
     def export_plot(self, filename: str):
-        """Exports the current plot view using Matplotlib for high quality output."""
+        """Exports the current plot view using Matplotlib with multiple y-axes support."""
         try:
             import matplotlib.pyplot as plt
+            from matplotlib import rcParams
         except ImportError:
             print("Matplotlib is required for exporting.")
             return
 
-        fig, ax = plt.subplots()
+        # Group plots by their y-axis column
+        plots_by_yaxis = {}
+        for name, plot_info in self.plots.items():
+            item = plot_info.get('item')
+            if not item or not item.isVisible():
+                continue
+            
+            y_col = plot_info.get('y_col')
+            if not y_col:
+                continue
+            
+            if y_col not in plots_by_yaxis:
+                plots_by_yaxis[y_col] = []
+            plots_by_yaxis[y_col].append((name, plot_info))
         
-        # This export logic might need adjustment for multiple y-axes,
-        # for now, it plots everything on a single matplotlib axis.
-        for name, p in self.plots.items():
-            item = p.get('item')
-            if item and item.isVisible():
+        if not plots_by_yaxis:
+            print("No visible plots to export.")
+            return
+        
+        # Determine the order of y-axes (use the order from self.y_axes which matches visual order)
+        y_axis_order = [y_col for y_col in self.y_axes.keys() if y_col in plots_by_yaxis]
+        
+        if not y_axis_order:
+            print("No valid y-axes to export.")
+            return
+        
+        # Create figure and primary axis
+        fig, ax_primary = plt.subplots(figsize=(10, 6))
+        
+        # Create additional axes for each y-axis beyond the first
+        matplotlib_axes = {y_axis_order[0]: ax_primary}
+        ax_primary.spines['top'].set_visible(False)
+        ax_primary.spines['right'].set_visible(False)
+        
+        for i, y_col in enumerate(y_axis_order[1:], start=1):
+            ax_new = ax_primary.twinx()
+            ax_new.spines['top'].set_visible(False)
+            ax_new.spines['left'].set_visible(False) # Fix: Hide the left spine so it doesn't cover the primary axis
+            
+            # Position right-side axes with offset if there are multiple
+            if i > 1:
+                # Offset additional right axes
+                ax_new.spines['right'].set_position(('outward', 60 * (i - 1)))
+            
+            matplotlib_axes[y_col] = ax_new
+        
+        # Plot each curve on its corresponding axis
+        all_handles = []
+        all_labels = []
+        
+        for y_col in y_axis_order:
+            ax = matplotlib_axes[y_col]
+            
+            # Get axis color (default to black if not set)
+            axis_color = self.y_axis_colors.get(y_col, QColor("black"))
+            mpl_axis_color = axis_color.getRgbF()[:3]  # RGB without alpha
+            
+            # Set axis color
+            ax.spines['left' if y_col == y_axis_order[0] else 'right'].set_edgecolor(mpl_axis_color)
+            ax.tick_params(axis='y', colors=mpl_axis_color)
+            ax.yaxis.label.set_color(mpl_axis_color)
+            
+            # Set axis label
+            axis_label = self.y_axis_labels.get(y_col, y_col)
+            ax.set_ylabel(axis_label)
+            
+            # Plot all curves for this y-axis
+            for name, plot_info in plots_by_yaxis[y_col]:
+                item = plot_info['item']
                 data = item.getData()
+                
                 if not all(d is not None for d in data) or len(data[0]) == 0:
                     continue
                 
                 pen = item.opts['pen']
-                color = pen.color().getRgbF()
+                color = pen.color().getRgbF()[:3]  # RGB without alpha
                 width = pen.width()
                 
-                error_item = p.get('error_item')
-                error_data = None
+                # Determine line style
+                style_map = {
+                    1: '-',      # SolidLine
+                    2: '--',     # DashLine
+                    3: ':',      # DotLine
+                    4: '-.',     # DashDotLine
+                }
+                linestyle = style_map.get(pen.style(), '-')
+                
+                # Plot the main line
+                line, = ax.plot(data[0], data[1], color=color, label=name, 
+                               linewidth=width, linestyle=linestyle)
+                
+                # Handle error bands
+                error_item = plot_info.get('error_item')
                 if error_item:
                     curve1_data = error_item.curves[0].getData()
                     curve2_data = error_item.curves[1].getData()
                     if all(d is not None for d in curve1_data) and all(d is not None for d in curve2_data):
-                        error_data = (curve1_data[0], curve1_data[1], curve2_data[1])
-
-                ax.plot(data[0], data[1], color=color, label=name, linewidth=width)
-                if error_data:
-                    ax.fill_between(error_data[0], error_data[1], error_data[2], color=color, alpha=0.25)
+                        ax.fill_between(curve1_data[0], curve1_data[1], curve2_data[1], 
+                                       color=color, alpha=0.25)
+                
+                all_handles.append(line)
+                all_labels.append(name)
         
-        ax.set_xlabel(self.plot_item.getAxis('bottom').labelText)
-        ax.set_ylabel(self.plot_item.getAxis('left').labelText) # Note: only shows left axis label
-        ax.grid(True)
-        ax.legend()
+        # Set x-axis label and color to black
+        ax_primary.set_xlabel(self.x_axis_label)
+        ax_primary.spines['bottom'].set_edgecolor('black')
+        ax_primary.tick_params(axis='x', colors='black')
+        ax_primary.xaxis.label.set_color('black')
+        
+        ax_primary.grid(True, alpha=0.3)
+        
+        # Create a unified legend
+        if all_handles:
+            ax_primary.legend(all_handles, all_labels, loc='best')
+        
         fig.tight_layout()
         
         try:
-            fig.savefig(filename, bbox_inches='tight')
+            fig.savefig(filename, bbox_inches='tight', dpi=300)
             print(f"Plot exported to {filename}")
         except Exception as e:
             print(f"Failed to save plot: {e}")
-        plt.close(fig)
+        finally:
+            plt.close(fig)
