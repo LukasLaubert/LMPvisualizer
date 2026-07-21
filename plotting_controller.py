@@ -21,15 +21,15 @@ class PlottingController:
         # Dictionary to manage y-axes and their associated viewboxes
         self.y_axes: Dict[str, Dict[str, Any]] = {}
 
-    def add_or_update_plot(self, name: str, data: dict, color: QColor, style):
+    def add_or_update_plot(self, name: str, data: dict, color: QColor, style, thickness: float = 1.0):
         """Adds a new plot or updates an existing one by name."""
-        self._add_or_update_plot_impl(name, data, color, style, layer_priority=0)
+        self._add_or_update_plot_impl(name, data, color, style, layer_priority=0, thickness=thickness)
 
-    def add_or_update_plot_with_custom_colors(self, name: str, data: dict, color: QColor, style, layer_priority: int = 0):
+    def add_or_update_plot_with_custom_colors(self, name: str, data: dict, color: QColor, style, layer_priority: int = 0, thickness: float = 1.0):
         """Adds a new plot or updates an existing one by name with custom layer priority."""
-        self._add_or_update_plot_impl(name, data, color, style, layer_priority)
+        self._add_or_update_plot_impl(name, data, color, style, layer_priority, thickness=thickness)
 
-    def _add_or_update_plot_impl(self, name: str, data: dict, color: QColor, style, layer_priority: int = 0):
+    def _add_or_update_plot_impl(self, name: str, data: dict, color: QColor, style, layer_priority: int = 0, thickness: float = 1.0):
         """Internal implementation for adding/updating plots with layer priority."""
         if name in self.plots:
             self.remove_plot(name)
@@ -62,7 +62,7 @@ class PlottingController:
         view_box = self.y_axes[y_col_name]['viewbox']
 
         # --- Create Plot Items ---
-        pen = pg.mkPen(color=color, style=style)
+        pen = pg.mkPen(color=color, style=style, width=thickness)
         plot_data_item = pg.PlotDataItem(x, y, pen=pen, name=name)
         
         error_item = None
@@ -169,6 +169,7 @@ class PlottingController:
                 data = p['item'].getData()
                 pen = p['item'].opts['pen']
                 color = pen.color().getRgbF()
+                width = pen.width()
                 
                 error_data = None
                 if p['error_item']:
@@ -176,7 +177,7 @@ class PlottingController:
                     curve2_data = p['error_item'].curves[1].getData()
                     error_data = (curve1_data[0], curve1_data[1], curve2_data[1])
 
-                ax.plot(data[0], data[1], color=color, label=name)
+                ax.plot(data[0], data[1], color=color, label=name, linewidth=width)
                 if error_data:
                     ax.fill_between(error_data[0], error_data[1], error_data[2], color=color, alpha=0.25)
         

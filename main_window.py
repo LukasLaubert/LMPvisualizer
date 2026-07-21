@@ -6,9 +6,9 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QComboBox, QFrame, QTableWidget, QHeaderView, QTableWidgetItem,
-    QFileDialog, QMessageBox, QCheckBox, QLabel, QSplitter, QGridLayout
+    QFileDialog, QMessageBox, QCheckBox, QLabel, QSplitter, QGridLayout, QSizePolicy
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint
 from PyQt6.QtGui import QColor
 import pyqtgraph as pg
 import random
@@ -29,10 +29,17 @@ class MainWindow(QMainWindow):
         self.data_manager = DataManager()
         self.plot_controller = None
 
+        self.add_btn = QPushButton("Add")
+        self.load_btn = QPushButton("Load")
+        self.popout_btn = QPushButton("Pop Out")
+        self.save_btn = QPushButton("Save")
+        self.export_btn = QPushButton("Export")
+        self.exit_btn = QPushButton("Exit")
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-
+        
         top_controls_group = QFrame()
         top_controls_group.setFrameShape(QFrame.Shape.StyledPanel)
         top_controls_layout = QGridLayout(top_controls_group)
@@ -40,29 +47,32 @@ class MainWindow(QMainWindow):
         top_controls_layout.addWidget(QLabel("Path:"), 0, 0)
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText("Select Project Root Directory...")
-        top_controls_layout.addWidget(self.path_edit, 0, 1, 1, 3)
+        top_controls_layout.addWidget(self.path_edit, 0, 1, 1, 4)
         self.browse_btn = QPushButton("Browse...")
-        top_controls_layout.addWidget(self.browse_btn, 0, 4)
+        top_controls_layout.addWidget(self.browse_btn, 0, 5)
 
         top_controls_layout.addWidget(QLabel("Log Keywords:"), 1, 0)
         self.chip_input = ChipInputWidget()
-        top_controls_layout.addWidget(self.chip_input, 1, 1, 1, 3)
+        top_controls_layout.addWidget(self.chip_input, 1, 1, 1, 4)
 
         top_controls_layout.addWidget(QLabel("Study"), 2, 0)
         self.study_combo = self._create_combo("Select Study")
         top_controls_layout.addWidget(self.study_combo, 2, 1)
 
-        top_controls_layout.addWidget(QLabel("System"), 3, 0)
-        self.system_combo = self._create_combo("Select System")
-        top_controls_layout.addWidget(self.system_combo, 3, 1)
-
-        top_controls_layout.addWidget(QLabel("X-Axis"), 2, 2)
+        top_controls_layout.addWidget(QLabel("X-Axis"), 3, 0)
         self.xaxis_combo = self._create_combo("Select X-Axis")
-        top_controls_layout.addWidget(self.xaxis_combo, 2, 3)
+        top_controls_layout.addWidget(self.xaxis_combo, 3, 1)
+
+        top_controls_layout.addWidget(QLabel("System"), 2, 2)
+        self.system_combo = self._create_combo("Select System")
+        top_controls_layout.addWidget(self.system_combo, 2, 3)
 
         top_controls_layout.addWidget(QLabel("Y-Axis"), 3, 2)
         self.yaxis_combo = self._create_combo("Select Y-Axis")
         top_controls_layout.addWidget(self.yaxis_combo, 3, 3)
+
+        self.add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        top_controls_layout.addWidget(self.add_btn, 2, 4, 2, 1)
 
         info_widget = QWidget()
         info_layout = QVBoxLayout(info_widget)
@@ -76,7 +86,7 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(self.units_label)
         info_layout.addWidget(self.timestep_label)
         info_layout.addStretch()
-        top_controls_layout.addWidget(info_widget, 2, 4, 2, 1)
+        top_controls_layout.addWidget(info_widget, 2, 5, 2, 1)
 
         top_controls_layout.setColumnStretch(1, 1)
         top_controls_layout.setColumnStretch(3, 1)
@@ -84,29 +94,21 @@ class MainWindow(QMainWindow):
 
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         
+        # --- Left Panel (Plot) ---
         left_panel = QWidget()
-        left_layout = QHBoxLayout(left_panel)
+        left_layout = QVBoxLayout(left_panel)
         
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('w')
         self.plot_controller = PlottingController(self.plot_widget)
-
-        action_buttons_layout = QVBoxLayout()
-        self.add_btn = QPushButton("Add")
-        self.load_btn = QPushButton("Load")
-        self.popout_btn = QPushButton("Pop Out")
-        self.save_btn = QPushButton("Save")
-        self.export_btn = QPushButton("Export")
-        action_buttons_layout.addWidget(self.add_btn)
-        action_buttons_layout.addWidget(self.load_btn)
-        action_buttons_layout.addWidget(self.popout_btn)
-        action_buttons_layout.addWidget(self.save_btn)
-        action_buttons_layout.addWidget(self.export_btn)
-        action_buttons_layout.addStretch()
-        
         left_layout.addWidget(self.plot_widget)
-        left_layout.addLayout(action_buttons_layout)
-        
+
+        plot_buttons_layout = QHBoxLayout()
+        plot_buttons_layout.addWidget(self.popout_btn)
+        plot_buttons_layout.addWidget(self.export_btn)
+        left_layout.addLayout(plot_buttons_layout)
+
+        # --- Right Panel (Table) ---
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         
@@ -134,19 +136,32 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.std_checkbox)
 
         self.plot_table = QTableWidget()
-        self.plot_table.setColumnCount(5)
-        self.plot_table.setHorizontalHeaderLabels(["Plot", "Color", "Style", "Show", "Del"])
+        self.plot_table.setColumnCount(7)
+        self.plot_table.setHorizontalHeaderLabels(["↨", "Plot", "Color", "Style", "thk", "Show", "Del"])
         header = self.plot_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self.plot_table.setColumnWidth(2, 80)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+        self.plot_table.setColumnWidth(0, 10)
+        self.plot_table.setColumnWidth(2, 40)
+        self.plot_table.setColumnWidth(3, 40)
+        self.plot_table.setColumnWidth(4, 30)
+        self.plot_table.setColumnWidth(5, 40)
+        self.plot_table.setColumnWidth(6, 30)
         self.plot_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.plot_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.plot_table.verticalHeader().hide()
         right_layout.addWidget(self.plot_table)
+
+        table_buttons_layout = QHBoxLayout()
+        table_buttons_layout.addWidget(self.save_btn)
+        table_buttons_layout.addWidget(self.load_btn)
+        table_buttons_layout.addWidget(self.exit_btn)
+        right_layout.addLayout(table_buttons_layout)
 
         main_splitter.addWidget(left_panel)
         main_splitter.addWidget(right_panel)
@@ -155,6 +170,110 @@ class MainWindow(QMainWindow):
 
         self._connect_signals()
         self._update_ui_state(project_loaded=False)
+
+    def _create_move_widget(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        up_button = QPushButton("▲")
+        down_button = QPushButton("▼")
+        
+        up_button.clicked.connect(self.move_row_up)
+        down_button.clicked.connect(self.move_row_down)
+
+        layout.addWidget(up_button)
+        layout.addWidget(down_button)
+        return widget
+
+    def move_row_up(self):
+        button = self.sender()
+        if button:
+            parent_widget = button.parentWidget()
+            pos = parent_widget.mapTo(self.plot_table.viewport(), QPoint(0,0))
+            row = self.plot_table.indexAt(pos).row()
+            if row > 0:
+                self.swap_rows(row, row - 1)
+                self.plot_table.selectRow(row - 1)
+
+    def move_row_down(self):
+        button = self.sender()
+        if button:
+            parent_widget = button.parentWidget()
+            pos = parent_widget.mapTo(self.plot_table.viewport(), QPoint(0,0))
+            row = self.plot_table.indexAt(pos).row()
+            if row < self.plot_table.rowCount() - 1:
+                self.swap_rows(row, row + 1)
+                self.plot_table.selectRow(row + 1)
+
+    def _extract_row_data(self, row_index):
+        data = {}
+        # Column 1: Plot name (QTableWidgetItem)
+        data['plot_name'] = self.plot_table.item(row_index, 1).text() if self.plot_table.item(row_index, 1) else "N/A | N/A | N/A | N/A"
+        # Column 2: Color (ColorButton)
+        color_btn = self.plot_table.cellWidget(row_index, 2)
+        data['color'] = color_btn.color().name() if color_btn else QColor("black").name()
+        # Column 3: Style (QComboBox)
+        style_combo = self.plot_table.cellWidget(row_index, 3)
+        data['style'] = style_combo.currentText() if style_combo else "Solid"
+        # Column 4: Thickness (QLineEdit)
+        thk_edit = self.plot_table.cellWidget(row_index, 4)
+        data['thickness'] = thk_edit.findChild(QLineEdit).text() if thk_edit else "1"
+        # Column 5: Show (QCheckBox)
+        show_widget = self.plot_table.cellWidget(row_index, 5)
+        data['show'] = show_widget.findChild(QCheckBox).isChecked() if show_widget else True
+        return data
+
+    def _populate_row_data(self, row_index, data):
+        # Column 0: Move buttons
+        move_widget = self._create_move_widget()
+        self.plot_table.setCellWidget(row_index, 0, move_widget)
+
+        # Column 1: Plot name
+        name_item = QTableWidgetItem(data['plot_name'])
+        name_item.setForeground(Qt.GlobalColor.gray if "N/A" in data['plot_name'] else Qt.GlobalColor.black)
+        self.plot_table.setItem(row_index, 1, name_item)
+
+        # Column 2: Color
+        color_btn = ColorButton(QColor(data['color']))
+        color_btn.colorChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(row_index, 2, color_btn)
+
+        # Column 3: Style
+        style_combo = self._create_style_combo()
+        style_combo.setCurrentText(data['style'])
+        style_combo.currentTextChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(row_index, 3, style_combo)
+
+        # Column 4: Thickness
+        thk_edit = QLineEdit(data['thickness'])
+        thk_edit.textChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(row_index, 4, self._create_centered_widget(thk_edit))
+
+        # Column 5: Show
+        show_check = QCheckBox()
+        show_check.setChecked(data['show'])
+        show_check.stateChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(row_index, 5, self._create_centered_widget(show_check))
+
+        # Column 6: Delete button
+        del_btn = QPushButton("X")
+        del_btn.setStyleSheet("color: red; font-weight: bold;")
+        del_btn.clicked.connect(self.delete_plot_row)
+        self.plot_table.setCellWidget(row_index, 6, self._create_centered_widget(del_btn))
+
+    def swap_rows(self, r1, r2):
+        self.plot_table.blockSignals(True)
+
+        row1_data = self._extract_row_data(r1)
+        row2_data = self._extract_row_data(r2)
+
+        self._populate_row_data(r1, row2_data)
+        self._populate_row_data(r2, row1_data)
+
+        self.plot_table.blockSignals(False)
+        self.update_plots()
 
     def _create_combo(self, placeholder: str) -> QComboBox:
         combo = QComboBox()
@@ -183,6 +302,7 @@ class MainWindow(QMainWindow):
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
         self.export_btn.clicked.connect(self.export_plot)
+        self.exit_btn.clicked.connect(self.close)
 
     
     def browse_for_directory(self):
@@ -214,11 +334,17 @@ class MainWindow(QMainWindow):
             self.on_path_entered()
 
     def load_project(self, root_path):
+        keywords = self.chip_input.get_chips()
+        if not keywords:
+            self.data_manager.data.clear()
+            self.data_manager.available_columns = []
+            self._update_ui_state(project_loaded=False)
+            return
+
         studies, warnings = LammpsParser.discover_studies_systems(root_path)
         if warnings:
             QMessageBox.warning(self, "Project Discovery Warning", "\n".join(warnings))
         
-        keywords = self.chip_input.get_chips()
         warnings, successful_keywords = self.data_manager.load_project_data(studies, root_path, keywords)
         self.chip_input.update_chip_styles(successful_keywords)
 
@@ -312,7 +438,7 @@ class MainWindow(QMainWindow):
             return
 
         selected_row = self.plot_table.currentRow()
-        plot_name_item = self.plot_table.item(selected_row, 0)
+        plot_name_item = self.plot_table.item(selected_row, 1)
         if not plot_name_item:
             return
 
@@ -345,7 +471,7 @@ class MainWindow(QMainWindow):
             return
 
         selected_row = self.plot_table.currentRow()
-        plot_name_item = self.plot_table.item(selected_row, 0)
+        plot_name_item = self.plot_table.item(selected_row, 1)
         if not plot_name_item:
             return
 
@@ -371,7 +497,7 @@ class MainWindow(QMainWindow):
         existing_colors = []
         for row in range(self.plot_table.rowCount()):
             if row == insert_row: continue
-            color_widget = self.plot_table.cellWidget(row, 1)
+            color_widget = self.plot_table.cellWidget(row, 2)
             if color_widget:
                 existing_colors.append(color_widget.color())
         
@@ -381,36 +507,43 @@ class MainWindow(QMainWindow):
 
         if self.plot_table.rowCount() > 1:
             try:
-                old_plot_name = self.plot_table.item(1, 0).text()
+                old_plot_name = self.plot_table.item(1, 1).text()
                 parts = old_plot_name.split(' | ')
                 study, system, x_ax, _ = (parts + ['N/A'] * 4)[:4]
                 plot_name = f"{study} | {system} | {x_ax} | N/A"
-                style = self.plot_table.cellWidget(1, 2).currentText()
+                style = self.plot_table.cellWidget(1, 3).currentText()
             except (AttributeError, ValueError):
                 pass
 
+        move_widget = self._create_move_widget()
+        self.plot_table.setCellWidget(insert_row, 0, move_widget)
+
         name_item = QTableWidgetItem(plot_name)
         name_item.setForeground(Qt.GlobalColor.gray)
-        self.plot_table.setItem(insert_row, 0, name_item)
+        self.plot_table.setItem(insert_row, 1, name_item)
 
         color_btn = ColorButton(color)
         color_btn.colorChanged.connect(self.update_plots)
-        self.plot_table.setCellWidget(insert_row, 1, color_btn)
+        self.plot_table.setCellWidget(insert_row, 2, color_btn)
 
         style_combo = self._create_style_combo()
         style_combo.setCurrentText(style)
         style_combo.currentTextChanged.connect(self.update_plots)
-        self.plot_table.setCellWidget(insert_row, 2, style_combo)
+        self.plot_table.setCellWidget(insert_row, 3, style_combo)
+
+        thk_edit = QLineEdit("1")
+        thk_edit.textChanged.connect(self.update_plots)
+        self.plot_table.setCellWidget(insert_row, 4, self._create_centered_widget(thk_edit))
 
         show_check = QCheckBox()
         show_check.setChecked(True)
         show_check.stateChanged.connect(self.update_plots)
-        self.plot_table.setCellWidget(insert_row, 3, self._create_centered_widget(show_check))
+        self.plot_table.setCellWidget(insert_row, 5, self._create_centered_widget(show_check))
 
         del_btn = QPushButton("X")
         del_btn.setStyleSheet("color: red; font-weight: bold;")
         del_btn.clicked.connect(self.delete_plot_row)
-        self.plot_table.setCellWidget(insert_row, 4, self._create_centered_widget(del_btn))
+        self.plot_table.setCellWidget(insert_row, 6, self._create_centered_widget(del_btn))
 
         self.plot_table.selectRow(insert_row)
 
@@ -420,12 +553,12 @@ class MainWindow(QMainWindow):
         # Step 1: Gather all information for visible plots in a single loop
         visible_plots_info = []
         for row in range(self.plot_table.rowCount()):
-            show_widget = self.plot_table.cellWidget(row, 3)
+            show_widget = self.plot_table.cellWidget(row, 5)
             show_checkbox = show_widget.findChild(QCheckBox)
             if not (show_checkbox and show_checkbox.isChecked()):
                 continue
 
-            item = self.plot_table.item(row, 0)
+            item = self.plot_table.item(row, 1)
             if not item: continue
 
             plot_name = item.text()
@@ -434,13 +567,19 @@ class MainWindow(QMainWindow):
                 if "N/A" in [study, system, x_ax, y_ax]:
                     continue
                 
-                color = self.plot_table.cellWidget(row, 1).color()
-                style_text = self.plot_table.cellWidget(row, 2).currentText()
+                color = self.plot_table.cellWidget(row, 2).color()
+                style_text = self.plot_table.cellWidget(row, 3).currentText()
                 style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
+
+                try:
+                    thickness = float(self.plot_table.cellWidget(row, 4).findChild(QLineEdit).text())
+                except (ValueError, AttributeError):
+                    thickness = 1.0
 
                 visible_plots_info.append({
                     'plot_name': plot_name, 'study': study, 'system': system,
-                    'x_ax': x_ax, 'y_ax': y_ax, 'color': color, 'style': style
+                    'x_ax': x_ax, 'y_ax': y_ax, 'color': color, 'style': style,
+                    'thickness': thickness
                 })
             except ValueError:
                 continue
@@ -482,7 +621,10 @@ class MainWindow(QMainWindow):
                 
                 # Add original values if checkbox is checked
                 if self.original_values_checkbox.isChecked():
-                    self.plot_controller.add_or_update_plot(plot_info['plot_name'], data, plot_info['color'], plot_info['style'])
+                    self.plot_controller.add_or_update_plot(
+                        plot_info['plot_name'], data, plot_info['color'], 
+                        plot_info['style'], thickness=plot_info['thickness']
+                    )
                 
                 # Store processed data for running mean and running mean std calculation if needed
                 if self.running_mean_checkbox.isChecked() or self.running_mean_std_checkbox.isChecked():
@@ -559,7 +701,8 @@ class MainWindow(QMainWindow):
                     running_mean_data, 
                     mean_color, 
                     plot_info['style'],
-                    layer_priority=2  # In front of both original and std band
+                    layer_priority=2,  # In front of both original and std band
+                    thickness=plot_info['thickness']
                 )
 
         # Step 3: Update axis labels and apply conditional coloring
@@ -679,6 +822,13 @@ class MainWindow(QMainWindow):
     def _create_style_combo(self) -> QComboBox:
         combo = QComboBox()
         combo.addItems(["Solid", "Dash", "Dot"])
+        font_metrics = combo.fontMetrics()
+        max_width = 0
+        for i in range(combo.count()):
+            width = font_metrics.horizontalAdvance(combo.itemText(i))
+            if width > max_width:
+                max_width = width
+        combo.view().setMinimumWidth(max_width + 30)
         return combo
         
     def save_session(self):
@@ -688,13 +838,14 @@ class MainWindow(QMainWindow):
             
         config = {'path': self.path_edit.text(), 'plots': []}
         for row in range(self.plot_table.rowCount()):
-            item = self.plot_table.item(row, 0)
+            item = self.plot_table.item(row, 1)
             if item:
                 plot_info = {
                     'name': item.text(),
-                    'color': self.plot_table.cellWidget(row, 1).color().name(),
-                    'style': self.plot_table.cellWidget(row, 2).currentText(),
-                    'show': self.plot_table.cellWidget(row, 3).findChild(QCheckBox).isChecked()
+                    'color': self.plot_table.cellWidget(row, 2).color().name(),
+                    'style': self.plot_table.cellWidget(row, 3).currentText(),
+                    'thickness': self.plot_table.cellWidget(row, 4).findChild(QLineEdit).text(),
+                    'show': self.plot_table.cellWidget(row, 5).findChild(QCheckBox).isChecked()
                 }
                 config['plots'].append(plot_info)
         
@@ -725,32 +876,39 @@ class MainWindow(QMainWindow):
                     row = self.plot_table.rowCount()
                     self.plot_table.insertRow(row)
                     
+                    move_widget = self._create_move_widget()
+                    self.plot_table.setCellWidget(row, 0, move_widget)
+
                     name = plot_info['name']
                     is_complete = "N/A" not in name
                     color = Qt.GlobalColor.black if is_complete else Qt.GlobalColor.gray
                     
                     item = QTableWidgetItem(name)
                     item.setForeground(color)
-                    self.plot_table.setItem(row, 0, item)
+                    self.plot_table.setItem(row, 1, item)
                     
                     color_btn = ColorButton(QColor(plot_info['color']))
                     color_btn.colorChanged.connect(self.update_plots)
-                    self.plot_table.setCellWidget(row, 1, color_btn)
+                    self.plot_table.setCellWidget(row, 2, color_btn)
 
                     style_combo = self._create_style_combo()
                     style_combo.setCurrentText(plot_info['style'])
                     style_combo.currentTextChanged.connect(self.update_plots)
-                    self.plot_table.setCellWidget(row, 2, style_combo)
+                    self.plot_table.setCellWidget(row, 3, style_combo)
                     
+                    thk_edit = QLineEdit(plot_info.get('thickness', '1'))
+                    thk_edit.textChanged.connect(self.update_plots)
+                    self.plot_table.setCellWidget(row, 4, self._create_centered_widget(thk_edit))
+
                     show_check = QCheckBox()
                     show_check.setChecked(plot_info['show'])
                     show_check.stateChanged.connect(self.update_plots)
-                    self.plot_table.setCellWidget(row, 3, self._create_centered_widget(show_check))
+                    self.plot_table.setCellWidget(row, 5, self._create_centered_widget(show_check))
                     
                     del_btn = QPushButton("X")
                     del_btn.setStyleSheet("color: red; font-weight: bold;")
                     del_btn.clicked.connect(self.delete_plot_row)
-                    self.plot_table.setCellWidget(row, 4, self._create_centered_widget(del_btn))
+                    self.plot_table.setCellWidget(row, 6, self._create_centered_widget(del_btn))
                 
                 if self.plot_table.rowCount() > 0:
                     self.plot_table.selectRow(0)

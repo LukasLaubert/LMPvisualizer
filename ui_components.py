@@ -1,9 +1,9 @@
 # lmp_visualizer/ui_components.py
 
-from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget, 
-                             QDialogButtonBox, QHeaderView, QTableWidgetItem, 
+from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget,
+                             QDialogButtonBox, QHeaderView, QTableWidgetItem,
                              QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog,
-                             QWidget, QHBoxLayout, QLineEdit, QFrame)
+                             QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication)
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtCore import pyqtSignal, Qt, QEvent
 
@@ -174,19 +174,24 @@ class ChipInputWidget(QWidget):
         self.layout.addWidget(self.input_line)
         self.layout.setStretchFactor(self.input_line, 1)
 
+        # Add default chips
+        self.add_chip(".log")
+        self.add_chip(".out")
+
 
     def eventFilter(self, source, event):
         if source is self.input_line and event.type() == QEvent.Type.KeyPress:
-            if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Tab):
+            if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
                 if self.input_line.text().strip():
                     self.add_chip_from_input()
-                    return True # Event handled
+                    if event.key() == Qt.Key.Key_Backtab:
+                        return False # Allow default Shift+Tab action
+                    return True # Event handled for Space and Tab
         return super().eventFilter(source, event)
 
-    def add_chip_from_input(self):
-        text = self.input_line.text().strip()
+    def add_chip(self, text: str):
+        text = text.strip()
         if not text or ' ' in text or text in self._chips:
-            self.input_line.clear()
             return
 
         self._chips.append(text)
@@ -194,6 +199,10 @@ class ChipInputWidget(QWidget):
         chip_widget.removed.connect(self.remove_chip)
         self.chip_layout.addWidget(chip_widget)
         self.chipsChanged.emit(self._chips)
+
+    def add_chip_from_input(self):
+        text = self.input_line.text().strip()
+        self.add_chip(text)
         self.input_line.clear()
 
     def remove_chip(self, text):
@@ -214,3 +223,98 @@ class ChipInputWidget(QWidget):
             widget = self.chip_layout.itemAt(i).widget()
             if isinstance(widget, Chip):
                 widget.set_bold(widget.text in successful_keywords)
+
+class DraggableTableWidget(QTableWidget):
+    """A QTableWidget that supports drag and drop reordering of rows."""
+    rowsReordered = pyqtSignal()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.setDragDropMode(QTableWidget.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setAlternatingRowColors(True)
+        self.verticalHeader().setVisible(False)
+
+    def dropEvent(self, event):
+        """Handle drop events to reorder rows."""
+        if event.source() is self and event.dropAction() == Qt.DropAction.MoveAction:
+            # Get the drop position
+            drop_position = event.position().toPoint()
+            target_row = self.indexAt(drop_position).row()
+
+            # If not dropped on a valid row, determine position based on drop position
+            if target_row == -1:
+                # Calculate which row to drop above based on Y coordinate
+                row_height = self.rowHeight(0) if self.rowCount() > 0 else self.rowHeight(self.currentRow())
+                if row_height == 0:
+                    row_height = 25  # Default row height
+
+                # Map Y position to approximate row index
+                header_height = self.horizontalHeader().height()
+                relative_y = drop_position.y() - header_height
+                target_row = max(0, min(self.rowCount(), int(relative_y // row_height)))
+
+            # Get the source row (the one being dragged)
+            source_row = self.currentRow()
+
+            # Only proceed if we're moving to a different position
+            if source_row != target_row and source_row != -1:
+                # Adjust target_row if dragging downwards
+                if source_row < target_row:
+                    target_row -= 1
+
+                # Store all data from the source row
+                source_items = []
+                source_widgets = {}
+
+                # Store items (text data)
+                for col in range(self.columnCount()):
+                    item = self.item(source_row, col)
+                    if item:
+                        source_items.append(item.clone())
+                    else:
+                        source_items.append(None)
+
+                # Store widgets (color buttons, combos, checkboxes, buttons)
+                for col in range(self.columnCount()):
+                    widget = self.cellWidget(source_row, col)
+                    if widget:
+                        # We need to reparent the widget to the new cell
+                        source_widgets[col] = widget
+
+                # Remove the source row
+                self.removeRow(source_row)
+
+                # Adjust target_row if it was after the removed row
+                if source_row < target_row:
+                    target_row -= 1
+
+                # Insert a new row at target position
+                self.insertRow(target_row)
+
+                # Add items to the new row
+                for col, item in enumerate(source_items):
+                    if item:
+                        self.setItem(target_row, col, item)
+
+                # Add widgets to the new row
+                for col, widget in source_widgets.items():
+                    # Important: Clear the widget's parent to avoid issues
+                    widget.setParent(None)
+                    self.setCellWidget(target_row, col, widget)
+
+                # Select the moved row
+                self.selectRow(target_row)
+
+                # Emit signal that rows were reordered
+                self.rowsReordered.emit()
+
+                # Accept the drop event
+                event.acceptProposedAction()
+                return
+
+        # Call parent dropEvent if we didn't handle it
+        super().dropEvent(event)
