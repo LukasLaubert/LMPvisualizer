@@ -68,8 +68,12 @@ class TrjController(QObject):
         # Only reset if actually changing system
         if self.current_study != study or self.current_system != system:
             
-            is_study_change = (self.current_study != study)
-            
+            # Capture current state before switch
+            old_ts = self.current_timestep
+            old_idx = 0
+            if self.timesteps and old_ts in self.timesteps:
+                old_idx = self.timesteps.index(old_ts)
+
             self.current_study = study
             self.current_system = system
             self.full_timesteps = self.data_manager.get_timesteps(study, system)
@@ -84,37 +88,29 @@ class TrjController(QObject):
                 if df_init is not None:
                     self._ref_cache['initial'] = df_init
 
-            # Handle Playback and Step Reset Logic
-            if is_study_change:
-                # 1. Study Change: Reset everything
-                if self.is_playing:
-                    self.pause()
-                    self.playbackStopped.emit()
-                
-                self.current_timestep = self.timesteps[0] if self.timesteps else 0
+            # Timestep Preservation Logic (Unified for Study & System changes)
+            if self.timesteps:
+                if old_ts in self.timesteps:
+                    # 1. Exact timestep match
+                    self.current_timestep = old_ts
+                elif old_idx < len(self.timesteps):
+                    # 2. Index match (relative progress)
+                    self.current_timestep = self.timesteps[old_idx]
+                else:
+                    # 3. Fallback to end or start
+                    self.current_timestep = self.timesteps[-1] if old_idx >= len(self.timesteps) else self.timesteps[0]
             else:
-                # 2. System Change (Same Study): Keep state
-                # Try to keep current timestep
-                if self.current_timestep not in self.timesteps:
-                    if self.timesteps:
-                        # Find closest or just fallback to 0
-                        # For simplicity, if exact step not found, go to 0, or maybe clamp?
-                        # User said: "keep the current step... if play is active... let it run"
-                        # Usually systems in same study have same timesteps. 
-                        # If not, we'll fallback to 0 to be safe.
-                        self.current_timestep = self.timesteps[0]
-                    else:
-                        self.current_timestep = 0
+                self.current_timestep = 0
+            
+            # If playing, re-anchor timer
+            if self.is_playing and self.timesteps:
+                try:
+                    curr_idx = self.timesteps.index(self.current_timestep)
+                except ValueError:
+                    curr_idx = 0
                 
-                # If playing, we need to re-anchor the timer to avoid jumps or index errors
-                if self.is_playing and self.timesteps:
-                    try:
-                        curr_idx = self.timesteps.index(self.current_timestep)
-                    except ValueError:
-                        curr_idx = 0
-                    
-                    self.playback_start_index = curr_idx
-                    self.playback_start_time = time.time()
+                self.playback_start_index = curr_idx
+                self.playback_start_time = time.time()
 
             # Reset view limits to auto only on system change if view is not locked
             if not self.view_config.get('view_lock', True):
@@ -430,6 +426,9 @@ class TrjController(QObject):
         Calculates the data range for the Z-Filter based on the reference type.
         Used by the UI to set the Filter Bar range.
         """
+        if ref_type is None:
+            ref_type = 'Current'
+
         # Initial Frame Min/Max
         if ref_type == 'Initial':
             if 'initial' not in self._ref_cache:
@@ -470,6 +469,10 @@ class TrjController(QObject):
 
     def _get_bounds(self, study, system, col, ref_type):
         """Calculates Min/Max for coloring based on Reference Type."""
+        # Safety fallback for None ref_type
+        if ref_type is None:
+            ref_type = 'Current'
+
         # 1. Initial Frame Bounds
         if ref_type == 'Initial':
             if 'initial' not in self._ref_cache:

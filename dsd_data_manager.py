@@ -1,21 +1,49 @@
+# lmp_visualizer/dsd_data_manager.py
 
 import numpy as np
 import pandas as pd
+import hashlib
+from io import StringIO
 from typing import Dict, List, Tuple, Optional, Set
 from pathlib import Path
 from trajectory_parser import TrajectoryParser
 
 class DSDDataManager:
     def __init__(self):
-        # Storage: {study_name: {system_name: TrajectoryParser}}
-        self.parsers: Dict[str, Dict[str, TrajectoryParser]] = {}
+        # Storage: {study_name: {system_name: TrajectoryParser or Path}}
+        self.parsers: Dict[str, Dict[str, any]] = {}
         self.current_study = None
         self.current_system = None
         self.cache = {} 
         self.slicing_results = {} 
         self.strain_evolution_cache = {} # Key: (Study, System, DomainIdentity) -> {strains, stds}
 
-    def load_project_data(self, studies: Dict[str, List[str]], root_path: Path, keywords: List[str], file_map: Dict[str, Path] = None):
+    def get_domain_hash(self, v_domain, timesteps, slice_axis, observe_axis, options):
+        """Generates a unique persistent hash for a domain definition and its context."""
+        import json
+        
+        identity = {
+            'box_edges': v_domain.get('box_edges'),
+            'atom_types': sorted(v_domain.get('atom_types', [])),
+            'pbc': v_domain.get('pbc', False),
+            'weighted': v_domain.get('weighted', False),
+            'bary_mid': v_domain.get('bary_mid_twoside_weight', False),
+            'number_boxes': v_domain.get('number_boxes'),
+            'box_arrangement': v_domain.get('box_arrangement'),
+            'overlap_percentage': v_domain.get('overlap_percentage'),
+            'slice': slice_axis,
+            'observe': observe_axis,
+            'z_col': options.get('z_filter_col'),
+            'z_ref': options.get('z_filter_ref'),
+            'z_ranges': sorted(options.get('z_ranges', [])) if options.get('z_ranges') else None,
+            'timesteps': timesteps 
+        }
+        
+        id_json = json.dumps(identity, sort_keys=True)
+        return hashlib.sha256(id_json.encode()).hexdigest()
+
+    def load_project_data(self, studies: Dict[str, List[str]], root_path: Path, keywords: List[str], file_map: Dict[str, List[Path]] = None):
+        """Discovers files but defers parser creation until needed (Lazy Loading)."""
         self.parsers.clear()
         self.cache.clear()
         self.strain_evolution_cache.clear()
@@ -27,61 +55,50 @@ class DSDDataManager:
         for study_name, system_list in studies.items():
             self.parsers[study_name] = {}
             for system_name in system_list:
-                target_files = []
+                key = f"{study_name}|{system_name}"
+                target_files = file_map.get(key, [])
                 
-                # Check for "study|system" key first (Flat/Parent mode)
-                flat_key = f"{study_name}|{system_name}"
-                
-                if flat_key in file_map:
-                    # Map now contains a list of paths
-                    entry = file_map[flat_key]
-                    target_files = entry if isinstance(entry, list) else [entry]
-                elif system_name in file_map: 
-                    entry = file_map[system_name]
-                    target_files = entry if isinstance(entry, list) else [entry]
-                else:
+                if not target_files:
+                    # Backward compat scan
                     system_path = root_path / study_name / system_name
                     if system_path.is_dir():
                         for keyword in keywords:
-                            found = list(system_path.glob(f"*{keyword}*"))
-                            target_files.extend(found)
+                            target_files.extend(list(system_path.glob(f"*{keyword}*")))
                 
                 if not target_files: continue
                 target_files.sort()
                 
-                # Iterate through ALL found files and register them
+                # Store only the PATH. TrajectoryParser will be created on-demand in get_parser()
                 for fpath in target_files:
-                    try:
-                        parser = TrajectoryParser(fpath)
-                        if parser.get_column_names():
-                            # Naming Logic:
-                            # 1. If only one file is found in the system folder, 
-                            #    always use the system folder name as the key.
-                            # 2. If multiple files are found, use the filename.
-                            # 3. Handle standard Study_System prefix as before.
-                            
-                            if len(target_files) == 1 and flat_key not in file_map:
-                                key_name = system_name
-                            else:
-                                standard_prefix = f"{study_name}_{system_name}"
-                                if fpath.stem == standard_prefix:
-                                    key_name = system_name
-                                else:
-                                    key_name = fpath.stem
-
-                            self.parsers[study_name][key_name] = parser
-                            
-                            for kw in keywords:
-                                if kw in fpath.name: successful_keywords.add(kw)
-                    except Exception: pass
+                    key_name = system_name if len(target_files) == 1 else fpath.stem
+                    self.parsers[study_name][key_name] = fpath
+                    
+                    for kw in keywords:
+                        if kw in fpath.name: successful_keywords.add(kw)
 
         if not self.parsers:
              warnings.append("No valid trajectory files found.")
 
         return warnings, successful_keywords
 
-    def get_parser(self, study, system):
-        return self.parsers.get(study, {}).get(system)
+    def get_parser(self, study, system) -> Optional[TrajectoryParser]:
+        """Lazy-loads the parser for a specific system only when accessed."""
+        if study not in self.parsers or system not in self.parsers[study]:
+            return None
+            
+        entry = self.parsers[study][system]
+        
+        # If entry is a Path, promote it to a TrajectoryParser
+        if isinstance(entry, Path):
+            try:
+                parser = TrajectoryParser(entry)
+                self.parsers[study][system] = parser
+                return parser
+            except Exception as e:
+                print(f"Error initializing parser for {entry}: {e}")
+                return None
+                
+        return entry
 
     def get_timesteps(self, study, system):
         parser = self.get_parser(study, system)
@@ -108,896 +125,370 @@ class DSDDataManager:
 
     def slice_disp_mean(self, df_initial, df_curr, settings, slice_axis, observe_axis, box_curr, 
                         z_col=None, z_ref='Current', z_ranges=None, df_final=None, box_init=None):
-        """
-        Wrapper that handles domain splitting.
-        Returns a list of DataFrames (one per segment).
-        """
+        """Wrapper that handles domain splitting."""
         splits = settings.get('splits', [])
         active_segments = settings.get('active_segments', [])
-        
         results = []
         
         if not splits:
-            # Single domain
-            res = self._slice_disp_single_domain(
-                df_initial, df_curr, settings, slice_axis, observe_axis, box_curr, 
-                z_col, z_ref, z_ranges, df_final, box_init
-            )
-            if res is not None:
-                results.append(res)
+            res = self._slice_disp_single_domain(df_initial, df_curr, settings, slice_axis, observe_axis, box_curr, 
+                                               z_col, z_ref, z_ranges, df_final, box_init)
+            if res is not None: results.append(res)
         else:
-            # Splits exist
-            # Define segments
-            # Sort splits just in case
             sorted_splits = sorted(splits)
-            
-            # We need the full range to define the first and last segments?
-            # Or assume -inf to split[0], split[0] to split[1], ..., split[n] to inf?
-            # Or use data min/max?
-            # Let's use the full data range or box_edges if defined, otherwise dynamic.
-            # Ideally, if box_edges not defined, we use min/max of data.
-            # But here we need to force boundaries.
-            
-            # The segments are:
-            # (-inf, s0), (s0, s1), ..., (sn, inf)
-            # We pass these as `box_edges` to the single domain function.
-            
-            # We need to respect the original box_edges if they were set?
-            # If user set manual box edges, the splits should ideally be within them.
-            # But the split widget assumes full control.
-            
-            # Let's construct segment ranges.
-            # We use None to indicate "use data min/max" for the open ends.
-            
-            current_min = None
-            
-            # Prepare segments list
             segments = []
-            
-            # First segment
             segments.append((None, sorted_splits[0]))
-            
-            # Middle segments
             for i in range(len(sorted_splits) - 1):
                 segments.append((sorted_splits[i], sorted_splits[i+1]))
-                
-            # Last segment
             segments.append((sorted_splits[-1], None))
             
-            # Ensure active_segments length matches
-            if len(active_segments) < len(segments):
-                active_segments.extend([True] * (len(segments) - len(active_segments)))
-                
             for i, (seg_min, seg_max) in enumerate(segments):
-                if not active_segments[i]:
-                    continue
-                    
-                # Create a modified settings dict
-                seg_settings = settings.copy()
-                
-                # Let's try to fetch global min/max if needed.
-                if seg_min is None or seg_max is None:
-                    # We need global bounds of the ATOMS selected
-                    atom_types = settings.get('atom_types', [])
-                    if atom_types:
-                        sub = df_initial[df_initial['type'].isin(atom_types)]
-                    else:
-                        sub = df_initial
-                    
-                    if not sub.empty:
-                        data_min = sub[slice_axis].min()
-                        data_max = sub[slice_axis].max()
-                    else:
-                        continue # No data
-                        
-                    eff_min = seg_min if seg_min is not None else data_min
-                    eff_max = seg_max if seg_max is not None else data_max
-                    
-                    # Ensure range is valid
-                    if eff_min >= eff_max: continue
-                    
-                    seg_settings['box_edges'] = (eff_min, eff_max)
-                else:
-                    seg_settings['box_edges'] = (seg_min, seg_max)
-                
-                # Call inner
-                res = self._slice_disp_single_domain(
-                    df_initial, df_curr, seg_settings, slice_axis, observe_axis, box_curr, 
-                    z_col, z_ref, z_ranges, df_final, box_init
-                )
-                
-                if res is not None:
-                    # Mark this result with segment info if needed
-                    res.attrs['segment_index'] = i
-                    results.append(res)
-                    
+                if i < len(active_segments) and not active_segments[i]: continue
+                s_copy = settings.copy()
+                s_copy['box_edges'] = (seg_min, seg_max)
+                res = self._slice_disp_single_domain(df_initial, df_curr, s_copy, slice_axis, observe_axis, box_curr,
+                                                   z_col, z_ref, z_ranges, df_final, box_init)
+                if res is not None: results.append(res)
         return results
 
     def _get_slice_cache_key(self, df_initial, df_curr, settings, slice_axis, observe_axis, 
                              z_col, z_ref, z_ranges, df_final):
-        # Create a stable identity for the settings dictionary
-        # Only include keys that affect calculation
         relevant_keys = [
             'atom_types', 'box_edges', 'number_boxes', 'num_boxes', 
             'box_arrangement', 'arrangement', 'overlap_percentage', 'overlap',
             'pbc', 'weighting_shape', 'weighted', 'bary_mid_twoside_weight', 'fit_outer_box'
         ]
-        
         settings_tuple = []
         for k in sorted(relevant_keys):
             val = settings.get(k)
-            if isinstance(val, list):
-                val = tuple(sorted(val)) if k == 'atom_types' else tuple(val)
+            if isinstance(val, list): val = tuple(sorted(val)) if k == 'atom_types' else tuple(val)
             settings_tuple.append((k, val))
-            
         z_ranges_tuple = tuple(sorted(z_ranges)) if z_ranges else None
         
-        return (
-            id(df_initial), 
-            id(df_curr), 
-            tuple(settings_tuple), 
-            slice_axis, 
-            observe_axis,
-            z_col, 
-            z_ref, 
-            z_ranges_tuple, 
-            id(df_final) if df_final is not None else None
-        )
+        return (id(df_initial), id(df_curr), tuple(settings_tuple), slice_axis, observe_axis,
+                z_col, z_ref, z_ranges_tuple, id(df_final) if df_final is not None else None)
 
     def _slice_disp_single_domain(self, df_initial, df_curr, settings, slice_axis, observe_axis, box_curr,
                         z_col=None, z_ref='Current', z_ranges=None, df_final=None, box_init=None):
-        """
-        Implements the slice_disp_mean logic with full triclinic (shear) support.
-        Separates Geometry Definition (from Atom Types) and Population Filtering (from Z/Property).
-        """
-        
-        # Check cache first
         cache_key = self._get_slice_cache_key(df_initial, df_curr, settings, slice_axis, observe_axis, 
                                               z_col, z_ref, z_ranges, df_final)
-        
         if cache_key in self.slicing_results:
             cached = self.slicing_results[cache_key]
             return cached.copy() if cached is not None else None
 
-        # --- 1. GEOMETRY PHASE: Filter by Atom Type ---
-        # This defines the "stable" domain and box boundaries.
         atom_types = settings.get('atom_types', [])
-        
-        # Prepare Geometry DataFrames (filtered by Type only)
         if atom_types:
             df_init_geo = df_initial[df_initial['type'].isin(atom_types)].copy()
             df_curr_geo = df_curr[df_curr['id'].isin(df_init_geo['id'])].copy()
-            
-            # Reindex for alignment
             df_init_geo = df_init_geo.set_index('id').sort_index()
             df_curr_geo = df_curr_geo.set_index('id').sort_index()
-            
             common_ids = df_init_geo.index.intersection(df_curr_geo.index)
-            df_init_geo = df_init_geo.loc[common_ids]
-            df_curr_geo = df_curr_geo.loc[common_ids]
+            df_init_geo, df_curr_geo = df_init_geo.loc[common_ids], df_curr_geo.loc[common_ids]
         else:
-            df_init_geo = df_initial.set_index('id').sort_index()
-            df_curr_geo = df_curr.set_index('id').sort_index()
+            df_init_geo, df_curr_geo = df_initial.set_index('id').sort_index(), df_curr.set_index('id').sort_index()
 
         if df_init_geo.empty:
             self.slicing_results[cache_key] = None
             return None
 
-        # --- 2. POPULATION PHASE: Property (Z) Filtering ---
-        # This reduces the number of particles but MUST NOT change the box definitions.
-        
-        df_init_pop = df_init_geo
-        df_curr_pop = df_curr_geo
-
+        df_init_pop, df_curr_pop = df_init_geo, df_curr_geo
         if z_col and z_col != "No Z-Filter" and z_ranges:
             z_vals = None
-            filter_ids = None
-
             if z_ref == 'Initial':
-                # Filter based on values in the Initial Frame (Geometry subset)
-                if z_col in df_init_geo.columns:
-                    z_vals = df_init_geo[z_col].values
-                    
+                if z_col in df_init_geo.columns: z_vals = df_init_geo[z_col].values
             elif z_ref == 'Final' or (isinstance(z_ref, str) and z_ref.startswith("Step ")):
-                # Filter based on values in a fixed reference frame (Final or Custom Step)
                 if df_final is not None:
-                     # Join fixed frame on the existing Geometry IDs
                      df_final_sub = df_final[df_final['id'].isin(df_init_geo.index)]
                      df_final_sub = df_final_sub.set_index('id').reindex(df_init_geo.index)
-                     if z_col in df_final_sub.columns:
-                        z_vals = df_final_sub[z_col].values
-                        
+                     if z_col in df_final_sub.columns: z_vals = df_final_sub[z_col].values
             else: # Current
-                # Filter based on values in the Current Frame (Geometry subset)
-                if z_col in df_curr_geo.columns:
-                    z_vals = df_curr_geo[z_col].values
+                if z_col in df_curr_geo.columns: z_vals = df_curr_geo[z_col].values
             
-            # Apply Filter Mask
             if z_vals is not None:
                 mask = np.zeros(len(z_vals), dtype=bool)
-                for (z_min, z_max) in z_ranges:
-                    mask |= (z_vals >= z_min) & (z_vals <= z_max)
-                
-                df_init_pop = df_init_geo[mask]
-                df_curr_pop = df_curr_geo[mask]
+                for (z_min, z_max) in z_ranges: mask |= (z_vals >= z_min) & (z_vals <= z_max)
+                df_init_pop, df_curr_pop = df_init_geo[mask], df_curr_geo[mask]
 
         if df_init_pop.empty:
             self.slicing_results[cache_key] = None
             return None
 
-        # --- 3. PREPARE COORDINATES (Population) ---
-        # We use the filtered POPULATION for displacement calculation
-        def get_all_coords(df):
-            return df['x'].values, df['y'].values, df['z'].values
-
-        xi, yi, zi = get_all_coords(df_init_pop)
-        xc, yc, zc = get_all_coords(df_curr_pop)
-        
-        coords_i = {'x': xi, 'y': yi, 'z': zi}
-        coords_c = {'x': xc, 'y': yc, 'z': zc}
-        
-        # Population arrays for calculation
-        pos_slice_init_pop = coords_i[slice_axis.lower()]
-        pos_slice_curr_pop = coords_c[slice_axis.lower()]
-        
-        # --- 4. BOX SETUP (Geometry) ---
-        # We use the UNFILTERED GEOMETRY (df_init_geo) to define auto-bounds if needed
+        pos_slice_init_pop = df_init_pop[slice_axis.lower()].values
+        pos_slice_curr_pop = df_curr_pop[slice_axis.lower()].values
         
         box_edges = settings.get('box_edges', float('inf'))
         num_boxes = settings.get('number_boxes', settings.get('num_boxes', 10))
         arrangement = settings.get('box_arrangement', settings.get('arrangement', 'inside'))
         overlap_pct = settings.get('overlap_percentage', settings.get('overlap', 0.0))
         pbc_active = settings.get('pbc', False)
-        
-        # Robust Helper to extract Global Orthogonal Lengths and Tilts
-        def get_box_params(box):
-            if not box: return {}
-            
-            if len(box) >= 4:
-                xy, xz, yz = box[3][0], box[3][1], box[3][2]
-                xb, yb, zb = box[0], box[1], box[2]
-            else:
-                xy = box[0][2] if len(box[0]) > 2 else 0.0
-                xz = box[1][2] if len(box[1]) > 2 else 0.0
-                yz = box[2][2] if len(box[2]) > 2 else 0.0
-                xb, yb, zb = box[0], box[1], box[2]
-
-            lz = zb[1] - zb[0]
-            zlo = zb[0]
-            
-            ly = (yb[1] - yb[0]) - abs(yz)
-            ylo = yb[0] - min(0.0, yz)
-            
-            mx = min(0.0, xy, xz, xy+xz)
-            gx = max(0.0, xy, xz, xy+xz)
-            lx = (xb[1] - xb[0]) - (gx - mx)
-            xlo = xb[0] - mx
-            
-            return {'lx':lx, 'ly':ly, 'lz':lz, 
-                    'xy':xy, 'xz':xz, 'yz':yz, 
-                    'xlo':xlo, 'ylo':ylo, 'zlo':zlo}
-
-        pi = get_box_params(box_init)
-        pc = get_box_params(box_curr)
-
-        # Pre-calculate Orthogonal Lengths and Tilt shifts
-        s_ax = slice_axis.lower()
-        
-        shift_vec_i = np.array([0.,0.,0.])
-        shift_vec_c = np.array([0.,0.,0.])
-        
-        if s_ax == 'x':
-            shift_vec_i = np.array([pi['lx'], 0.0, 0.0])
-            shift_vec_c = np.array([pc['lx'], 0.0, 0.0])
-        elif s_ax == 'y':
-            shift_vec_i = np.array([pi['xy'], pi['ly'], 0.0])
-            shift_vec_c = np.array([pc['xy'], pc['ly'], 0.0])
-        elif s_ax == 'z':
-            shift_vec_i = np.array([pi['xz'], pi['yz'], pi['lz']])
-            shift_vec_c = np.array([pc['xz'], pc['yz'], pc['lz']])
-            
-        L_slice_init = pi.get(f'l{s_ax}', 1.0)
-        
-        # Determine Box Boundaries (Initial)
-        if (box_edges == float('inf') or box_edges is None):
-            # Use GEOMETRY data (unfiltered by property) to find bounds
-            pos_slice_geo = df_init_geo[slice_axis].values
-            
-            if pbc_active and L_slice_init > 0:
-                s_idx = {'x':0, 'y':1, 'z':2}.get(slice_axis.lower())
-                box_edges = (box_init[s_idx][0], box_init[s_idx][1])
-            else:
-                box_edges = (np.min(pos_slice_geo), np.max(pos_slice_geo))
-        
-        # Handle partially None box_edges (e.g. (None, 50.0) from splits)
-        if isinstance(box_edges, (list, tuple)) and (box_edges[0] is None or box_edges[1] is None):
-            pos_slice_geo = df_init_geo[slice_axis].values
-            if pbc_active and L_slice_init > 0:
-                s_idx = {'x':0, 'y':1, 'z':2}.get(slice_axis.lower())
-                fallback = (box_init[s_idx][0], box_init[s_idx][1])
-            else:
-                fallback = (np.min(pos_slice_geo), np.max(pos_slice_geo))
-            
-            be_list = list(box_edges)
-            if be_list[0] is None: be_list[0] = fallback[0]
-            if be_list[1] is None: be_list[1] = fallback[1]
-            box_edges = tuple(be_list)
-
-        box_len_total = box_edges[1] - box_edges[0]
-        target_width = box_len_total / num_boxes if num_boxes > 0 else box_len_total
-        
-        # Generate Box Centers
-        pairs = [] 
-        if arrangement == 'combined':
-            c1 = np.linspace(box_edges[0] + target_width/2, box_edges[1] - target_width/2, num_boxes)
-            for c in c1: pairs.append({'c': c, 'l': target_width, 'type': 'inside'})
-            c2 = np.linspace(box_edges[0], box_edges[1], num_boxes + 1)
-            for c in c2: pairs.append({'c': c, 'l': target_width, 'type': 'protrude'})
-            pairs.sort(key=lambda x: x['c'])
-        elif arrangement == 'protrude':
-            c2 = np.linspace(box_edges[0], box_edges[1], num_boxes + 1)
-            for c in c2: pairs.append({'c': c, 'l': target_width, 'type': 'protrude'})
-        else: # inside
-            c1 = np.linspace(box_edges[0] + target_width/2, box_edges[1] - target_width/2, num_boxes)
-            for c in c1: pairs.append({'c': c, 'l': target_width, 'type': 'inside'})
-                                               
-        results = []
-        weight_shape = settings.get('weighting_shape', 1)
+        use_weighted = settings.get('weighted', False)
+        weight_shape = settings.get('weighting_shape', 1.0)
         fit_outer = settings.get('fit_outer_box', False)
         bary_mode = settings.get('bary_mid_twoside_weight', False)
-        use_weighted = settings.get('weighted', False) 
 
-        # --- 5. CALCULATION LOOP (Population) ---
-        for p_data in pairs:
-            center, curr_len, box_type = p_data['c'], p_data['l'], p_data['type']
-            half_width = (curr_len / 2) * (1 + overlap_pct / 100.0)
-            b_min, b_max = center - half_width, center + half_width
-            
-            # Filter Main Particles (using POPULATION data)
-            mask_main = (pos_slice_init_pop >= b_min) & (pos_slice_init_pop <= b_max)
-            
-            # Accumulate full coordinates for bias calculation
-            list_xi, list_yi, list_zi = [xi[mask_main]], [yi[mask_main]], [zi[mask_main]]
-            list_xc, list_yc, list_zc = [xc[mask_main]], [yc[mask_main]], [zc[mask_main]]
-            list_slice_for_binning = [pos_slice_init_pop[mask_main]]
-            list_slice_curr = [pos_slice_curr_pop[mask_main]]
+        def get_box_params(box):
+            if not box: return {}
+            if len(box) >= 4: xy, xz, yz = box[3][0], box[3][1], box[3][2]
+            else: xy, xz, yz = (box[0][2] if len(box[0]) > 2 else 0.0), (box[1][2] if len(box[1]) > 2 else 0.0), (box[2][2] if len(box[2]) > 2 else 0.0)
+            xb, yb, zb = box[0], box[1], box[2]
+            lz, zlo = zb[1] - zb[0], zb[0]
+            ly, ylo = (yb[1] - yb[0]) - abs(yz), yb[0] - min(0.0, yz)
+            mx, gx = min(0.0, xy, xz, xy+xz), max(0.0, xy, xz, xy+xz)
+            lx, xlo = (xb[1] - xb[0]) - (gx - mx), xb[0] - mx
+            return {'lx':lx, 'ly':ly, 'lz':lz, 'xy':xy, 'xz':xz, 'yz':yz, 'xlo':xlo, 'ylo':ylo, 'zlo':zlo}
 
-            # 4b. PBC Ghost Particles
-            if pbc_active and L_slice_init > 0 and box_type == 'protrude':
+        pi, pc = get_box_params(box_init), get_box_params(box_curr)
+        s_ax = slice_axis.lower()
+        if s_ax == 'x': shift_vec_i, shift_vec_c = np.array([pi['lx'], 0.0, 0.0]), np.array([pc['lx'], 0.0, 0.0])
+        elif s_ax == 'y': shift_vec_i, shift_vec_c = np.array([pi['xy'], pi['ly'], 0.0]), np.array([pc['xy'], pc['ly'], 0.0])
+        else: shift_vec_i, shift_vec_c = np.array([pi['xz'], pi['yz'], pi['lz']]), np.array([pc['xz'], pc['yz'], pc['lz']])
+
+        if isinstance(box_edges, (list, tuple)) and len(box_edges) == 2:
+            b_min, b_max = box_edges
+            if b_min is None: b_min = np.min(pos_slice_init_pop)
+            if b_max is None: b_max = np.max(pos_slice_init_pop)
+        else: b_min, b_max = np.min(pos_slice_init_pop), np.max(pos_slice_init_pop)
+
+        L_total = b_max - b_min
+        if arrangement == 'protrude':
+            L_box_no_ov = L_total / num_boxes if num_boxes > 1 else L_total
+            b_min -= L_box_no_ov / 2
+            b_max += L_box_no_ov / 2
+            L_total = b_max - b_min
+        
+        L_box_no_ov = L_total / num_boxes
+        L_box = L_box_no_ov * (1 + overlap_pct / 100.0)
+        
+        results = []
+        for k in range(num_boxes):
+            center = b_min + (k + 0.5) * L_box_no_ov
+            box_min, box_max = center - L_box/2, center + L_box/2
+            mask_main = (pos_slice_init_pop >= box_min) & (pos_slice_init_pop <= box_max)
+            if not np.any(mask_main): continue
+
+            list_xi, list_yi, list_zi = [df_init_pop['x'].values[mask_main]], [df_init_pop['y'].values[mask_main]], [df_init_pop['z'].values[mask_main]]
+            list_xc, list_yc, list_zc = [df_curr_pop['x'].values[mask_main]], [df_curr_pop['y'].values[mask_main]], [df_curr_pop['z'].values[mask_main]]
+            list_slice_for_binning, list_slice_curr = [pos_slice_init_pop[mask_main]], [pos_slice_curr_pop[mask_main]]
+
+            if pbc_active:
+                L_slice_init = pi.get(f'l{s_ax}', 1.0)
                 ghost_pos_L = pos_slice_init_pop - L_slice_init
-                mask_gL = (ghost_pos_L >= b_min) & (ghost_pos_L <= b_max)
+                mask_gL = (ghost_pos_L >= box_min) & (ghost_pos_L <= box_max)
                 if np.any(mask_gL):
                     list_slice_for_binning.append(ghost_pos_L[mask_gL])
-                    # Shift current slice position using shift vector of current box
                     s_idx = {'x':0, 'y':1, 'z':2}[s_ax]
-                    L_slice_curr_val = shift_vec_c[s_idx]
-                    list_slice_curr.append(pos_slice_curr_pop[mask_gL] - L_slice_curr_val)
-                    
-                    list_xi.append(xi[mask_gL] - shift_vec_i[0])
-                    list_yi.append(yi[mask_gL] - shift_vec_i[1])
-                    list_zi.append(zi[mask_gL] - shift_vec_i[2])
-                    
-                    list_xc.append(xc[mask_gL] - shift_vec_c[0])
-                    list_yc.append(yc[mask_gL] - shift_vec_c[1])
-                    list_zc.append(zc[mask_gL] - shift_vec_c[2])
+                    list_slice_curr.append(pos_slice_curr_pop[mask_gL] - shift_vec_c[s_idx])
+                    for i, axis in enumerate(['x','y','z']):
+                        list_xi.append(df_init_pop[axis].values[mask_gL] - shift_vec_i[i])
+                        list_xc.append(df_curr_pop[axis].values[mask_gL] - shift_vec_c[i])
 
                 ghost_pos_R = pos_slice_init_pop + L_slice_init
-                mask_gR = (ghost_pos_R >= b_min) & (ghost_pos_R <= b_max)
+                mask_gR = (ghost_pos_R >= box_min) & (ghost_pos_R <= box_max)
                 if np.any(mask_gR):
                     list_slice_for_binning.append(ghost_pos_R[mask_gR])
                     s_idx = {'x':0, 'y':1, 'z':2}[s_ax]
-                    L_slice_curr_val = shift_vec_c[s_idx]
-                    list_slice_curr.append(pos_slice_curr_pop[mask_gR] + L_slice_curr_val)
-                    
-                    list_xi.append(xi[mask_gR] + shift_vec_i[0])
-                    list_yi.append(yi[mask_gR] + shift_vec_i[1])
-                    list_zi.append(zi[mask_gR] + shift_vec_i[2])
-                    
-                    list_xc.append(xc[mask_gR] + shift_vec_c[0])
-                    list_yc.append(yc[mask_gR] + shift_vec_c[1])
-                    list_zc.append(zc[mask_gR] + shift_vec_c[2])
+                    list_slice_curr.append(pos_slice_curr_pop[mask_gR] + shift_vec_c[s_idx])
+                    for i, axis in enumerate(['x','y','z']):
+                        list_xi.append(df_init_pop[axis].values[mask_gR] + shift_vec_i[i])
+                        list_xc.append(df_curr_pop[axis].values[mask_gR] + shift_vec_c[i])
 
-            # Concatenate
             all_xi, all_yi, all_zi = np.concatenate(list_xi), np.concatenate(list_yi), np.concatenate(list_zi)
             all_xc, all_yc, all_zc = np.concatenate(list_xc), np.concatenate(list_yc), np.concatenate(list_zc)
-            p_pos_for_w = np.concatenate(list_slice_for_binning)
-            p_pos_curr_for_cross = np.concatenate(list_slice_curr)
+            p_pos_for_w, p_pos_curr_for_cross = np.concatenate(list_slice_for_binning), np.concatenate(list_slice_curr)
             
-            if len(all_xi) == 0: continue
-
-            # Extract Observation Axis Arrays
-            obs_map_i = {'x':all_xi, 'y':all_yi, 'z':all_zi}
-            obs_map_c = {'x':all_xc, 'y':all_yc, 'z':all_zc}
-            p_init = obs_map_i[observe_axis.lower()]
-            p_curr = obs_map_c[observe_axis.lower()]
-
-            # --- Displacement Calculation with Full 3D Affine Bias ---
+            obs_map_i, obs_map_c = {'x':all_xi, 'y':all_yi, 'z':all_zi}, {'x':all_xc, 'y':all_yc, 'z':all_zc}
+            p_init, p_curr = obs_map_i[observe_axis.lower()], obs_map_c[observe_axis.lower()]
             p_disp = p_curr - p_init
             
-            # Periodicity length for Observation Axis (for MIC)
             o_ax = observe_axis.lower()
             L_obs_curr = pc.get(f'l{o_ax}', 1.0)
-            
             if pbc_active and L_obs_curr > 0:
-                # 1. Crossing Correction (Slice Axis Wrap)
-                s_idx = {'x':0, 'y':1, 'z':2}[s_ax]
-                L_s_curr_val = shift_vec_c[s_idx]
-                
-                # Determine tilt_curr (shift in O when S wraps)
-                o_idx = {'x':0, 'y':1, 'z':2}[o_ax]
-                tilt_curr = shift_vec_c[o_idx]
-                tilt_init = shift_vec_i[o_idx]
-
+                s_idx, o_idx = {'x':0, 'y':1, 'z':2}[s_ax], {'x':0, 'y':1, 'z':2}[o_ax]
+                L_s_curr_val, tilt_curr = shift_vec_c[s_idx], shift_vec_c[o_idx]
                 if L_s_curr_val > 0:
-                    d_slice = p_pos_curr_for_cross - p_pos_for_w
-                    crossings = np.round(d_slice / L_s_curr_val)
-                    if np.any(crossings != 0) and tilt_curr != 0:
-                        p_disp -= crossings * tilt_curr
-
-                # 2. Affine-Biased MIC (Observation Axis Wrap)
+                    crossings = np.round((p_pos_curr_for_cross - p_pos_for_w) / L_s_curr_val)
+                    if np.any(crossings != 0) and tilt_curr != 0: p_disp -= crossings * tilt_curr
                 w_rel = (all_zi - pi['zlo']) / pi['lz']
                 v_rel = (all_yi - (pi['ylo'] + w_rel * pi['yz'])) / pi['ly']
                 u_rel = (all_xi - (pi['xlo'] + v_rel * pi['xy'] + w_rel * pi['xz'])) / pi['lx']
-                
-                # Change in box parameters
-                d_lx, d_ly, d_lz = pc['lx']-pi['lx'], pc['ly']-pi['ly'], pc['lz']-pi['lz']
-                d_xy, d_xz, d_yz = pc['xy']-pi['xy'], pc['xz']-pi['xz'], pc['yz']-pi['yz']
-                
-                d_bias = np.zeros_like(p_disp)
-                if o_ax == 'x':
-                    d_bias = u_rel * d_lx + v_rel * d_xy + w_rel * d_xz
-                elif o_ax == 'y':
-                    d_bias = v_rel * d_ly + w_rel * d_yz
-                elif o_ax == 'z':
-                    d_bias = w_rel * d_lz
-                
-                # Use strict Orthogonal Periodicity Length for MIC
+                d_bias = (u_rel * (pc['lx']-pi['lx']) + v_rel * (pc['xy']-pi['xy']) + w_rel * (pc['xz']-pi['xz'])) if o_ax == 'x' else (v_rel * (pc['ly']-pi['ly']) + w_rel * (pc['yz']-pi['yz'])) if o_ax == 'y' else (w_rel * (pc['lz']-pi['lz']))
                 p_disp -= L_obs_curr * np.round((p_disp - d_bias) / L_obs_curr)
 
-            # Weighting and Stats
-            eff_center = (np.min(pos_slice_init_pop[mask_main]) + np.max(pos_slice_init_pop[mask_main])) / 2 if (fit_outer and len(mask_main) > 0 and np.any(mask_main)) else center
-                
-            w = None
+            eff_center = (np.min(pos_slice_init_pop[mask_main]) + np.max(pos_slice_init_pop[mask_main])) / 2 if (fit_outer and np.any(mask_main)) else center
             if not bary_mode:
-                sigma = (b_max - b_min) / 5.0
-                if sigma == 0: w = np.ones_like(p_init)
-                else:
-                    dist = p_pos_for_w - eff_center
-                    w = np.exp(-(dist**2)/(2*sigma**2)) ** weight_shape
+                sigma = (box_max - box_min) / 5.0
+                w = np.exp(-((p_pos_for_w - eff_center)**2)/(2*sigma**2)) ** weight_shape if sigma > 0 else np.ones_like(p_init)
             else:
                 bary_center = np.mean(p_pos_for_w)
-                w = np.zeros_like(p_pos_for_w)
                 mask_left, mask_right = p_pos_for_w <= bary_center, p_pos_for_w > bary_center
-                sigma_left, sigma_right = (bary_center - b_min)/2.5, (b_max - bary_center)/2.5
-                if sigma_left > 0: w[mask_left] = np.exp(-((p_pos_for_w[mask_left]-bary_center)**2)/(2*sigma_left**2))**weight_shape
-                else: w[mask_left] = 1.0
-                if sigma_right > 0: w[mask_right] = np.exp(-((p_pos_for_w[mask_right]-bary_center)**2)/(2*sigma_right**2))**weight_shape
-                else: w[mask_right] = 1.0
+                sigma_l, sigma_r = (bary_center - box_min)/2.5, (box_max - bary_center)/2.5
+                w = np.zeros_like(p_pos_for_w)
+                w[mask_left] = np.exp(-((p_pos_for_w[mask_left]-bary_center)**2)/(2*sigma_l**2))**weight_shape if sigma_l > 0 else 1.0
+                w[mask_right] = np.exp(-((p_pos_for_w[mask_right]-bary_center)**2)/(2*sigma_r**2))**weight_shape if sigma_r > 0 else 1.0
                 eff_center = bary_center
             
             if not use_weighted: w = np.ones_like(p_init)
-            
             if (sum_w_total := np.sum(w)) == 0: continue
-
             n_main = len(list_slice_for_binning[0])
-            sum_w_display = np.sum(w[:n_main])
             
             if use_weighted:
                 mean_disp = np.average(p_disp, weights=w)
                 variance = np.average((p_disp - mean_disp)**2, weights=w)
             else:
-                mean_disp = np.mean(p_disp)
-                variance = np.var(p_disp)
+                mean_disp, variance = np.mean(p_disp), np.var(p_disp)
                 
-            results.append({
-                'center': eff_center,
-                'mean_disp': mean_disp,
-                'std_dev': np.sqrt(variance),
-                'count': n_main,
-                'sum_weights': sum_w_display
-            })
+            results.append({'center': eff_center, 'mean_disp': mean_disp, 'std_dev': np.sqrt(variance), 'count': n_main, 'sum_weights': np.sum(w[:n_main])})
         
         final_df = pd.DataFrame(results)
         self.slicing_results[cache_key] = final_df
         return final_df
 
     def calculate_strain_evolution_cached(self, domains, timesteps, study, system, slice_axis, observe_axis, options):
-        """
-        Pre-computes strain and target strain for ALL timesteps.
-        Uses an internal cache to skip recalculating domains that haven't changed.
-        """
-        # 1. Expand domains into segments (virtual domains)
+        """Pre-computes strain using a 3-tier cache: RAM -> Persistent .idx Library -> Combined Calculation."""
+        parser = self.get_parser(study, system)
+        if not parser or not timesteps: return None
+
         virtual_domains = []
         for d_idx, domain in enumerate(domains):
             if domain.get('is_optimal_line'): continue
-            
             d_base = domain.copy()
-            d_base['_source_index'] = d_idx
-            # Identity key for matching after row swaps
-            parent_identity = (domain.get('name'), tuple(domain.get('splits', [])), tuple(domain.get('active_segments', [])))
-            d_base['_parent_identity'] = parent_identity
-
-            splits = domain.get('splits', [])
-            active_segments = domain.get('active_segments', [])
-            
-            if not splits:
-                virtual_domains.append( (d_base, domain.get('name', f"Domain {d_idx}")) )
+            d_base['_source_index'], d_base['_parent_identity'] = d_idx, (domain.get('name'), tuple(domain.get('splits', [])), tuple(domain.get('active_segments', [])))
+            splits, active_segments = domain.get('splits', []), domain.get('active_segments', [])
+            if not splits: virtual_domains.append( (d_base, domain.get('name', f"Domain {d_idx}")) )
             else:
                 sorted_splits = sorted(splits)
-                segments = []
-                segments.append((None, sorted_splits[0]))
-                for i in range(len(sorted_splits) - 1):
-                    segments.append((sorted_splits[i], sorted_splits[i+1]))
-                segments.append((sorted_splits[-1], None))
-                
-                if len(active_segments) < len(segments):
-                    active_segments.extend([True] * (len(segments) - len(active_segments)))
-                
-                active_count = sum(active_segments)
+                segments = [(None, sorted_splits[0])] + [(sorted_splits[i], sorted_splits[i+1]) for i in range(len(sorted_splits)-1)] + [(sorted_splits[-1], None)]
+                if len(active_segments) < len(segments): active_segments.extend([True]*(len(segments)-len(active_segments)))
                 active_rank = 0
                 for i, (seg_min, seg_max) in enumerate(segments):
                     if active_segments[i]:
                         active_rank += 1
                         d_new = d_base.copy()
-                        d_new['box_edges'] = (seg_min, seg_max)
-                        d_new['_is_split'] = True
-                        d_new['_split_rank'] = active_rank
-                        # d_new already has _parent_identity from d_base.copy()
-                        
+                        d_new['box_edges'], d_new['_is_split'], d_new['_split_rank'] = (seg_min, seg_max), True, active_rank
                         base_name = domain.get('name', f"Domain {d_idx+1}")
-                        name = f"{base_name}{active_rank}" if active_count > 1 else base_name
-                        virtual_domains.append( (d_new, name) )
+                        virtual_domains.append( (d_new, f"{base_name}{active_rank}" if sum(active_segments) > 1 else base_name) )
 
-        if not timesteps: return None
         df_init, box_init = self.load_frame(study, system, timesteps[0])
         if df_init is None: return None
+        any_domain_pbc = any(d.get('pbc', False) for d in domains if not d.get('is_optimal_line'))
 
-        # Check PBC (Logic from DSDController)
-        any_domain_pbc = False
-        for d in domains:
-             if d.get('is_optimal_line'): continue
-             if d.get('pbc', False): 
-                 any_domain_pbc = True
-                 break
+        def get_mem_id(v_domain):
+            return (study, system, slice_axis, observe_axis, tuple(v_domain.get('box_edges', (None, None))), tuple(sorted(v_domain.get('atom_types', []))), v_domain.get('pbc', False), v_domain.get('weighted', False), v_domain.get('bary_mid_twoside_weight', False), options.get('z_filter_col'), options.get('z_filter_ref'), tuple(sorted(options.get('z_ranges'))) if options.get('z_ranges') else None)
 
-        # 2. Identify missing data vs cached data
-        def get_calc_identity(v_domain):
-            # All parameters that affect the numerical strain calculation
-            return (
-                study, system, slice_axis, observe_axis,
-                tuple(v_domain.get('box_edges', (None, None))),
-                tuple(sorted(v_domain.get('atom_types', []))),
-                v_domain.get('pbc', False),
-                v_domain.get('weighted', False),
-                v_domain.get('bary_mid_twoside_weight', False),
-                options.get('z_filter_col'),
-                options.get('z_filter_ref'),
-                tuple(sorted(options.get('z_ranges'))) if options.get('z_ranges') else None
-            )
-
-        # Map each virtual domain to its cache key and check if we have it
-        domain_tasks = [] # (index_in_results, v_domain, identity_key)
-        
-        # Identity depends on the ACTUAL list of timesteps (specifically the first one)
-        initial_step = timesteps[0] if timesteps else None
-
-        # Pre-allocate results with cached data where available
-        final_domains_data = []
+        final_domains_data, domain_tasks, initial_step = [], [], timesteps[0]
         for i, (v_domain, name) in enumerate(virtual_domains):
-            ident = (get_calc_identity(v_domain), initial_step)
-            cached = self.strain_evolution_cache.get(ident)
-            
+            mem_id, p_hash = (get_mem_id(v_domain), initial_step), self.get_domain_hash(v_domain, timesteps, slice_axis, observe_axis, options)
             d_res = {
-                'name': name,
-                'strains': [],
-                'stds': [],
-                'min_x': [], 'max_x': [],
-                'y_at_min_x': [], 'y_at_max_x': [],
-                'color': v_domain.get('color', 'blue'),
-                'style': v_domain.get('style', '-'),
+                'name': name, 'strains': [], 'stds': [],
+                'min_x': [], 'max_x': [], 'y_at_min_x': [], 'y_at_max_x': [],
+                'min_y': [], 'max_y': [],
+                'color': v_domain.get('color', 'blue'), 'style': v_domain.get('style', '-'),
                 'source_index': v_domain.get('_source_index'),
                 'parent_identity': v_domain.get('_parent_identity')
             }
             
-            if cached and len(cached['strains']) == len(timesteps):
-                d_res['strains'] = cached['strains']
-                d_res['stds'] = cached['stds']
-                # Retrieve new fields with fallback for old cache entries
-                d_res['min_x'] = cached.get('min_x', [np.nan]*len(timesteps))
-                d_res['max_x'] = cached.get('max_x', [np.nan]*len(timesteps))
-                d_res['y_at_min_x'] = cached.get('y_at_min_x', [np.nan]*len(timesteps))
-                d_res['y_at_max_x'] = cached.get('y_at_max_x', [np.nan]*len(timesteps))
-            else:
-                domain_tasks.append((i, v_domain, ident))
             
+            cached_mem = self.strain_evolution_cache.get(mem_id)
+            if cached_mem and len(cached_mem['strains']) == len(timesteps): d_res.update(cached_mem)
+            else:
+                lib_entry = parser.results_library.get(p_hash)
+                if lib_entry and len(lib_entry['data']['strains']) == len(timesteps):
+                    d_res.update(lib_entry['data'])
+                    self.strain_evolution_cache[mem_id] = lib_entry['data']
+                else: domain_tasks.append((i, v_domain, mem_id, p_hash))
             final_domains_data.append(d_res)
 
-        # 3. Calculate Missing Data (Only if needed)
         if domain_tasks:
-            s_idx = {'x':0,'y':1,'z':2}.get(slice_axis.lower())
-            o_idx = {'x':0,'y':1,'z':2}.get(observe_axis.lower())
-
-            # We iterate timesteps ONCE and calculate all missing domains for that step
             for ts_idx, ts in enumerate(timesteps):
                 df_curr, box_curr = self.load_frame(study, system, ts)
                 if df_curr is None:
-                    for res_idx, _, _ in domain_tasks:
-                        final_domains_data[res_idx]['strains'].append(np.nan)
+                    for res_idx, _, _, _ in domain_tasks:
+                        for key in ['strains', 'min_x', 'max_x', 'y_at_min_x', 'y_at_max_x', 'min_y', 'max_y']: 
+                            final_domains_data[res_idx][key].append(np.nan)
                         final_domains_data[res_idx]['stds'].append(0.0)
-                        final_domains_data[res_idx]['min_x'].append(np.nan)
-                        final_domains_data[res_idx]['max_x'].append(np.nan)
-                        final_domains_data[res_idx]['y_at_min_x'].append(np.nan)
-                        final_domains_data[res_idx]['y_at_max_x'].append(np.nan)
                     continue
-
-                for res_idx, v_domain, _ in domain_tasks:
-                    res = self._slice_disp_single_domain(
-                        df_init, df_curr, v_domain, slice_axis, observe_axis, box_curr,
-                        z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'),
-                        z_ranges=options.get('z_ranges'), box_init=box_init
-                    )
-                    
-                    mean_strain, std_strain = np.nan, 0.0
-                    bx_min, bx_max, by_min, by_max = np.nan, np.nan, np.nan, np.nan
+                for res_idx, v_domain, _, _ in domain_tasks:
+                    res = self._slice_disp_single_domain(df_init, df_curr, v_domain, slice_axis, observe_axis, box_curr, z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'), z_ranges=options.get('z_ranges'), box_init=box_init)
+                    mean_strain, std_strain, bx_min, bx_max, by_min, by_max = np.nan, 0.0, np.nan, np.nan, np.nan, np.nan
+                    frame_min_y, frame_max_y = np.nan, np.nan
 
                     if res is not None and not res.empty:
-                        # ALWAYS use the connecting line (Secant) between min/max center
-                        centers = res['center'].values
-                        disps = res['mean_disp'].values
+                        centers, disps = res['center'].values, res['mean_disp'].values
+                        
+                        # Capture absolute frame bounds for later fast auto-scaling
+                        frame_min_y = np.min(disps)
+                        frame_max_y = np.max(disps)
+                        # Also include standard deviation in the bounds if available
+                        if 'std_dev' in res.columns:
+                            stds = res['std_dev'].values
+                            frame_min_y = min(frame_min_y, np.min(disps - stds))
+                            frame_max_y = max(frame_max_y, np.max(disps + stds))
+
                         if len(centers) >= 2:
                             idxs = np.argsort(centers)
-                            x_sorted = centers[idxs]
-                            y_sorted = disps[idxs]
-                            
-                            bx_min, bx_max = x_sorted[0], x_sorted[-1]
-                            by_min, by_max = y_sorted[0], y_sorted[-1]
-
-                            # Calculate local slopes (strains) between adjacent points
-                            dx = np.diff(x_sorted)
-                            dy = np.diff(y_sorted)
-                            
-                            with np.errstate(divide='ignore', invalid='ignore'):
-                                local_strains = dy / dx
-                            
+                            x_sorted, y_sorted = centers[idxs], disps[idxs]
+                            bx_min, bx_max, by_min, by_max = x_sorted[0], x_sorted[-1], y_sorted[0], y_sorted[-1]
+                            dx, dy = np.diff(x_sorted), np.diff(y_sorted)
+                            with np.errstate(divide='ignore', invalid='ignore'): local_strains = dy / dx
                             valid_slopes = local_strains[dx > 0]
                             if len(valid_slopes) > 0:
                                 mean_strain = np.mean(valid_slopes)
-                                
-                                # Match legacy MATLAB behavior: 
-                                # Strain STD represents the spatial fluctuation (scatter) of local slopes within the domain.
-                                if len(valid_slopes) > 1:
-                                    std_strain = np.std(valid_slopes, ddof=1) # Sample standard deviation
-                                else:
-                                    std_strain = 0.0
-                            else:
-                                mean_strain = 0.0
-                                std_strain = 0.0
-                        else:
-                            mean_strain = 0.0
-                            std_strain = 0.0
-                    
+                                std_strain = np.std(valid_slopes, ddof=1) if len(valid_slopes) > 1 else 0.0
+                            else: mean_strain, std_strain = 0.0, 0.0
+                        else: mean_strain, std_strain = 0.0, 0.0
                     final_domains_data[res_idx]['strains'].append(mean_strain)
                     final_domains_data[res_idx]['stds'].append(std_strain)
                     final_domains_data[res_idx]['min_x'].append(bx_min)
                     final_domains_data[res_idx]['max_x'].append(bx_max)
                     final_domains_data[res_idx]['y_at_min_x'].append(by_min)
                     final_domains_data[res_idx]['y_at_max_x'].append(by_max)
+                    final_domains_data[res_idx]['min_y'].append(frame_min_y)
+                    final_domains_data[res_idx]['max_y'].append(frame_max_y)
 
-            # Store new results in cache
-            for res_idx, _, ident in domain_tasks:
-                self.strain_evolution_cache[ident] = {
-                    'strains': final_domains_data[res_idx]['strains'],
-                    'stds': final_domains_data[res_idx]['stds'],
-                    'min_x': final_domains_data[res_idx]['min_x'],
-                    'max_x': final_domains_data[res_idx]['max_x'],
-                    'y_at_min_x': final_domains_data[res_idx]['y_at_min_x'],
-                    'y_at_max_x': final_domains_data[res_idx]['y_at_max_x']
-                }
+            for res_idx, _, mem_id, p_hash in domain_tasks:
+                res_data = {k: final_domains_data[res_idx][k] for k in ['strains', 'stds', 'min_x', 'max_x', 'y_at_min_x', 'y_at_max_x', 'min_y', 'max_y']}
+                self.strain_evolution_cache[mem_id] = res_data
+                parser.store_library_entry(p_hash, res_data, label=final_domains_data[res_idx]['name'])
 
-        # 4. Target Strain Calculation (Harmonized with Controller)
-        # Note: Target strain is global for the whole system state, so we always re-verify it?
-        # Actually, if we have at least one domain result for EACH timestep, we can calc it.
-        # Let's just calculate it for simplicity, it's cheap.
         target_strains = []
-        s_idx = {'x':0,'y':1,'z':2}.get(slice_axis.lower())
-        o_idx = {'x':0,'y':1,'z':2}.get(observe_axis.lower())
-
+        s_idx, o_idx = {'x':0,'y':1,'z':2}.get(slice_axis.lower()), {'x':0,'y':1,'z':2}.get(observe_axis.lower())
         for ts_idx, ts in enumerate(timesteps):
-            # We need the segments for THIS timestep to compute data-based target
             if any_domain_pbc:
                 _, box_curr = self.load_frame(study, system, ts)
                 target_strains.append(self._calculate_target_strain(box_init, box_curr, s_idx, o_idx))
             else:
-                # Non-PBC: Target strain is the slope of the line connecting 
-                # the global min and max X of the system (Optimal Line).
-                g_min_x, g_max_x = np.inf, -np.inf
-                val_at_min, val_at_max = np.nan, np.nan
-                
-                found_data = False
-                
-                # Check all domains for this timestep
+                g_min_x, g_max_x, val_at_min, val_at_max, found_data = np.inf, -np.inf, np.nan, np.nan, False
                 for d_data in final_domains_data:
-                    # Skip if no data for this timestep
                     if ts_idx >= len(d_data['min_x']): continue
-                    
-                    x_min = d_data['min_x'][ts_idx]
-                    x_max = d_data['max_x'][ts_idx]
-                    y_min = d_data['y_at_min_x'][ts_idx]
-                    y_max = d_data['y_at_max_x'][ts_idx]
-                    
+                    x_min, x_max, y_min, y_max = d_data['min_x'][ts_idx], d_data['max_x'][ts_idx], d_data['y_at_min_x'][ts_idx], d_data['y_at_max_x'][ts_idx]
                     if np.isnan(x_min) or np.isnan(x_max): continue
-                    
-                    if x_min < g_min_x:
-                        g_min_x = x_min
-                        val_at_min = y_min
-                        found_data = True
-                        
-                    if x_max > g_max_x:
-                        g_max_x = x_max
-                        val_at_max = y_max
-                        found_data = True
-                
-                if found_data and g_max_x > g_min_x:
-                     ts_val = (val_at_max - val_at_min) / (g_max_x - g_min_x)
-                     target_strains.append(ts_val)
-                else:
-                     target_strains.append(0.0)
+                    if x_min < g_min_x: g_min_x, val_at_min, found_data = x_min, y_min, True
+                    if x_max > g_max_x: g_max_x, val_at_max, found_data = x_max, y_max, True
+                target_strains.append((val_at_max - val_at_min) / (g_max_x - g_min_x) if (found_data and g_max_x > g_min_x) else 0.0)
 
-        return {
-            'timesteps': timesteps,
-            'target_strains': target_strains,
-            'domains': final_domains_data
-        }
-
-
+        return {'timesteps': timesteps, 'target_strains': target_strains, 'domains': final_domains_data}
 
     def _calculate_target_strain(self, box_init, box_curr, s_idx, o_idx):
-        if not box_init or not box_curr or s_idx is None or o_idx is None:
-            return 0.0
-        
+        if not box_init or not box_curr or s_idx is None or o_idx is None: return 0.0
         def get_box_params(box_data):
             xb, yb, zb = box_data[0], box_data[1], box_data[2]
-            xy = xb[2] if len(xb) > 2 else 0.0
-            xz = yb[2] if len(yb) > 2 else 0.0 
-            yz = zb[2] if len(zb) > 2 else 0.0
+            xy, xz, yz = (xb[2] if len(xb) > 2 else 0.0), (yb[2] if len(yb) > 2 else 0.0), (zb[2] if len(zb) > 2 else 0.0)
             zlo, lz = zb[0], zb[1] - zb[0]
             ylo, ly = yb[0] - min(0.0, yz), (yb[1] - yb[0]) - abs(yz)
-            mins_x = min(0.0, xy, xz, xy+xz)
-            maxs_x = max(0.0, xy, xz, xy+xz)
+            mins_x, maxs_x = min(0.0, xy, xz, xy+xz), max(0.0, xy, xz, xy+xz)
             xlo, lx = xb[0] - mins_x, (xb[1] - xb[0]) - (maxs_x - mins_x)
             return {'xlo': xlo, 'ylo': ylo, 'zlo': zlo, 'lx': max(1e-9, lx), 'ly': max(1e-9, ly), 'lz': max(1e-9, lz), 'xy': xy, 'xz': xz, 'yz': yz}
-
-        p_i = get_box_params(box_init)
-        p_c = get_box_params(box_curr)
-
+        p_i, p_c = get_box_params(box_init), get_box_params(box_curr)
         def calc_u(obj_idx, x_i, y_i, z_i):
             w0 = (z_i - p_i['zlo']) / p_i['lz']
             v0 = (y_i - (p_i['ylo'] + w0 * p_i['yz'])) / p_i['ly']
             u0 = (x_i - (p_i['xlo'] + v0 * p_i['xy'] + w0 * p_i['xz'])) / p_i['lx']
-            x_c = p_c['xlo'] + u0 * p_c['lx'] + v0 * p_c['xy'] + w0 * p_c['xz']
-            y_c = p_c['ylo'] + v0 * p_c['ly'] + w0 * p_c['yz']
-            z_c = p_c['zlo'] + w0 * p_c['lz']
-            return [x_c - x_i, y_c - y_i, z_c - z_i][obj_idx]
-
+            return [p_c['xlo'] + u0 * p_c['lx'] + v0 * p_c['xy'] + w0 * p_c['xz'] - x_i, p_c['ylo'] + v0 * p_c['ly'] + w0 * p_c['yz'] - y_i, p_c['zlo'] + w0 * p_c['lz'] - z_i][obj_idx]
         c_i = [p_i['xlo'] + 0.5*p_i['lx'], p_i['ylo'] + 0.5*p_i['ly'], p_i['zlo'] + 0.5*p_i['lz']]
         x1, x2 = box_init[s_idx][0], box_init[s_idx][1]
-        
-        pos1 = list(c_i); pos1[s_idx] = x1
-        pos2 = list(c_i); pos2[s_idx] = x2
-        u1, u2 = calc_u(o_idx, *pos1), calc_u(o_idx, *pos2)
-        
-        return (u2 - u1) / (x2 - x1) if x2 != x1 else 0.0
-
-    def _calculate_segment_strain(self, centers, displacements):
-        if len(centers) < 2:
-            return np.nan, 0.0
-        # pairwise slopes (MATLAB equivalent)
-        slopes = np.diff(displacements) / np.diff(centers)
-        return float(np.nanmean(slopes)), float(np.nanstd(slopes))
-
-    def calculate_full_evolution(self, domains, timesteps, study, system, slice_axis, observe_axis, options):
-        output = []
-        
-        # 1. Expand domains into "virtual domains" (splits)
-        virtual_domains = []
-        for d_idx, domain in enumerate(domains):
-            splits = domain.get('splits', [])
-            active_segments = domain.get('active_segments', [])
-            
-            if not splits:
-                virtual_domains.append( (domain, None) ) # None = full
-            else:
-                 # Same segment logic as above
-                 sorted_splits = sorted(splits)
-                 segments = []
-                 segments.append((None, sorted_splits[0]))
-                 for i in range(len(sorted_splits) - 1):
-                    segments.append((sorted_splits[i], sorted_splits[i+1]))
-                 segments.append((sorted_splits[-1], None))
-                 
-                 if len(active_segments) < len(segments):
-                    active_segments.extend([True] * (len(segments) - len(active_segments)))
-                 
-                 active_count = sum(active_segments)
-                 active_rank = 0
-                 for i, (seg_min, seg_max) in enumerate(segments):
-                     if active_segments[i]:
-                         active_rank += 1
-                         d_new = domain.copy()
-                         d_new['box_edges'] = (seg_min, seg_max)
-                         d_new['_is_split'] = True
-                         d_new['_split_rank'] = active_rank
-                         d_new['_has_multiple_active'] = (active_count > 1)
-                         virtual_domains.append( (d_new, domain.get('name', f"Domain {d_idx+1}")) )
-
-        # 2. Iterate
-        # Pre-load init
-        df_init, box_init = self.load_frame(study, system, timesteps[0])
-        if df_init is None: return []
-
-        strain_history = { i: [] for i in range(len(virtual_domains)) }
-        valid_steps = []
-        
-        for ts in timesteps:
-            df_curr, box_curr = self.load_frame(study, system, ts)
-            if df_curr is None: continue
-            
-            valid_steps.append(ts)
-            
-            for i, (v_domain, orig_name) in enumerate(virtual_domains):
-                # Resolve box edges if needed
-                edges = v_domain.get('box_edges')
-                if edges and (edges[0] is None or edges[1] is None):
-                    # Resolve using df_init
-                    atom_types = v_domain.get('atom_types', [])
-                    if atom_types:
-                        sub = df_init[df_init['type'].isin(atom_types)]
-                    else:
-                        sub = df_init
-                    if not sub.empty:
-                        d_min, d_max = sub[slice_axis].min(), sub[slice_axis].max()
-                        eff_min = edges[0] if edges[0] is not None else d_min
-                        eff_max = edges[1] if edges[1] is not None else d_max
-                        v_domain['box_edges'] = (eff_min, eff_max)
-                
-                # Slice
-                res = self._slice_disp_single_domain(
-                    df_init, df_curr, v_domain, slice_axis, observe_axis, box_curr,
-                    z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'),
-                    z_ranges=None, # Evolution usually no Z-filter? Or pass it?
-                    box_init=box_init
-                )
-                
-                mean_strain = np.nan
-                std_strain = 0.0
-                
-                if res is not None and not res.empty:
-                    derivs = self.calculate_derivatives(res)
-                    if derivs is not None and not derivs.empty:
-                        mean_strain = derivs['strain'].mean()
-                
-                strain_history[i].append(mean_strain)
-                if 'std' not in v_domain: v_domain['std'] = []
-                v_domain['std'].append(std_strain)
-
-        # 3. Output
-        for i, (v_domain, orig_name) in enumerate(virtual_domains):
-            # Name alignment with dialog/displacement numbering
-            if v_domain.get('_is_split') and v_domain.get('_has_multiple_active'):
-                name = f"{orig_name}{v_domain.get('_split_rank', 1)}"
-            else:
-                name = orig_name
-                
-            output.append({
-                'name': name,
-                'x': valid_steps,
-                'y': strain_history[i],
-                'y_err': v_domain.get('std', [0.0]*len(valid_steps)),
-                'color': v_domain.get('color', 'blue'),
-                'style': v_domain.get('style', '-')
-            })
-            
-        return output
+        pos1, pos2 = list(c_i), list(c_i)
+        pos1[s_idx], pos2[s_idx] = x1, x2
+        return (calc_u(o_idx, *pos2) - calc_u(o_idx, *pos1)) / (x2 - x1) if x2 != x1 else 0.0
 
     def calculate_derivatives(self, df_results):
         """
@@ -1036,3 +527,4 @@ class DSDDataManager:
         diff = actual_strain - target_strain
         mae = np.mean(np.abs(diff))
         return mae
+        

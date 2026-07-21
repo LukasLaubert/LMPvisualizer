@@ -7,15 +7,41 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
 class LogDataManager:
-    """Manages all simulation data using pandas."""
+    """Manages all simulation data using pandas. Supports Lazy Loading."""
     def __init__(self):
-        self.data: Dict[str, Dict[str, pd.DataFrame]] = {} # {study: {system: df}}
+        # Storage: {study: {system: pd.DataFrame OR List[Path]}}
+        self.data: Dict[str, Dict[str, any]] = {} 
         self.warnings = []
         self.available_columns = []
         self.custom_properties = {} # Name -> Formula
 
     def set_custom_properties(self, props: Dict[str, str]):
         self.custom_properties = props
+
+    def _ensure_system_loaded(self, study, system):
+        """Lazy loader: Parses log files into DataFrame only when accessed."""
+        if study not in self.data or system not in self.data[study]:
+            return None
+            
+        entry = self.data[study][system]
+        
+        # If already a DataFrame, return it
+        if isinstance(entry, pd.DataFrame):
+            return entry
+            
+        # If it's a list (of paths), parse it now
+        if isinstance(entry, list):
+            from log_parser import LogParser
+            df = LogParser.parse_multiple_logs(entry)
+            if df is not None and not df.empty:
+                self.data[study][system] = df # Replace list with DF (Memoization)
+                return df
+            else:
+                # Parsing failed? Keep as list or remove?
+                # Keep as list prevents repeated failed parse attempts if handled carefully,
+                # but returning None indicates failure.
+                return None
+        return None
 
     def _evaluate_custom_property(self, df: pd.DataFrame, property_name: str) -> Optional[pd.Series]:
         if property_name not in self.custom_properties:
@@ -103,13 +129,16 @@ class LogDataManager:
         return False
 
     def load_project_data(self, studies: Dict[str, List[str]], root_path, log_keywords: List[str] = None, file_map: Dict[str, Path] = None):
-        """Loads all log file data for the discovered studies and systems."""
+        """
+        Discovers log files and stores them for lazy loading.
+        Peeks at headers to populate available_columns immediately.
+        """
         from log_parser import LogParser # Local import
         self.data.clear()
         self.warnings = []
         self.available_columns = []
         
-        all_cols_ordered = []
+        all_cols_found = set()
         successful_keywords = set()
         if file_map is None:
             file_map = {}
@@ -141,19 +170,21 @@ class LogDataManager:
                         if kw in fpath.name:
                             successful_keywords.add(kw)
 
-                df = LogParser.parse_multiple_logs(log_files)
+                # STORE PATHS ONLY (Lazy Loading)
+                self.data[study_name][system_name] = log_files
+                
+                # Peek at the FIRST file to get columns
+                if log_files:
+                    cols = LogParser.peek_columns(log_files[0])
+                    for c in cols:
+                        all_cols_found.add(c)
 
-                if df is not None and not df.empty:
-                    self.data[study_name][system_name] = df
-                    for col in df.columns:
-                        if col not in all_cols_ordered:
-                            all_cols_ordered.append(col)
-                else:
-                    # Include specific filenames in the error message
-                    file_list = ", ".join([f.name for f in log_files])
-                    self.warnings.append(f"Could not parse thermo data for:\n{study_name}/{system_name} [{file_list}]")
+        # Update available columns global list
+        # Prioritize standard thermo keywords if present
+        sorted_cols = sorted(list(all_cols_found))
+        priority = ['Step', 'Temp', 'Press', 'PotEng', 'KinEng', 'TotEng', 'Volume', 'Density']
+        self.available_columns = [c for c in priority if c in sorted_cols] + [c for c in sorted_cols if c not in priority]
         
-        self.available_columns = all_cols_ordered
         return self.warnings, successful_keywords
 
     def get_study_names(self) -> List[str]:
@@ -184,7 +215,11 @@ class LogDataManager:
         if study not in self.data:
             return {}
         
-        lengths = {sys: len(df) for sys, df in self.data[study].items()}
+        lengths = {}
+        for sys in self.data[study].keys():
+            df = self._ensure_system_loaded(study, sys)
+            if df is not None:
+                lengths[sys] = len(df)
         
         if len(set(lengths.values())) > 1:
             return lengths # Inconsistent
@@ -203,7 +238,10 @@ class LogDataManager:
 
         if system != 'average':
             if system in self.data[study]:
-                df = self.data[study][system]
+                # Ensure loaded
+                df = self._ensure_system_loaded(study, system)
+                if df is None: return None
+                
                 # Use _get_series to support custom properties
                 x_data = self._get_series(df, x_col)
                 y_data = self._get_series(df, y_col)
@@ -213,6 +251,10 @@ class LogDataManager:
             return None
         
         # --- Averaging Logic ---
+        # Ensure all systems in study are loaded before averaging
+        for sys_name in self.data[study].keys():
+            self._ensure_system_loaded(study, sys_name)
+            
         study_dfs = self.data[study]
         
         dfs_to_process = []
@@ -220,15 +262,17 @@ class LogDataManager:
             truncate_len = user_choices.get('truncate_len')
             exclude_systems = user_choices.get('exclude', [])
             
-            for sys_name, df in study_dfs.items():
+            for sys_name, entry in study_dfs.items():
                 if sys_name in exclude_systems:
                     continue
-                if truncate_len is not None:
-                    dfs_to_process.append(df.iloc[:truncate_len])
-                else:
-                    dfs_to_process.append(df)
+                # entry should be DF now
+                if isinstance(entry, pd.DataFrame):
+                    if truncate_len is not None:
+                        dfs_to_process.append(entry.iloc[:truncate_len])
+                    else:
+                        dfs_to_process.append(entry)
         else:
-            dfs_to_process = list(study_dfs.values())
+            dfs_to_process = [df for df in study_dfs.values() if isinstance(df, pd.DataFrame)]
 
         if not dfs_to_process:
             return None

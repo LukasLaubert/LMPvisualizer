@@ -98,6 +98,36 @@ class LogParser:
         return studies, warnings, file_map
     
     @staticmethod
+    def peek_columns(logfile_path: Path) -> List[str]:
+        """
+        Reads the first chunk of the file to quickly extract column names.
+        Avoids parsing the entire dataset. 
+        """
+        try:
+            # Read first 100KB (increased from 10KB) to handle long preambles
+            with open(logfile_path, 'r') as f:
+                chunk = f.read(102400) 
+                
+            header_regex = re.compile(r'^\s*Step\s+', re.IGNORECASE)
+            columns = set()
+            
+            for line in chunk.splitlines():
+                if header_regex.match(line):
+                    cols = line.strip().split()
+                    columns.update(cols)
+                    
+            col_list = sorted(list(columns))
+            # Normalize 'Step' casing for list placement
+            step_variants = [c for c in col_list if c.lower() == 'step']
+            if step_variants:
+                for v in step_variants: col_list.remove(v)
+                col_list.insert(0, step_variants[0])
+                
+            return col_list
+        except Exception:
+            return []
+
+    @staticmethod
     def extract_thermo_data(logfile_path: Path) -> Optional[pd.DataFrame]:
         """
         Efficiently extracts thermo data from a LAMMPS log file into a pandas DataFrame.

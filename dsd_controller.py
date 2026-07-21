@@ -206,21 +206,15 @@ class DSDController(QObject):
             return
 
         if 'Strain' in plot_type:
-            # Scale based on strain cache
+            # ... (keep existing strain logic) ...
             if self._strain_cache is None:
                 self._strain_cache = self.data_manager.calculate_strain_evolution_cached(
                     self.domains, self.timesteps, study, system, slice_axis, observe_axis, options
                 )
             if self._strain_cache:
                 current_ts_idx = self.timesteps.index(self.current_timestep) if self.current_timestep in self.timesteps else 0
-                
-                # Let's collect all valid points up to the target slice
-                slice_idx = 0
-                if mode == 'final': slice_idx = len(self.timesteps) # Full range
-                elif mode == 'max': slice_idx = len(self.timesteps) # Full range
-                else: slice_idx = current_ts_idx + 1 # Up to current
+                slice_idx = len(self.timesteps) if mode in ['final', 'max'] else current_ts_idx + 1
 
-                # Target strains for X (if Strain Over Strain)
                 if plot_type == 'Strain Over Strain':
                     x_pts = np.array(self._strain_cache['target_strains'][:slice_idx])
                 else: # Strain Over Step
@@ -231,59 +225,82 @@ class DSDController(QObject):
                     g_min_x, g_max_x = np.min(x_pts[valid_mask_x]), np.max(x_pts[valid_mask_x])
 
                 for d_res in self._strain_cache['domains']:
-                    # Visibility check: Use source_index to find the parent domain's checkbox state
                     s_idx = d_res.get('source_index')
                     if s_idx is not None and s_idx < len(self.domains):
-                        if not self.domains[s_idx].get('strain_show', True):
-                            continue
+                        if not self.domains[s_idx].get('strain_show', True): continue
 
                     y_pts = np.array(d_res['strains'][:slice_idx])
                     y_err = np.array(d_res['stds'][:slice_idx]) if options.get('strain_std', False) else None
-                    
                     valid_mask_y = ~np.isnan(y_pts)
                     if np.any(valid_mask_y):
-                        g_min_y = min(g_min_y, np.min(y_pts[valid_mask_y]))
-                        g_max_y = max(g_max_y, np.max(y_pts[valid_mask_y]))
-                        
+                        g_min_y, g_max_y = min(g_min_y, np.min(y_pts[valid_mask_y])), max(g_max_y, np.max(y_pts[valid_mask_y]))
                         if y_err is not None:
                             valid_mask_err = ~np.isnan(y_err) & valid_mask_y
                             if np.any(valid_mask_err):
                                 g_min_y = min(g_min_y, np.min(y_pts[valid_mask_err] - y_err[valid_mask_err]))
                                 g_max_y = max(g_max_y, np.max(y_pts[valid_mask_err] + y_err[valid_mask_err]))
         else:
-            # Displacement plot logic (original)
-            for ts in search_steps:
-                 df_curr, box_curr = self.data_manager.load_frame(study, system, ts)
-                 if df_curr is None: continue
-                 
-                 for domain in self.domains:
-                     # Visibility check
-                     if not domain.get('show', True):
-                         continue
+            # Displacement plot logic - OPTIMIZED
+            # 1. Try to use Persistent Library results to find bounds instantly
+            found_in_lib = False
+            parser = self.data_manager.get_parser(study, system)
+            if parser and mode == 'max':
+                total_y_min, total_y_max = float('inf'), float('-inf')
+                total_x_min, total_x_max = float('inf'), float('-inf')
+                matches = 0
+                
+                for domain in self.domains:
+                    if domain.get('is_optimal_line') or not domain.get('show', True): continue
+                    
+                    # Generate hash for this domain definition
+                    d_hash = self.data_manager.get_domain_hash(domain, self.timesteps, slice_axis, observe_axis, options)
+                    lib_entry = parser.results_library.get(d_hash)
+                    
+                    if lib_entry and len(lib_entry['data']['strains']) == len(self.timesteps):
+                        # Use the precise min/max displacement values stored in the library
+                        d_data = lib_entry['data']
+                        y_mins = np.array(d_data.get('min_y', []))
+                        y_maxs = np.array(d_data.get('max_y', []))
+                        x_mins = np.array(d_data.get('min_x', []))
+                        x_maxs = np.array(d_data.get('max_x', []))
+                        
+                        valid = ~np.isnan(y_mins) & ~np.isnan(y_maxs)
+                        if np.any(valid):
+                            total_y_min = min(total_y_min, np.min(y_mins[valid]))
+                            total_y_max = max(total_y_max, np.max(y_maxs[valid]))
+                            total_x_min = min(total_x_min, np.min(x_mins[valid]))
+                            total_x_max = max(total_x_max, np.max(x_maxs[valid]))
+                            matches += 1
+                
+                if matches > 0:
+                    g_min_x, g_max_x = total_x_min, total_x_max
+                    g_min_y, g_max_y = total_y_min, total_y_max
+                    found_in_lib = True
 
-                     results = self.data_manager.slice_disp_mean(
-                        df_init, df_curr, domain, slice_axis, observe_axis, box_curr, 
-                        z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'), 
-                        z_ranges=self.plot_config.get('z_ranges'), 
-                        df_final=df_final, box_init=box_init
-                     )
-                     for df_res in results:
-                         if df_res is not None and not df_res.empty:
-                             x = df_res['center'].values
-                             y = df_res['mean_disp'].values
-                             
-                             if len(x) > 0:
-                                 g_min_x = min(g_min_x, np.min(x))
-                                 g_max_x = max(g_max_x, np.max(x))
-                                 g_min_y = min(g_min_y, np.min(y))
-                                 g_max_y = max(g_max_y, np.max(y))
-                                 
-                                 # Include error bands
-                                 if options.get('disp_std', True) and 'std_dev' in df_res.columns:
-                                     y_err = df_res['std_dev'].values
-                                     if np.any(y_err):
-                                         g_min_y = min(g_min_y, np.min(y - y_err))
-                                         g_max_y = max(g_max_y, np.max(y + y_err))
+            if not found_in_lib:
+                # 2. Fallback: Sampling strategy (max 10 frames) instead of reading every frame
+                if mode == 'max' and len(search_steps) > 10:
+                    indices = np.linspace(0, len(search_steps) - 1, 10, dtype=int)
+                    search_steps = [search_steps[i] for i in indices]
+
+                for ts in search_steps:
+                     df_curr, box_curr = self.data_manager.load_frame(study, system, ts)
+                     if df_curr is None: continue
+                     for domain in self.domains:
+                         if not domain.get('show', True): continue
+                         results = self.data_manager.slice_disp_mean(df_init, df_curr, domain, slice_axis, observe_axis, box_curr, 
+                                                                   z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'), 
+                                                                   z_ranges=self.plot_config.get('z_ranges'), df_final=df_final, box_init=box_init)
+                         for df_res in results:
+                             if df_res is not None and not df_res.empty:
+                                 x, y = df_res['center'].values, df_res['mean_disp'].values
+                                 if len(x) > 0:
+                                     g_min_x, g_max_x = min(g_min_x, np.min(x)), max(g_max_x, np.max(x))
+                                     g_min_y, g_max_y = min(g_min_y, np.min(y)), max(g_max_y, np.max(y))
+                                     if options.get('disp_std', True) and 'std_dev' in df_res.columns:
+                                         y_err = df_res['std_dev'].values
+                                         if np.any(y_err):
+                                             g_min_y, g_max_y = min(g_min_y, np.min(y - y_err)), max(g_max_y, np.max(y + y_err))
             
             pass
 
@@ -410,9 +427,18 @@ class DSDController(QObject):
             'z_ranges': z_ranges
         }
         
-        # If switching plot types, ALWAYS auto-scale because units/scales differ fundamentally
+        # If switching plot types, we MUST reset the axes to ensure labels (Ticks) 
+        # for Displacement (e.g. 0.1) don't bleed into Strain (e.g. 0.001).
         if old_type != plot_type:
+            # 1. Force an auto-scale to the new data range
             self.auto_scale(mode='max')
+            
+            # 2. If view was locked, immediately re-apply the SPECIFIC zoom for this new type
+            if self.view_locked:
+                stored_limits = self.view_limits.get(plot_type)
+                if stored_limits:
+                    self.plot_item.setXRange(stored_limits[0][0], stored_limits[0][1], padding=0)
+                    self.plot_item.setYRange(stored_limits[1][0], stored_limits[1][1], padding=0)
 
         self.update_scene()
 

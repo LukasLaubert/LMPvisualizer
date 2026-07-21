@@ -30,6 +30,7 @@ class DSDPlotPanel(QWidget):
         self.controller = None 
         self.loaded_path = None
         self._updating_from_code = False
+        self._loading_session = False
         
         self._init_ui()
         self.controller = DSDController(self.plot_widget, self.data_manager)
@@ -240,6 +241,13 @@ class DSDPlotPanel(QWidget):
             self.plot_table.set_context(context)
             
         self.update_plot()
+
+        # RESTORE LIMITS: If view is locked, explicitly apply the saved limits for the NEW type
+        if self.controller.view_locked:
+            stored_limits = self.controller.view_limits.get(text)
+            if stored_limits:
+                self.plot_widget.setXRange(stored_limits[0][0], stored_limits[0][1], padding=0)
+                self.plot_widget.setYRange(stored_limits[1][0], stored_limits[1][1], padding=0)
 
     def _init_options_menu(self):
         self.opt_actions = {}
@@ -609,6 +617,9 @@ class DSDPlotPanel(QWidget):
         return opts
 
     def update_plot(self, *args):
+        if self._loading_session:
+            return
+            
         domains = self.plot_table.get_domains()
         
         # --- Logic: Auto-restore Optimal Line if needed ---
@@ -927,6 +938,7 @@ class DSDPlotPanel(QWidget):
 
         self.main_window.path_edit.blockSignals(True)
         self.main_window.chip_input.blockSignals(True)
+        self._loading_session = True
 
         try:
             # 1. Load Project Data
@@ -970,10 +982,16 @@ class DSDPlotPanel(QWidget):
             self.controller.current_study = None
             self.controller.current_system = None
             
+            self.study_combo.blockSignals(True)
+            self.system_combo.blockSignals(True)
+            
             self.study_combo.setCurrentText(g_opts.get('study', 'Select Study'))
             self.on_study_changed(self.study_combo.currentText())
             self.system_combo.setCurrentText(g_opts.get('system', 'Select System'))
             self.on_system_changed(self.system_combo.currentText())
+            
+            self.study_combo.blockSignals(False)
+            self.system_combo.blockSignals(False)
             
             # 3. Establish Axis Selections
             self.slice_axis_combo.setCurrentText(g_opts.get('slice_axis', 'Select Axis'))
@@ -1044,8 +1062,10 @@ class DSDPlotPanel(QWidget):
                 self.controller.last_target_strain = g_opts['last_target_strain']
                 
             # 7. Final Trigger
+            self._loading_session = False
             self.update_plot()
         finally:
+            self._loading_session = False
             self.main_window.path_edit.blockSignals(False)
             self.main_window.chip_input.blockSignals(False)
 

@@ -376,12 +376,6 @@ class TrjPlotPanel(QWidget):
         self.on_system_changed(self.system_combo.currentText())
 
     def on_system_changed(self, text):
-        current_x = self.xaxis_combo.currentText()
-        current_y = self.yaxis_combo.currentText()
-        
-        cols = []
-        enable_props = False
-        
         if text != "Select System":
             study = self.study_combo.currentText()
             
@@ -394,23 +388,30 @@ class TrjPlotPanel(QWidget):
                 self.controller.set_active_system(study, text)
                 self.player_controls.set_timesteps(self.controller.get_available_timesteps())
                 
-                if is_study_change:
+                # Sync player controls to the controller's preserved timestep
+                current_ts = self.controller.current_timestep
+                if current_ts in self.controller.timesteps:
+                    idx = self.controller.timesteps.index(current_ts)
+                    self.player_controls.set_step_index(idx)
+                else:
                     self.player_controls.set_step_index(0)
                 
                 if cols:
-                    enable_props = True
+                    # Capture currently selected axes before repopulating
+                    current_x = self.xaxis_combo.currentText()
+                    current_y = self.yaxis_combo.currentText()
+                    
+                    combo_map = {
+                        self.xaxis_combo: ("Select X-Axis", current_x),
+                        self.yaxis_combo: ("Select Y-Axis", current_y),
+                        self.zfilter_combo: ("No Z-Filter", None),
+                        self.heatmap_combo: ("No Heatmap", None)
+                    }
 
-        combo_map = {
-            self.xaxis_combo: ("Select X-Axis", current_x),
-            self.yaxis_combo: ("Select Y-Axis", current_y),
-            self.zfilter_combo: ("No Z-Filter", None),
-            self.heatmap_combo: ("No Heatmap", None)
-        }
-
-        for combo, (placeholder, retention) in combo_map.items():
-            target = retention if retention and retention in cols else combo.currentText()
-            self._populate_combo(combo, placeholder, cols, target)
-            combo.setEnabled(enable_props)
+                    for combo, (placeholder, retention) in combo_map.items():
+                        target = retention if retention and retention in cols else combo.currentText()
+                        self._populate_combo(combo, placeholder, cols, target)
+                        combo.setEnabled(True)
             
         # Only sync if we are NOT in the middle of a programmatic update
         if not self._updating_from_code:
@@ -457,7 +458,8 @@ class TrjPlotPanel(QWidget):
         state = {
             'study': "Select Study", 'system': "Select System", 
             'x_col': "Select X-Axis", 'y_col': "Select Y-Axis",
-            'z_col': "No Z-Filter", 'h_col': "No Heatmap",
+            'z_col': "No Z-Filter", 'z_ref': "Initial",
+            'h_col': "No Heatmap", 'h_ref': "Initial",
             'view_lock': True, 'view_sync': True, 'view_range': None,
             'current_step_index': 0,
             'z_ranges': [(float('-inf'), float('inf'))] # Default single full range
@@ -1080,11 +1082,11 @@ class TrjPlotPanel(QWidget):
             'x_label': x_label,
             'y_label': y_label,
             'z_filter_col': z_col,
-            'z_filter_ref': state.get('z_ref'),
+            'z_filter_ref': state.get('z_ref', 'Initial'),
             'z_ranges': self.filter_bar.current_ranges,
             'z_ranges_rel': rel_ranges,
             'heatmap_col': h_col,
-            'heatmap_ref': state.get('h_ref'),
+            'heatmap_ref': state.get('h_ref', 'Initial'),
             'heatmap_gradient': gradient,
             'color': color,
             'symbol': style_widget.currentText(),
