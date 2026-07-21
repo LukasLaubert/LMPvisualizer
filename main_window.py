@@ -10,9 +10,11 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QCheckBox, QLabel, QSplitter, QGridLayout, QSizePolicy, QMenu
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint
-from PyQt6.QtGui import QColor, QIntValidator, QAction, QIcon
+from PyQt6.QtGui import QColor, QIntValidator, QAction, QIcon, QActionGroup
 import pyqtgraph as pg
 import random
+import numpy as np
+import pandas as pd
 
 from lammps_parser import LammpsParser
 from data_manager import DataManager
@@ -30,6 +32,7 @@ class MainWindow(QMainWindow):
         self.data_manager = DataManager()
         self.plot_controller = None
         self.sync_mean_enabled = False
+        self.running_mean_setting = "valid_window" # Default setting for running mean
         self.synchronized_columns = set()
         self.average_user_choices = {}
         self.current_x_axis = None
@@ -136,12 +139,12 @@ class MainWindow(QMainWindow):
         self.lock_axes_btn.setToolTip("Lock/Unlock Y-Axes at Zero")
         self.lock_axes_btn.hide()
         self.lock_axes_btn.setParent(self.plot_widget)
-        self.lock_axes_btn.setGeometry(self.plot_widget.width() - 40, 10, 30, 30)
+        self.lock_axes_btn.setGeometry(self.plot_widget.width() - 30, 00, 30, 30)
 
         original_resize = self.plot_widget.resizeEvent
         def custom_resize_event(event):
             if hasattr(self, 'lock_axes_btn'):
-                self.lock_axes_btn.setGeometry(self.plot_widget.width() - 40, 10, 30, 30)
+                self.lock_axes_btn.setGeometry(self.plot_widget.width() - 30, 00, 30, 30)
             if original_resize:
                 original_resize(event)
         self.plot_widget.resizeEvent = custom_resize_event
@@ -182,6 +185,8 @@ class MainWindow(QMainWindow):
         self.plot_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.plot_table.verticalHeader().hide()
 
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._show_mean_header_context_menu)
         header.sectionClicked.connect(self._on_header_clicked)
         right_layout.addWidget(self.plot_table)
 
@@ -488,6 +493,53 @@ class MainWindow(QMainWindow):
             self.lock_axes_btn.setText("🔓")  # Unlock emoji
         self.plot_controller.toggle_axes_lock(checked)
 
+    def _show_mean_header_context_menu(self, pos):
+        header = self.plot_table.horizontalHeader()
+        column_index = header.logicalIndexAt(pos)
+        
+        # Check if it's the 'Mean' column header (index 3)
+        if column_index != 3:
+            return
+
+        menu = QMenu(self)
+        group = QActionGroup(self)
+        group.setExclusive(True)
+
+        action_valid = QAction("Valid Window (Exclude Borders)", self, checkable=True)
+        action_valid.setData("valid_window")
+        
+        action_symmetric = QAction("Symmetric Window (Shrink Borders)", self, checkable=True)
+        action_symmetric.setData("symmetric_window")
+        
+        action_asymmetric = QAction("Asymmetric Window (Use All Available)", self, checkable=True)
+        action_asymmetric.setData("asymmetric_window")
+
+        group.addAction(action_valid)
+        group.addAction(action_symmetric)
+        group.addAction(action_asymmetric)
+
+        menu.addAction(action_valid)
+        menu.addAction(action_symmetric)
+        menu.addAction(action_asymmetric)
+
+        # Set the checkmark on the currently active setting
+        if self.running_mean_setting == "valid_window":
+            action_valid.setChecked(True)
+        elif self.running_mean_setting == "symmetric_window":
+            action_symmetric.setChecked(True)
+        else: # asymmetric_window
+            action_asymmetric.setChecked(True)
+        
+        group.triggered.connect(self._set_running_mean_setting)
+        
+        menu.exec(header.mapToGlobal(pos))
+
+    def _set_running_mean_setting(self, action):
+        new_setting = action.data()
+        if new_setting and self.running_mean_setting != new_setting:
+            self.running_mean_setting = new_setting
+            self.update_plots()
+
     def _on_header_clicked(self, column_index):
         """Handle header clicks to toggle synchronization for specific columns."""
         # Only allow sync for columns 2-7 (Show, Mean, Std, Style, thk)
@@ -753,6 +805,7 @@ class MainWindow(QMainWindow):
             self.on_path_entered()
 
     def load_project(self, root_path):
+        self.running_mean_setting = "valid_window" # Reset to default on new project load
         self.average_user_choices.clear() # Clear cache on new project load
         keywords = self.chip_input.get_chips()
         if not keywords:
@@ -1082,8 +1135,8 @@ class MainWindow(QMainWindow):
             if not data: continue
 
             data['y_col'] = plot_info['y_ax']
-            original_x = data['x'].copy() if hasattr(data['x'], 'copy') else data['x']
-            original_y = data['y'].copy() if hasattr(data['y'], 'copy') else data['y']
+            original_x_np = data['x'].to_numpy() if hasattr(data['x'], 'to_numpy') else np.array(data['x'])
+            original_y_np = data['y'].to_numpy() if hasattr(data['y'], 'to_numpy') else np.array(data['y'])
 
             if plot_info['show_original']:
                 plot_data = data.copy()
@@ -1097,14 +1150,22 @@ class MainWindow(QMainWindow):
                 )
 
             if plot_info['mean_window'] >= 1:
-                running_mean_y = self._calculate_running_mean(original_y, plot_info['mean_window'])
-                running_mean_x = original_x[:len(running_mean_y)]
+                running_mean_y = self._calculate_running_average(original_y_np, plot_info['mean_window'], 'mean')
+                
+                # Adjust x-axis data based on the output length, especially for 'valid_window'
+                len_diff = len(original_x_np) - len(running_mean_y)
+                if len_diff > 0:
+                    start_idx = len_diff // 2
+                    end_idx = len(original_x_np) - (len_diff - start_idx)
+                    running_mean_x = original_x_np[start_idx:end_idx]
+                else:
+                    running_mean_x = original_x_np
 
                 if plot_info['show_std']:
-                    running_std = self._calculate_running_std(original_y, plot_info['mean_window'])
-                    if running_std is not None:
+                    running_std = self._calculate_running_average(original_y_np, plot_info['mean_window'], 'std')
+                    if running_std is not None and len(running_std) == len(running_mean_y):
                         std_data = {
-                            'x': running_mean_x, 'y': running_mean_y, 'std': running_std[:len(running_mean_y)],
+                            'x': running_mean_x, 'y': running_mean_y, 'std': running_std,
                             'y_col': plot_info['y_ax']
                         }
                         std_color = QColor(plot_info['color'])
@@ -1114,13 +1175,20 @@ class MainWindow(QMainWindow):
                             plot_info['style'], layer_priority=1 + z_offset
                         )
                 
-                # Only draw the mean line if the window is > 0, to avoid re-drawing the original plot
+                # Only draw the mean line if the window is > 0
                 if plot_info['mean_window'] > 0:
                     mean_color = QColor(plot_info['color'])
-                    mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.5, mean_color.alphaF())
+                    # If original line is shown, make mean line 50% darker (current behavior)
+                    # If original line is NOT shown, make mean line only 20% darker than original
+                    if plot_info['show_original']:
+                        # Original behavior: 50% darker
+                        mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.5, mean_color.alphaF())
+                    else:
+                        # New behavior: only 20% darker
+                        mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.8, mean_color.alphaF())
                     mean_data = {'x': running_mean_x, 'y': running_mean_y, 'std': None, 'y_col': plot_info['y_ax']}
                     self.plot_controller.add_or_update_plot_with_custom_colors(
-                        plot_info['plot_name'] + "_running_mean", mean_data, mean_color, 
+                        plot_info['plot_name'] + "_running_mean", mean_data, mean_color,
                         plot_info['style'], layer_priority=2 + z_offset, thickness=plot_info['thickness']
                     )
 
@@ -1144,43 +1212,62 @@ class MainWindow(QMainWindow):
         # Update the visual state of the row (e.g., for greying out)
         self._update_row_visual_state(row)
 
-    def _calculate_running_mean(self, data, window_size):
-        """Calculate the running mean of data with specified window size using centered average."""
-        if len(data) == 0:
+    def _calculate_running_average(self, data, window_size, statistic='mean'):
+        """
+        Calculates the running mean or std deviation based on the current setting.
+        Returns a numpy array. For the 'valid' method, the array will be shorter.
+        """
+        if len(data) < 1 or window_size < 1:
             return data
         
-        import numpy as np
-        data = np.array(data)
-        result = np.zeros_like(data, dtype=float)
-        
-        # Use a centered average approach: average from [i - window_size//2, i + window_size//2] for each position i
-        half_window = window_size // 2
-        
-        for i in range(len(data)):
-            start_idx = max(0, i - half_window)
-            end_idx = min(len(data), i + half_window + 1)  # +1 because slicing is exclusive on the right
-            result[i] = np.mean(data[start_idx:end_idx])
-        
-        return result
+        # pandas Series is efficient for this
+        series = pd.Series(data)
 
-    def _calculate_running_std(self, data, window_size):
-        """Calculate the running standard deviation of data with specified window size using centered approach."""
-        if len(data) == 0:
-            return data
-        
-        import numpy as np
-        data = np.array(data)
-        result = np.zeros_like(data, dtype=float)
-        
-        # Use a centered standard deviation approach: std from [i - window_size//2, i + window_size//2] for each position i
-        half_window = window_size // 2
-        
-        for i in range(len(data)):
-            start_idx = max(0, i - half_window)
-            end_idx = min(len(data), i + half_window + 1)  # +1 because slicing is exclusive on the right
-            result[i] = np.std(data[start_idx:end_idx])
-        
-        return result
+        if self.running_mean_setting == 'valid_window':
+            # 1) Exclude border values. Output is shorter.
+            # min_periods=window_size ensures only full windows are used.
+            rolling_obj = series.rolling(window=window_size, center=True, min_periods=window_size)
+            if statistic == 'mean':
+                result = rolling_obj.mean()
+            else: # std
+                result = rolling_obj.std()
+            return result.dropna().to_numpy()
+
+        elif self.running_mean_setting == 'symmetric_window':
+            # 2) Symmetric window, shrinks at borders.
+            data_np = np.array(data)
+            result = np.zeros_like(data_np, dtype=float)
+            half_window = window_size // 2
+            
+            for i in range(len(data_np)):
+                # Determine symmetric radius
+                k = min(half_window, i, len(data_np) - 1 - i)
+                start_idx = i - k
+                end_idx = i + k + 1
+                window_slice = data_np[start_idx:end_idx]
+                
+                if statistic == 'mean':
+                    result[i] = np.mean(window_slice)
+                else: # std
+                    result[i] = np.std(window_slice)
+            return result
+
+        else: # 'asymmetric_window'
+            # 3) Use all available values up to window size (original behavior)
+            data_np = np.array(data)
+            result = np.zeros_like(data_np, dtype=float)
+            half_window = window_size // 2
+            
+            for i in range(len(data_np)):
+                start_idx = max(0, i - half_window)
+                end_idx = min(len(data_np), i + half_window + 1)
+                window_slice = data_np[start_idx:end_idx]
+                
+                if statistic == 'mean':
+                    result[i] = np.mean(window_slice)
+                else: # std
+                    result[i] = np.std(window_slice)
+            return result
 
     def _update_axis_properties(self, visible_plots_info, x_label_override: str = None):
         x_label = x_label_override or ""
@@ -1304,7 +1391,8 @@ class MainWindow(QMainWindow):
         config = {
             'path': self.path_edit.text(),
             'plots': [],
-            'average_choices': self.average_user_choices
+            'average_choices': self.average_user_choices,
+            'running_mean_setting': self.running_mean_setting
         }
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
@@ -1335,7 +1423,8 @@ class MainWindow(QMainWindow):
         config = {
             'path': self.path_edit.text(),
             'plots': [],
-            'average_choices': self.average_user_choices
+            'average_choices': self.average_user_choices,
+            'running_mean_setting': self.running_mean_setting
         }
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
@@ -1377,6 +1466,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", "Failed to load session file.")
             return
 
+        self.running_mean_setting = config.get('running_mean_setting', 'valid_window')
         self.average_user_choices = config.get('average_choices', {})
 
         project_path = config.get('path')
