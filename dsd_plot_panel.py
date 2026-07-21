@@ -19,6 +19,7 @@ from trj_widgets import FilterBarWidget, PlayerControlWidget
 from ui_components import ColorButton, NoNewLineDelegate, RightClickButton
 from settings_manager import SettingsManager
 from log_parser import LogParser
+from popout_window import PopOutWindow
 
 class DSDPlotPanel(QWidget):
     def __init__(self, main_window_ref):
@@ -501,12 +502,16 @@ class DSDPlotPanel(QWidget):
         types = []
         study = self.study_combo.currentText()
         system = self.system_combo.currentText()
+        axis_bounds = None
         if self.controller.timesteps:
             df, _ = self.data_manager.load_frame(study, system, self.controller.timesteps[0])
-            if df is not None and 'type' in df.columns:
-                types = sorted(df['type'].unique().tolist())
+            if df is not None:
+                if 'type' in df.columns:
+                    types = sorted(df['type'].unique().tolist())
+                if slice_ax in df.columns:
+                    axis_bounds = (df[slice_ax].min(), df[slice_ax].max())
         
-        dlg = DSDAddDomainDialog(self, None, slice_ax, types)
+        dlg = DSDAddDomainDialog(self, None, slice_ax, types, axis_bounds)
         if dlg.exec():
             data = dlg.get_data()
             self.plot_table.add_domain(data.get('name', "Domain " + str(self.plot_table.rowCount()+1)), data)
@@ -877,120 +882,41 @@ class DSDPlotPanel(QWidget):
 
     def launch_popout(self):
         state = self.controller.get_current_plot_state()
-        win = PopOutWindow(state, self)
+        if not state or not state.get('y_axes'):
+            QMessageBox.information(self, "Info", "No valid data to pop out.")
+            return
+
+        dpi = self.logicalDpiX()
+        w_in = self.plot_widget.width() / dpi
+        h_in = self.plot_widget.height() / dpi
+
+        win = PopOutWindow(state, self, figsize=(w_in, h_in))
         win.show()
         # Keep reference
         if not hasattr(self.main_window, 'dsd_popouts'):
             self.main_window.dsd_popouts = []
         self.main_window.dsd_popouts.append(win)
+        win.destroyed.connect(lambda: self.main_window.dsd_popouts.remove(win) if win in self.main_window.dsd_popouts else None)
 
     def quick_export(self):
-        try:
-            import pyqtgraph.exporters
-            import csv
-            
-            # Generate default name
-            default_name = f"DSD_export_{random.randint(1000,9999)}.png"
-            path, selected_filter = QFileDialog.getSaveFileName(
-                self, 
-                "Export Plot", 
-                default_name, 
-                "PNG Image (*.png);;SVG (*.svg);;CSV Data (*.csv);;TSV Data (*.tsv)"
-            )
-            
-            if not path: return
-            
-            if path.endswith('.png') or selected_filter == "PNG Image (*.png)":
-                if not path.endswith('.png'): path += ".png"
-                exporter = pg.exporters.ImageExporter(self.plot_widget.plotItem)
-                exporter.parameters()['width'] = 1920
-                exporter.export(path)
-                
-            elif path.endswith('.svg') or selected_filter == "SVG (*.svg)":
-                if not path.endswith('.svg'): path += ".svg"
-                exporter = pg.exporters.SVGExporter(self.plot_widget.plotItem)
-                exporter.export(path)
-                
-            elif path.endswith('.csv') or path.endswith('.tsv') or "Data" in selected_filter:
-                is_tsv = path.endswith('.tsv') or "TSV" in selected_filter
-                if not path.endswith('.csv') and not path.endswith('.tsv'):
-                    path += ".tsv" if is_tsv else ".csv"
-                    
-                delimiter = '\t' if is_tsv else ','
-                
-                # Logic from log_controller._export_text_data
-                plot_item = self.plot_widget.getPlotItem()
-                x_groups = []
-                
-                for item in plot_item.items:
-                    if isinstance(item, pg.PlotDataItem):
-                        name = item.name()
-                        if not name: continue
-                        
-                        x_data, y_data = item.getData()
-                        if x_data is None or y_data is None: continue
-                        
-                        # Check for identical X-group
-                        found_group = False
-                        for group in x_groups:
-                            if np.array_equal(group['x'], x_data):
-                                group['datasets'].append({'name': name, 'y': y_data})
-                                found_group = True
-                                break
-                        
-                        if not found_group:
-                            x_groups.append({
-                                'x': x_data,
-                                'datasets': [{'name': name, 'y': y_data}]
-                            })
-                
-                if not x_groups:
-                    QMessageBox.warning(self, "Export", "No plot data found to export.")
-                    return
-
-                # Build Headers (3 rows)
-                header1 = [] # x, y
-                header2 = [] # Axis Label
-                header3 = [] # Legend Name
-                data_cols = []
-                max_rows = 0
-                
-                x_label = plot_item.getAxis('bottom').label.toPlainText()
-                y_label = plot_item.getAxis('left').label.toPlainText()
-
-                for group in x_groups:
-                    rows = len(group['x'])
-                    max_rows = max(max_rows, rows)
-                    
-                    # X Column
-                    header1.append('x')
-                    header2.append(x_label)
-                    header3.append('')
-                    data_cols.append(group['x'])
-                    
-                    # Y Columns
-                    for ds in group['datasets']:
-                        header1.append('y')
-                        header2.append(y_label)
-                        header3.append(ds['name'])
-                        data_cols.append(ds['y'])
-
-                with open(path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f, delimiter=delimiter)
-                    writer.writerow(header1)
-                    writer.writerow(header2)
-                    writer.writerow(header3)
-                    
-                    for i in range(max_rows):
-                        row_data = []
-                        for col in data_cols:
-                            if i < len(col):
-                                row_data.append(str(col[i]))
-                            else:
-                                row_data.append('')
-                        writer.writerow(row_data)
-                        
-            QMessageBox.information(self, "Export", f"Successfully exported to {path}")
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", str(e))
+        filters = (
+            "PNG Image (*.png);;"
+            "JPEG Image (*.jpg *.jpeg);;"
+            "TIFF Image (*.tif *.tiff);;"
+            "WebP Image (*.webp);;"
+            "Scalable Vector Graphics (*.svg *.svgz);;"
+            "PDF Document (*.pdf);;"
+            "Encapsulated PostScript (*.eps);;"
+            "PostScript (*.ps);;"
+            "PGF Code (*.pgf);;"
+            "Raw Pixel Data (*.raw *.rgba);;"
+            "CSV Data (*.csv);;"
+            "TSV Data (*.tsv)"
+        )
+        path, _ = QFileDialog.getSaveFileName(self, "Export Plot", "", filters)
+        
+        if path:
+            dpi = self.logicalDpiX()
+            width_in = self.plot_widget.width() / dpi
+            height_in = self.plot_widget.height() / dpi
+            self.controller.export_plot(path, figsize=(width_in, height_in))

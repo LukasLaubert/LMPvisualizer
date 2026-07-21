@@ -581,11 +581,236 @@ class DSDController(QObject):
         
         self.errorUpdated.emit("")
 
-    def export_plot(self, path, figsize):
-        import pyqtgraph.exporters
-        exporter = pyqtgraph.exporters.ImageExporter(self.plot_item)
-        exporter.parameters()['width'] = figsize[0] * 100 
-        exporter.export(path)
+    def export_plot(self, filename: str, figsize=None):
+        """Dispatches to image or text export based on file extension."""
+        if filename.lower().endswith(('.csv', '.tsv')):
+            self._export_text_data(filename)
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            # Fallback to ImageExporter if matplotlib is missing
+            import pyqtgraph.exporters
+            exporter = pyqtgraph.exporters.ImageExporter(self.plot_item)
+            if figsize:
+                exporter.parameters()['width'] = figsize[0] * 100
+            else:
+                exporter.parameters()['width'] = 1920
+            exporter.export(filename)
+            return
+
+        # Matplotlib Export for high quality and proper legend scaling
+        # We need to collect what's currently in the plot
+        fig, ax1 = plt.subplots(figsize=figsize if figsize else (10, 6))
+        
+        # Determine if we have a right axis (Counts/Weights)
+        show_right = self.plot_item.getAxis('right').isVisible()
+        ax2 = ax1.twinx() if show_right else None
+        if ax2:
+            ax2.set_ylabel(self.plot_item.getAxis('right').labelText, fontsize=12)
+
+        # Labels
+        ax1.set_xlabel(self.plot_item.getAxis('bottom').labelText, fontsize=12)
+        ax1.set_ylabel(self.plot_item.getAxis('left').labelText, fontsize=12)
+        ax1.tick_params(axis='both', which='major', labelsize=10)
+        
+        handles, labels = [], []
+        
+        # Iterate over plot items to replicate them in Matplotlib
+        for item in self.plot_item.items:
+            if isinstance(item, pg.PlotDataItem) and item.isVisible():
+                x, y = item.getData()
+                if x is None or y is None or len(x) == 0: continue
+                
+                name = item.name()
+                pen = item.opts.get('pen')
+                color = pen.color().getRgbF()[:3] if pen else (0,0,1)
+                width = pen.width() if pen else 1
+                linestyle = self._get_mpl_linestyle(pen.style()) if (pen and pen.style() != Qt.PenStyle.NoPen) else 'None'
+                # Fix: Handle both scatter (dot) and line cases
+                symbol = item.opts.get('symbol')
+                symbol_size = item.opts.get('symbolSize', 5)
+                
+                h, = ax1.plot(x, y, label=name, color=color, linewidth=width, linestyle=linestyle,
+                               marker=self._get_trj_mpl_marker(symbol) if symbol else None,
+                               markersize=symbol_size)
+                if name:
+                    handles.append(h)
+                    labels.append(name)
+            
+        # Second pass to handle FillBetweenItems and associate them with legend names
+        all_handles = list(handles)
+        all_labels = list(labels)
+        
+        for item in self.plot_item.items:
+            if isinstance(item, pg.FillBetweenItem) and item.isVisible():
+                c1_data = item.curves[0].getData()
+                c2_data = item.curves[1].getData()
+                if c1_data[1] is not None and c2_data[1] is not None:
+                    # Match this error band to a series name by checking midpoints
+                    mid_y = (c1_data[1] + c2_data[1]) / 2.0
+                    match_label = None
+                    
+                    for i, h in enumerate(handles):
+                        h_x, h_y = h.get_data()
+                        if len(h_x) == len(c1_data[0]) and np.allclose(h_y, mid_y, atol=1e-8):
+                            match_label = f"{labels[i]} (Std)"
+                            break
+                    
+                    # Fix: Handle brush being a method or property
+                    brush = item.brush() if callable(item.brush) else item.brush
+                    if hasattr(brush, 'color'):
+                        c = brush.color() if callable(brush.color) else brush.color
+                        color = (c.redF(), c.greenF(), c.blueF())
+                        alpha = c.alphaF()
+                    else:
+                        color = (0.5, 0.5, 0.5)
+                        alpha = 0.5
+                    
+                    fill = ax1.fill_between(c1_data[0], c1_data[1], c2_data[1], 
+                                          color=color, alpha=alpha, linewidth=0, label=match_label)
+                    
+                    if match_label:
+                        all_handles.append(fill)
+                        all_labels.append(match_label)
+
+        # Handle BarGraphItems (Counts/Weights) on ax2
+        if ax2:
+            for item in self.vb2.allChildItems():
+                if isinstance(item, pg.BarGraphItem) and item.isVisible():
+                    opts = item.opts
+                    x = opts.get('x')
+                    height = opts.get('height')
+                    width = opts.get('width', 1.0)
+                    brush = opts.get('brush')
+                    # Handle both QBrush and QColor objects
+                    if hasattr(brush, 'color'):
+                        c = brush.color() if callable(brush.color) else brush.color # QBrush.color()
+                    elif hasattr(brush, 'getRgbF'):
+                        c = brush # Already a QColor
+                    else:
+                        c = QColor(128, 128, 128, 128)
+                        
+                    color = (c.redF(), c.greenF(), c.blueF())
+                    alpha = c.alphaF()
+                    ax2.bar(x, height, width=width, color=color, alpha=alpha, align='center')
+
+        ax1.grid(True, alpha=0.3)
+        if all_handles:
+            # Legend size same as display: Increased font size for better visibility
+            ax1.legend(all_handles, all_labels, loc='best', fontsize=12)
+
+        plt.tight_layout()
+        fig.savefig(filename, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+
+    def _get_trj_mpl_marker(self, pg_symbol):
+        mapping = {
+            'o': 'o', 's': 's', 't': 'v', 't1': '^', 't2': '>', 't3': '<',
+            'd': 'D', '+': '+', 'x': 'x', 'p': 'p', 'h': 'h', 'star': '*'
+        }
+        return mapping.get(pg_symbol, 'o')
+
+    def _export_text_data(self, filename: str):
+        """Internal handler for exporting data to CSV or TSV."""
+        import csv
+        delimiter = '\t' if filename.lower().endswith('.tsv') else ','
+        
+        # 1. Collect datasets from plot items
+        x_groups = []
+        
+        # We need to find standard deviation associations.
+        # In DSD, we don't have a clean map, so we'll look for FillBetweenItems
+        # and try to associate them with PlotDataItems by checking if their curves match.
+        
+        series_data = []
+        
+        # First, find all PlotDataItems
+        for item in self.plot_item.items:
+            if isinstance(item, pg.PlotDataItem) and item.isVisible():
+                name = item.name()
+                if not name: continue
+                
+                x, y = item.getData()
+                if x is None or y is None: continue
+                
+                std = None
+                # Optimization: Look for a FillBetweenItem that covers this series
+                # We assume if a FillBetweenItem exists, it surrounds the mean.
+                # Actually, in DSD, we add FillBetween with bc (brush).
+                # To be sure, we can check if any FillBetweenItem has curves that 
+                # average to this Y.
+                for other in self.plot_item.items:
+                    if isinstance(other, pg.FillBetweenItem) and other.isVisible():
+                        c1 = other.curves[0].getData()
+                        c2 = other.curves[1].getData()
+                        if np.array_equal(c1[0], x):
+                            # Check if (c1+c2)/2 roughly equals y
+                            mid = (c1[1] + c2[1]) / 2.0
+                            if np.allclose(mid, y, atol=1e-10):
+                                std = np.abs(c1[1] - c2[1]) / 2.0
+                                break
+                
+                series_data.append({
+                    'name': name,
+                    'x': x,
+                    'y': y,
+                    'std': std
+                })
+
+        if not series_data:
+            return
+
+        # 2. Group by identical X
+        for ds in series_data:
+            found_group = False
+            for group in x_groups:
+                if np.array_equal(group['x'], ds['x']):
+                    group['datasets'].append(ds)
+                    found_group = True
+                    break
+            if not found_group:
+                x_groups.append({
+                    'x': ds['x'],
+                    'datasets': [ds]
+                })
+
+        # 3. Construct Headers
+        h1, h2, h3 = [], [], []
+        data_cols = []
+        max_rows = 0
+        
+        x_label = self.plot_item.getAxis('bottom').labelText
+        y_label = self.plot_item.getAxis('left').labelText
+
+        for group in x_groups:
+            max_rows = max(max_rows, len(group['x']))
+            h1.append('x'); h2.append(x_label); h3.append('')
+            data_cols.append(group['x'])
+            
+            for ds in group['datasets']:
+                h1.append('y'); h2.append(y_label); h3.append(ds['name'])
+                data_cols.append(ds['y'])
+                if ds['std'] is not None:
+                    h1.append('std'); h2.append(''); h3.append('')
+                    data_cols.append(ds['std'])
+
+        # 4. Write
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=delimiter)
+                writer.writerow(h1)
+                writer.writerow(h2)
+                writer.writerow(h3)
+                for i in range(max_rows):
+                    row = []
+                    for col in data_cols:
+                        if i < len(col): row.append(str(col[i]))
+                        else: row.append('')
+                    writer.writerow(row)
+        except Exception as e:
+            print(f"Export Error: {e}")
 
     def get_current_plot_state(self):
         """Extracts current state for PopOutWindow."""
@@ -613,19 +838,50 @@ class DSDController(QObject):
                 if x_data is None or y_data is None: continue
                 
                 pen = item.opts.get('pen')
-                color = pen.color() if pen else QColor('blue')
+                
+                # Extract color: prefer pen color, fall back to symbolBrush for scatter plots
+                color = QColor('blue')  # Default fallback
+                if pen and pen.style() != Qt.PenStyle.NoPen:
+                    color = pen.color()
+                else:
+                    # For scatter plots, color is in symbolBrush
+                    symbol_brush = item.opts.get('symbolBrush')
+                    if symbol_brush is not None:
+                        if isinstance(symbol_brush, QColor):
+                            color = symbol_brush
+                        elif hasattr(symbol_brush, 'color'):
+                            color = symbol_brush.color()
                 
                 is_opt = getattr(item, 'is_opt_line', False)
+                symbol = item.opts.get('symbol')
                 
+                pending_std = None
+                # Look for a FillBetweenItem that covers this series
+                for other in self.plot_item.items:
+                    if isinstance(other, pg.FillBetweenItem) and other.isVisible():
+                        c1_dt = other.curves[0].getData()
+                        c2_dt = other.curves[1].getData()
+                        # Use allclose for robust float comparison of centers and means
+                        if (c1_dt[0] is not None and len(c1_dt[0]) == len(x_data) and 
+                            np.allclose(c1_dt[0], x_data, atol=1e-8)):
+                            
+                            mid = (c1_dt[1] + c2_dt[1]) / 2.0
+                            if np.allclose(mid, y_data, atol=1e-8):
+                                pending_std = np.abs(c1_dt[1] - c2_dt[1]) / 2.0
+                                break
+
                 series_entry = {
                     'id': name,
                     'name': name,
                     'x': x_data,
                     'y': y_data,
-                    'std': None, # We don't explicitly capture std here yet, but PopOut can handle None
+                    'std': pending_std,
                     'color': color,
-                    'linestyle_matlab': self._get_mpl_linestyle(pen.style()) if pen else '-',
-                    'width': pen.width() if pen else 2,
+                    'linestyle_matlab': self._get_mpl_linestyle(pen.style()) if pen else 'None',
+                    'width': pen.width() if pen else 0,
+                    'marker': self._get_trj_mpl_marker(symbol) if symbol else 'None',
+                    'mode': 'scatter' if (symbol and (not pen or pen.style() == Qt.PenStyle.NoPen)) else 'line',
+                    'size': item.opts.get('symbolSize', 5),
                     'layer_priority': 10 if is_opt else 0
                 }
                 state['y_axes']['Y']['series'].append(series_entry)
@@ -638,6 +894,7 @@ class DSDController(QObject):
         else:
             style_int = int(qt_style)
         mapping = {
+            0: 'None', # NoPen
             1: '-', 
             2: '--', 
             3: ':', 

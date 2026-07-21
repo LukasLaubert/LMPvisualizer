@@ -39,6 +39,7 @@ class LinePropertiesWidget(QGroupBox):
         
         self.series_id = series_id
         self.is_scatter = initial_props.get('mode') == 'scatter'
+        self.has_std = initial_props.get('has_std', False)
         
         self.setCheckable(True)
         self.setChecked(initial_props.get('visible', True))
@@ -79,10 +80,9 @@ class LinePropertiesWidget(QGroupBox):
             self.marker_combo.setMaximumWidth(100)
             layout.addRow("Marker:", self.marker_combo)
             
-            self.style_combo = QComboBox() 
-            self.width_spin = QDoubleSpinBox() 
-            self.error_check = QCheckBox() 
-            
+            # Placeholders for scatter
+            self.style_combo = QComboBox()
+            self.width_spin = QDoubleSpinBox()
         else:
             self.style_combo = QComboBox()
             self.style_combo.addItems(['-', '--', ':', '-.'])
@@ -100,7 +100,7 @@ class LinePropertiesWidget(QGroupBox):
             layout.addRow("Width:", self.width_spin)
 
             self.marker_combo = QComboBox()
-            self.marker_combo.addItems(['None', 'o', 's', '^', 'v', 'D', 'x', '+'])
+            self.marker_combo.addItems(['None', 'o', 'x', '+', 'v', '^', '<', '>', 's', 'p', '*', 'h', 'H', 'D', 'd'])
             current_marker = initial_props.get('marker', 'None')
             if current_marker is None: current_marker = 'None'
             self.marker_combo.setCurrentText(current_marker)
@@ -108,14 +108,15 @@ class LinePropertiesWidget(QGroupBox):
             self.marker_combo.setMaximumWidth(100)
             layout.addRow("Marker:", self.marker_combo)
             
-            self.has_std = initial_props.get('has_std', False)
-            self.error_check = QCheckBox("Show Error Band")
-            if self.has_std:
-                self.error_check.setChecked(initial_props.get('show_std', True))
-                self.error_check.toggled.connect(self.propertiesChanged)
-                layout.addRow(self.error_check)
-            
+            # Placeholder for line
             self.size_spin = QDoubleSpinBox()
+
+        # Shared Error Band Control (Available for both line and scatter if data exists)
+        self.error_check = QCheckBox("Show Error Band")
+        if self.has_std:
+            self.error_check.setChecked(initial_props.get('show_std', True))
+            self.error_check.toggled.connect(self.propertiesChanged)
+            layout.addRow(self.error_check)
 
     def get_properties(self):
         props = {
@@ -129,14 +130,15 @@ class LinePropertiesWidget(QGroupBox):
             props['size'] = self.size_spin.value()
             props['linestyle'] = 'None' 
             props['linewidth'] = 0
-            props['show_std'] = False
         else:
             m = self.marker_combo.currentText()
             if m == 'None': m = None
             props['marker'] = m
             props['linestyle'] = self.style_combo.currentText()
             props['linewidth'] = self.width_spin.value()
-            props['show_std'] = self.error_check.isChecked() if self.has_std else False
+            props['size'] = 6 # Default for line markers
+            
+        props['show_std'] = self.error_check.isChecked() if self.has_std else False
             
         return props
 
@@ -282,14 +284,14 @@ class PopOutWindow(QMainWindow):
 
         self.font_tick_spin = QSpinBox()
         self.font_tick_spin.setRange(6, 72)
-        self.font_tick_spin.setValue(11)
+        self.font_tick_spin.setValue(12)
         self.font_tick_spin.valueChanged.connect(self.redraw_plot)
         self.font_tick_spin.setFixedWidth(70)
         layout.addRow("Tick Labels:", self.font_tick_spin)
 
         self.font_legend_spin = QSpinBox()
         self.font_legend_spin.setRange(6, 72)
-        self.font_legend_spin.setValue(10)
+        self.font_legend_spin.setValue(12)
         self.font_legend_spin.valueChanged.connect(self.redraw_plot)
         self.font_legend_spin.setFixedWidth(70)
         layout.addRow("Legend:", self.font_legend_spin)
@@ -730,65 +732,80 @@ class PopOutWindow(QMainWindow):
                 # Calculate explicit z-order: Orig(~2) < Std(~3) < Mean(~4)	 
                 z_val = 2.0 + series.get('layer_priority', 0)
 
-                if series.get('mode') == 'scatter':
-                    colors_to_use = None
-                    if series.get('colors') is not None:
-                        colors_to_use = []
-                        for c in series['colors']:
-                            colors_to_use.append((c.redF(), c.greenF(), c.blueF(), c.alphaF()))
-                    else:
-                        c = props['color']
-                        colors_to_use = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
+                all_x = series['x']
+                all_y = series['y']
+                all_std = series.get('std')
+                
+                c = props['color']
+                color_tuple = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
+                
+                # Plot the error band if present and enabled
+                if props.get('show_std', True) and all_std is not None:
+                    try:
+                        lower = all_y - all_std
+                        upper = all_y + all_std
+                        fill_label = f"{props['label']} (Std)" if props['label'] else None
+                        fill = ax.fill_between(all_x, lower, upper, color=color_tuple, 
+                                             alpha=0.25, linewidth=0, label=fill_label, zorder=z_val - 0.1)
+                        if fill_label:
+                            all_handles.append(fill)
+                            all_labels.append(fill_label)
+                    except Exception:
+                        pass
 
-                    scatter_h = ax.scatter(
-                        series['x'], series['y'],
+                # Plot the data (scatter or line)
+                if series.get('mode') == 'scatter':
+                    # Explicit Scatter rendering (colors, discrete points)
+                    if series.get('colors') is not None:
+                        # Use 'c' for array of colors
+                        colors_to_use = []
+                        for c_item in series['colors']:
+                            colors_to_use.append((c_item.redF(), c_item.greenF(), c_item.blueF(), c_item.alphaF()))
+                        
+                        scatter_h = ax.scatter(
+                            all_x, all_y,
+                            label=props['label'],
+                            c=colors_to_use,
+                            s=props['size']**2,
+                            marker=props['marker'],
+                            edgecolors='none',
+                            zorder=z_val
+                        )
+                    else:
+                        # Use 'color' for single color to avoid ambiguity with value mapping
+                        scatter_h = ax.scatter(
+                            all_x, all_y,
+                            label=props['label'],
+                            color=color_tuple,
+                            s=props['size']**2,
+                            marker=props['marker'],
+                            edgecolors='none',
+                            zorder=z_val
+                        )
+                    
+                    if props['label']:
+                        all_handles.append(scatter_h)
+                        all_labels.append(props['label'])
+                else:
+                    # Standard Line rendering (with optional markers)
+                    lstyle = props.get('linestyle', '-')
+                    if lstyle == 'None':
+                        lstyle = 'None'
+
+                    line, = ax.plot(
+                        all_x, all_y, 
                         label=props['label'],
-                        c=colors_to_use, 
-                        s=props['size']**2,
-                        marker=props['marker'],
-                        edgecolors='none',
+                        color=color_tuple,
+                        linestyle=lstyle,
+                        linewidth=props.get('linewidth', 1.5),
+                        marker=props.get('marker', 'None'),
+                        markersize=props.get('size', 6),
                         zorder=z_val
                     )
                     
-                    if props['label']: # Only add to legend if label is not empty
-                        all_handles.append(scatter_h)
+                    if props['label']:
+                        all_handles.append(line)
                         all_labels.append(props['label'])
-
-                else:
-                    c = props['color']
-                    color_tuple = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
-                    
-                    # Check if this series has std data and should show error band
-                    has_error_band = props['show_std'] and series['std'] is not None
-                    
-                    if has_error_band:
-                        # ONLY plot the error band. This prevents the "extra line" inside the band for Std plots.				   
-                        try:
-                            lower = series['y'] - series['std']
-                            upper = series['y'] + series['std']
-                            fill = ax.fill_between(series['x'], lower, upper, color=color_tuple, 
-                                                 alpha=0.25, linewidth=0, label=props['label'], zorder=z_val)
-                            
-                            if props['label']:
-                                all_handles.append(fill)
-                                all_labels.append(props['label'])
-                        except Exception:
-                            pass
-                    else:
-                        # Plot normal line (Orig or Mean)
-                        line, = ax.plot(
-                            series['x'], series['y'], 
-                            label=props['label'],
-                            color=color_tuple,
-                            linestyle=props['linestyle'],
-                            linewidth=props['linewidth'],
-                            marker=props['marker'],
-                            zorder=z_val
-                        )
-                        
-                        if props['label']:
-                            all_handles.append(line)
-                            all_labels.append(props['label'])
 
         if self.show_legend_check.isChecked() and all_handles:
             loc = self.legend_loc.currentText()
