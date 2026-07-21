@@ -68,9 +68,9 @@ class PlottingController:
         finally:
             self._is_updating_ranges = False
 
-    def add_or_update_plot(self, name: str, data: dict, color: QColor, style, thickness: float = 1.0):
+    def add_or_update_plot(self, name: str, data: dict, color: QColor, style, thickness: float = 1.0, layer_priority: int = 0):
         """Adds a new plot or updates an existing one by name."""
-        self._add_or_update_plot_impl(name, data, color, style, layer_priority=0, thickness=thickness)
+        self._add_or_update_plot_impl(name, data, color, style, layer_priority=layer_priority, thickness=thickness)
 
     def add_or_update_plot_with_custom_colors(self, name: str, data: dict, color: QColor, style, layer_priority: int = 0, thickness: float = 1.0):
         """Adds a new plot or updates an existing one by name with custom layer priority."""

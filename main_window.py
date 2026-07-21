@@ -30,7 +30,9 @@ class MainWindow(QMainWindow):
         self.data_manager = DataManager()
         self.plot_controller = None
         self.sync_mean_enabled = False
-        self.synchronized_columns = set()  # Track which columns are synchronized
+        self.synchronized_columns = set()
+        self.average_user_choices = {}
+        self.current_x_axis = None
 
         self.add_btn = QPushButton("Add")
         self.load_btn = QPushButton("Load")
@@ -42,62 +44,82 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        
+
+        # --- Top Controls Group ---
         top_controls_group = QFrame()
         top_controls_group.setFrameShape(QFrame.Shape.StyledPanel)
         top_controls_layout = QGridLayout(top_controls_group)
-        
+
+        # Row 0: Path and Browse
         top_controls_layout.addWidget(QLabel("Path:"), 0, 0)
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText("Select Project Root Directory...")
-        self.current_project_path = "" # Initialize empty project path
-        top_controls_layout.addWidget(self.path_edit, 0, 1, 1, 4)
+        self.current_project_path = ""
+        top_controls_layout.addWidget(self.path_edit, 0, 1, 1, 7)
         self.browse_btn = QPushButton("Browse...")
-        top_controls_layout.addWidget(self.browse_btn, 0, 5)
+        top_controls_layout.addWidget(self.browse_btn, 0, 8)
 
+        # Row 1: Log Keywords and Info Labels
         top_controls_layout.addWidget(QLabel("Log Keywords:"), 1, 0)
         self.chip_input = ChipInputWidget()
-        top_controls_layout.addWidget(self.chip_input, 1, 1, 1, 4)
-
-        self.study_label_widget = QLabel("Study")
-        top_controls_layout.addWidget(self.study_label_widget, 2, 0)
-        self.study_combo = self._create_combo("Select Study")
-        top_controls_layout.addWidget(self.study_combo, 2, 1)
-
-        top_controls_layout.addWidget(QLabel("X-Axis"), 3, 0)
-        self.xaxis_combo = self._create_combo("Select X-Axis")
-        top_controls_layout.addWidget(self.xaxis_combo, 3, 1)
-
-        self.system_label_widget = QLabel("System")
-        top_controls_layout.addWidget(self.system_label_widget, 2, 2)
-        self.system_combo = self._create_combo("Select System")
-        top_controls_layout.addWidget(self.system_combo, 2, 3)
-
-        top_controls_layout.addWidget(QLabel("Y-Axis"), 3, 2)
-        self.yaxis_combo = self._create_combo("Select Y-Axis")
-        top_controls_layout.addWidget(self.yaxis_combo, 3, 3)
-
-        self.add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        top_controls_layout.addWidget(self.add_btn, 2, 4, 2, 1)
+        top_controls_layout.addWidget(self.chip_input, 1, 1, 1, 7)
 
         info_widget = QWidget()
         info_layout = QVBoxLayout(info_widget)
-        info_layout.setContentsMargins(10, 0, 0, 0)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(1)
         self.studies_label = QLabel("Studies: 0")
         self.systems_label = QLabel("Systems: 0")
         self.units_label = QLabel("Unit: N/A")
-        self.timestep_label = QLabel("Timestep: N/A")
+        self.timestep_label = QLabel("Timestep: 1.0")
         info_layout.addWidget(self.studies_label)
         info_layout.addWidget(self.systems_label)
         info_layout.addWidget(self.units_label)
         info_layout.addWidget(self.timestep_label)
         info_layout.addStretch()
-        top_controls_layout.addWidget(info_widget, 2, 5, 2, 1)
+        top_controls_layout.addWidget(info_widget, 1, 8, 3, 1, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
 
-        top_controls_layout.setColumnStretch(1, 1)
-        top_controls_layout.setColumnStretch(3, 1)
+        # Row 2 & 3: Mode, Dropdowns, and Add button
+        # Mode combo spanning two rows in the first column
+        self.mode_combo = self._create_combo("Select\nMode")
+        self.mode_combo.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.mode_combo.setFixedWidth(75) # <--- ENFORCED WIDTH
+        top_controls_layout.addWidget(self.mode_combo, 2, 0, 2, 1)
+
+        # 2x2 grid for main selectors, starting from column 1
+        self.study_label_widget = QLabel("Study")
+        top_controls_layout.addWidget(self.study_label_widget, 2, 1)
+        self.study_combo = self._create_combo("Select Study")
+        top_controls_layout.addWidget(self.study_combo, 2, 2)
+
+        self.system_label_widget = QLabel("System")
+        top_controls_layout.addWidget(self.system_label_widget, 2, 3)
+        self.system_combo = self._create_combo("Select System")
+        top_controls_layout.addWidget(self.system_combo, 2, 4)
+        
+        top_controls_layout.addWidget(QLabel("X-Axis"), 3, 1)
+        self.xaxis_combo = self._create_combo("Select X-Axis")
+        top_controls_layout.addWidget(self.xaxis_combo, 3, 2)
+
+        top_controls_layout.addWidget(QLabel("Y-Axis"), 3, 3)
+        self.yaxis_combo = self._create_combo("Select Y-Axis")
+        top_controls_layout.addWidget(self.yaxis_combo, 3, 4)
+
+        # Add button (spanning 2 rows)
+        self.add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        top_controls_layout.addWidget(self.add_btn, 2, 5, 2, 3)
+
+        # --- Column Stretching and Sizing ---
+        top_controls_layout.setColumnStretch(0, 0) # No stretch for the first column
+        top_controls_layout.setColumnStretch(1, 0) # No stretch for label columns
+        top_controls_layout.setColumnStretch(3, 0)
+        
+        top_controls_layout.setColumnStretch(2, 1) # Allow dropdown columns to stretch
+        top_controls_layout.setColumnStretch(4, 1)
+        
         main_layout.addWidget(top_controls_group)
 
+        # --- Main Splitter (Plot and Table) ---
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         
         # --- Left Panel (Plot) ---
@@ -108,29 +130,20 @@ class MainWindow(QMainWindow):
         self.plot_widget.setBackground('w')
         self.plot_controller = PlottingController(self.plot_widget)
 
-        # Add the lock button as an overlay on the plot widget
         self.lock_axes_btn = QPushButton()
         self.lock_axes_btn.setCheckable(True)
-        self.lock_axes_btn.setIcon(QIcon.fromTheme("lock-unlocked")) # Placeholder
+        self.lock_axes_btn.setText("🔓")  # Unlock emoji
         self.lock_axes_btn.setToolTip("Lock/Unlock Y-Axes at Zero")
         self.lock_axes_btn.hide()
         self.lock_axes_btn.setParent(self.plot_widget)
-
-        # Initially position the button at the top-right corner
         self.lock_axes_btn.setGeometry(self.plot_widget.width() - 40, 10, 30, 30)
 
-        # Create a custom resize event for the plot widget to reposition the button
         original_resize = self.plot_widget.resizeEvent
-        
-
         def custom_resize_event(event):
-            # Position the button at the top-right of the plot widget
             if hasattr(self, 'lock_axes_btn'):
                 self.lock_axes_btn.setGeometry(self.plot_widget.width() - 40, 10, 30, 30)
-            # Call the original resize event to maintain normal functionality
             if original_resize:
                 original_resize(event)
-
         self.plot_widget.resizeEvent = custom_resize_event
 
         left_layout.addWidget(self.plot_widget)
@@ -158,18 +171,17 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)
         self.plot_table.setColumnWidth(0, 10)
-        self.plot_table.setColumnWidth(2, 35) # Orig
-        self.plot_table.setColumnWidth(3, 45) # Mean
-        self.plot_table.setColumnWidth(4, 35) # Std
-        self.plot_table.setColumnWidth(5, 10) # Color
-        self.plot_table.setColumnWidth(6, 35) # Style
-        self.plot_table.setColumnWidth(7, 25) # thk
-        self.plot_table.setColumnWidth(8, 25) # Del
+        self.plot_table.setColumnWidth(2, 35)
+        self.plot_table.setColumnWidth(3, 45)
+        self.plot_table.setColumnWidth(4, 35)
+        self.plot_table.setColumnWidth(5, 10)
+        self.plot_table.setColumnWidth(6, 35)
+        self.plot_table.setColumnWidth(7, 25)
+        self.plot_table.setColumnWidth(8, 25)
         self.plot_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.plot_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.plot_table.verticalHeader().hide()
 
-        # Enable header clicks to toggle synchronization
         header.sectionClicked.connect(self._on_header_clicked)
         right_layout.addWidget(self.plot_table)
 
@@ -242,36 +254,44 @@ class MainWindow(QMainWindow):
         if not labels or len(labels) < 2:
             return labels
 
-        split_pattern = r"([-_ ])"
-        split_labels = [re.split(split_pattern, label) for label in labels]
+        # Filter out 'average' labels from the logic but keep track of them
+        labels_to_process = [lbl for lbl in labels if lbl != 'average']
+        if len(labels_to_process) < 2:
+            return labels # Not enough labels to find commonalities
 
-        # Guard against empty strings from split
-        split_labels = [s for s in split_labels if s]
-        if len(split_labels) < 2:
+        split_pattern = r"([-_ ])"
+        split_labels_to_process = [re.split(split_pattern, label) for label in labels_to_process]
+
+        if not all(split_labels_to_process):
             return labels
 
-        min_len = min(len(s) for s in split_labels)
+        min_len = min(len(s) for s in split_labels_to_process)
         common_parts_indices = []
         for i in range(min_len):
             if i % 2 == 0:  # Only check non-delimiter parts
-                first_part = split_labels[0][i]
-                if all(s[i] == first_part for s in split_labels):
+                first_part = split_labels_to_process[0][i]
+                if all(s[i] == first_part for s in split_labels_to_process):
                     common_parts_indices.append(i)
 
         if not common_parts_indices:
             return labels
 
-        if len(split_labels[0]) == 1 and len(split_labels[0][0]) > 5 and 0 in common_parts_indices:
-            part = split_labels[0][0]
-            return [f"{part[:3]}..."] * len(labels)
+        if len(split_labels_to_process[0]) == 1 and len(split_labels_to_process[0][0]) > 5 and 0 in common_parts_indices:
+            part = split_labels_to_process[0][0]
+            # Create a map for shortened names
+            shortened_map = {lbl: f"{part[:3]}..." for lbl in labels_to_process}
+            return [shortened_map.get(lbl, lbl) for lbl in labels]
 
+        # Apply "..." to a copy of the lists
+        processed_splits = [list(s) for s in split_labels_to_process]
         for i in common_parts_indices:
-            for s in split_labels:
+            for s in processed_splits:
                 if i < len(s):
                     s[i] = "..."
         
-        new_labels = []
-        for s in split_labels:
+        # Reconstruct the shortened labels
+        shortened_labels = []
+        for s in processed_splits:
             result = []
             i = 0
             while i < len(s):
@@ -283,8 +303,14 @@ class MainWindow(QMainWindow):
                 else:
                     result.append(part)
                 i += 1
-            new_labels.append("".join(result))
-        return new_labels
+            shortened_labels.append("".join(result))
+        
+        # Create a mapping from original to shortened
+        shortened_map = dict(zip(labels_to_process, shortened_labels))
+        
+        # Return the final list, preserving 'average' labels
+        return [shortened_map.get(lbl, lbl) for lbl in labels]
+
 
     def _update_plot_labels(self):
         rowCount = self.plot_table.rowCount()
@@ -312,6 +338,7 @@ class MainWindow(QMainWindow):
         systems = [name.split(' | ')[1] for name in full_names]
         
         shortened_studies = MainWindow._shorten_labels(studies)
+        # Pass the original system names to the shortener
         shortened_systems = MainWindow._shorten_labels(systems)
 
         for row in range(rowCount):
@@ -320,7 +347,14 @@ class MainWindow(QMainWindow):
                 parts = full_names[row].split(' | ')
                 if len(parts) == 4:
                     short_study = shortened_studies[row] if row < len(shortened_studies) else parts[0]
-                    short_system = shortened_systems[row] if row < len(shortened_systems) else parts[1]
+                    
+                    # Get the shortened system name, and handle 'average' -> 'ave'
+                    system_name = parts[1]
+                    if system_name == 'average':
+                        short_system = 'ave'
+                    else:
+                        short_system = shortened_systems[row] if row < len(shortened_systems) else system_name
+
                     new_name = f"{short_study} | {short_system} | {parts[2]} | {parts[3]}"
                     item.setText(new_name)
 
@@ -364,7 +398,6 @@ class MainWindow(QMainWindow):
         # Column 1: Plot name
         name_item = QTableWidgetItem(data['plot_name'])
         name_item.setData(Qt.ItemDataRole.UserRole, data['plot_name'])
-        name_item.setForeground(Qt.GlobalColor.gray if "N/A" in data['plot_name'] else Qt.GlobalColor.black)
         self.plot_table.setItem(row_index, 1, name_item)
 
         # Column 2: Show
@@ -406,6 +439,8 @@ class MainWindow(QMainWindow):
         del_btn.setStyleSheet("color: red; font-weight: bold;")
         del_btn.clicked.connect(self.delete_plot_row)
         self.plot_table.setCellWidget(row_index, 8, self._create_centered_widget(del_btn))
+        
+        self._update_row_visual_state(row_index) # Set initial color
 
     def swap_rows(self, r1, r2):
         self.plot_table.blockSignals(True)
@@ -443,14 +478,14 @@ class MainWindow(QMainWindow):
         self.xaxis_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
         self.yaxis_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
 
-        # Connect table selection changes to update dropdowns
+        # Connect table selection changes to update dropdowns and potentially the plot
         self.plot_table.itemSelectionChanged.connect(self.on_table_selection_changed)
 
     def _on_lock_axes_toggled(self, checked):
         if checked:
-            self.lock_axes_btn.setIcon(QIcon.fromTheme("lock-locked"))
+            self.lock_axes_btn.setText("🔒")  # Lock emoji
         else:
-            self.lock_axes_btn.setIcon(QIcon.fromTheme("lock-unlocked"))
+            self.lock_axes_btn.setText("🔓")  # Unlock emoji
         self.plot_controller.toggle_axes_lock(checked)
 
     def _on_header_clicked(self, column_index):
@@ -469,10 +504,10 @@ class MainWindow(QMainWindow):
             header.model().setHeaderData(column_index, Qt.Orientation.Horizontal,
                                         None, Qt.ItemDataRole.BackgroundRole)
         else:
-            # If not synchronized, synchronize and copy value from first row
+            # If not synchronized, synchronize and copy value from selected row
             self.synchronized_columns.add(column_index)
 
-            # Copy the value from the first row to all other rows
+            # Copy the value from the selected row to all other rows
             if self.plot_table.rowCount() > 1:
                 self._sync_column_values(column_index)
 
@@ -483,78 +518,70 @@ class MainWindow(QMainWindow):
         self.update_plots()
 
     def _sync_column_values(self, column_index):
-        """Sync values in all rows of a column based on the first row."""
+        """Sync values in all rows of a column based on the selected row."""
         if self.plot_table.rowCount() == 0:
             return
 
-        # Get the value from the first row
-        first_row_widget = self.plot_table.cellWidget(0, column_index)
-        if not first_row_widget:
-            # If it's a QTableWidgetItem (Plot name), handle it differently
-            if column_index == 1:
-                first_item = self.plot_table.item(0, 1)
-                first_value = first_item.data(Qt.ItemDataRole.UserRole) if first_item else ""
-
-                # Apply to all other rows
-                for row in range(1, self.plot_table.rowCount()):
-                    item = self.plot_table.item(row, 1)
-                    if item:
-                        item.setData(Qt.ItemDataRole.UserRole, first_value)
-                        item.setText(first_value)
+        source_row = self.plot_table.currentRow()
+        if source_row == -1:
+            source_row = 0 # Fallback to the first row if none is selected
+        
+        # Get the value from the source row
+        source_widget = self.plot_table.cellWidget(source_row, column_index)
+        if not source_widget:
             return
 
         # Handle widget-based columns (2-7: Show, Mean, Std, Style, thk)
-        first_widget = first_row_widget
         if column_index == 2:  # Show (checkbox)
-            first_value = first_widget.findChild(QCheckBox).isChecked()
-            for row in range(1, self.plot_table.rowCount()):
+            source_value = source_widget.findChild(QCheckBox).isChecked()
+            for row in range(self.plot_table.rowCount()):
                 widget = self.plot_table.cellWidget(row, column_index)
                 if widget:
                     checkbox = widget.findChild(QCheckBox)
                     checkbox.blockSignals(True)
-                    checkbox.setChecked(first_value)
+                    checkbox.setChecked(source_value)
                     checkbox.blockSignals(False)
         elif column_index == 3:  # Mean (line edit)
-            first_value = first_widget.findChild(QLineEdit).text()
-            for row in range(1, self.plot_table.rowCount()):
-                # For Mean column sync, only sync to rows where Show column is active
-                show_widget = self.plot_table.cellWidget(row, 2)  # Show column
-                if show_widget:
-                    show_checkbox = show_widget.findChild(QCheckBox)
-                    if not show_checkbox.isChecked():  # Skip if Show is not active
-                        continue
+            source_value = source_widget.findChild(QLineEdit).text()
+            for row in range(self.plot_table.rowCount()):
+                show_widget = self.plot_table.cellWidget(row, 2)
+                mean_widget = self.plot_table.cellWidget(row, 3)
 
-                widget = self.plot_table.cellWidget(row, column_index)
-                if widget:
-                    line_edit = widget.findChild(QLineEdit)
-                    line_edit.blockSignals(True)
-                    line_edit.setText(first_value)
-                    line_edit.blockSignals(False)
+                if mean_widget:
+                    is_show_checked = show_widget.findChild(QCheckBox).isChecked() if show_widget else False
+                    mean_text = mean_widget.findChild(QLineEdit).text()
+                    is_mean_active = mean_text.isdigit() and int(mean_text) != 0
+
+                    if is_show_checked or is_mean_active:
+                        line_edit = mean_widget.findChild(QLineEdit)
+                        line_edit.blockSignals(True)
+                        line_edit.setText(source_value)
+                        line_edit.blockSignals(False)
         elif column_index == 4:  # Std (checkbox)
-            first_value = first_widget.findChild(QCheckBox).isChecked()
-            for row in range(1, self.plot_table.rowCount()):
+            source_value = source_widget.findChild(QCheckBox).isChecked()
+            for row in range(self.plot_table.rowCount()):
                 widget = self.plot_table.cellWidget(row, column_index)
                 if widget:
                     checkbox = widget.findChild(QCheckBox)
                     checkbox.blockSignals(True)
-                    checkbox.setChecked(first_value)
+                    checkbox.setChecked(source_value)
                     checkbox.blockSignals(False)
         elif column_index == 6:  # Style (combo box)
-            first_value = first_widget.currentText()
-            for row in range(1, self.plot_table.rowCount()):
+            source_value = source_widget.currentText()
+            for row in range(self.plot_table.rowCount()):
                 widget = self.plot_table.cellWidget(row, column_index)
                 if widget:
                     widget.blockSignals(True)
-                    widget.setCurrentText(first_value)
+                    widget.setCurrentText(source_value)
                     widget.blockSignals(False)
         elif column_index == 7:  # thk (line edit)
-            first_value = first_widget.findChild(QLineEdit).text()
-            for row in range(1, self.plot_table.rowCount()):
+            source_value = source_widget.findChild(QLineEdit).text()
+            for row in range(self.plot_table.rowCount()):
                 widget = self.plot_table.cellWidget(row, column_index)
                 if widget:
                     line_edit = widget.findChild(QLineEdit)
                     line_edit.blockSignals(True)
-                    line_edit.setText(first_value)
+                    line_edit.setText(source_value)
                     line_edit.blockSignals(False)
 
     def _update_sync_based_on_column(self, column_index, current_row):
@@ -587,66 +614,108 @@ class MainWindow(QMainWindow):
             if row == current_row:
                 continue
 
-            # For Mean column sync, only sync to rows where Show column is active
-            if column_index == 3:  # Mean column
-                show_widget = self.plot_table.cellWidget(row, 2)  # Show column
-                if show_widget:
-                    show_checkbox = show_widget.findChild(QCheckBox)
-                    if not show_checkbox.isChecked():  # Skip if Show is not active
-                        continue
-
             target_widget = self.plot_table.cellWidget(row, column_index)
-            if target_widget:
-                if column_index == 2:  # Show (checkbox)
-                    checkbox = target_widget.findChild(QCheckBox)
-                    checkbox.blockSignals(True)
-                    checkbox.setChecked(new_value)
-                    checkbox.blockSignals(False)
-                elif column_index == 3:  # Mean (line edit)
-                    line_edit = target_widget.findChild(QLineEdit)
-                    line_edit.blockSignals(True)
-                    line_edit.setText(new_value)
-                    line_edit.blockSignals(False)
-                elif column_index == 4:  # Std (checkbox)
-                    checkbox = target_widget.findChild(QCheckBox)
-                    checkbox.blockSignals(True)
-                    checkbox.setChecked(new_value)
-                    checkbox.blockSignals(False)
-                elif column_index == 6:  # Style (combo box)
-                    target_widget.blockSignals(True)
-                    target_widget.setCurrentText(new_value)
-                    target_widget.blockSignals(False)
-                elif column_index == 7:  # thk (line edit)
-                    line_edit = target_widget.findChild(QLineEdit)
-                    line_edit.blockSignals(True)
-                    line_edit.setText(new_value)
-                    line_edit.blockSignals(False)
+            if not target_widget:
+                continue
+            
+            # Check eligibility for Mean column sync before applying
+            if column_index == 3:
+                show_widget = self.plot_table.cellWidget(row, 2)
+                mean_widget = self.plot_table.cellWidget(row, 3)
+                is_eligible = False
+                if mean_widget:
+                    is_show_checked = show_widget.findChild(QCheckBox).isChecked() if show_widget else False
+                    mean_text = mean_widget.findChild(QLineEdit).text()
+                    is_mean_active = mean_text.isdigit() and int(mean_text) != 0
+                    if is_show_checked or is_mean_active:
+                        is_eligible = True
+                
+                if not is_eligible:
+                    continue # Skip this row
+
+            if column_index == 2:  # Show (checkbox)
+                checkbox = target_widget.findChild(QCheckBox)
+                checkbox.blockSignals(True)
+                checkbox.setChecked(new_value)
+                checkbox.blockSignals(False)
+            elif column_index == 3:  # Mean (line edit)
+                line_edit = target_widget.findChild(QLineEdit)
+                line_edit.blockSignals(True)
+                line_edit.setText(new_value)
+                line_edit.blockSignals(False)
+            elif column_index == 4:  # Std (checkbox)
+                checkbox = target_widget.findChild(QCheckBox)
+                checkbox.blockSignals(True)
+                checkbox.setChecked(new_value)
+                checkbox.blockSignals(False)
+            elif column_index == 6:  # Style (combo box)
+                target_widget.blockSignals(True)
+                target_widget.setCurrentText(new_value)
+                target_widget.blockSignals(False)
+            elif column_index == 7:  # thk (line edit)
+                line_edit = target_widget.findChild(QLineEdit)
+                line_edit.blockSignals(True)
+                line_edit.setText(new_value)
+                line_edit.blockSignals(False)
 
     def browse_for_path(self):
         self.chip_input.add_chip_from_input()
-        
+
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Select Path Type")
         msg_box.setText("How do you want to select your data?")
-        dir_button = msg_box.addButton("Project Directory", QMessageBox.ButtonRole.ActionRole)
+        # Add RejectRole button for the X button to work properly
+        msg_box.addButton(QMessageBox.StandardButton.Cancel)
         file_button = msg_box.addButton("Single Log File", QMessageBox.ButtonRole.ActionRole)
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Cancel)
+        dir_button = msg_box.addButton("Project Directory", QMessageBox.ButtonRole.ActionRole)
+
+        # Set increased width for the buttons
+        file_button.setMinimumWidth(int(file_button.sizeHint().width() * 1.2))
+        dir_button.setMinimumWidth(int(dir_button.sizeHint().width() * 1.2))
+
+        # Hide the Cancel button so only the X in the window decoration is visible
+        cancel_button = msg_box.button(QMessageBox.StandardButton.Cancel)
+        if cancel_button:
+            cancel_button.setVisible(False)
+
         msg_box.exec()
+
+        clicked_button = msg_box.clickedButton()
+        # If the close button (X) was pressed without selecting a button, exit early
+        if clicked_button is None or clicked_button == cancel_button:
+            return
+
+        path = None
 
         start_path = self.path_edit.text()
         if not os.path.exists(start_path):
             start_path = str(Path.home())
 
-        if msg_box.clickedButton() == dir_button:
+        if clicked_button == dir_button:
             path = QFileDialog.getExistingDirectory(self, "Select Project Root", directory=start_path)
-        elif msg_box.clickedButton() == file_button:
+        elif clicked_button == file_button:
             path, _ = QFileDialog.getOpenFileName(self, "Select Single Log File", directory=start_path)
-        else:
-            path = None
+            if path:
+                # Check for other files with the same extension
+                p = Path(path)
+                other_files = [f for f in p.parent.glob(f"*{p.suffix}") if f.is_file()]
+                if len(other_files) > 1:
+                    reply = QMessageBox.question(self, "Multiple Files Found",
+                                                 f"Found {len(other_files)} files with '{p.suffix}' extension in this directory.\n\n"
+                                                 "Do you want to load all of them as separate plots?",
+                                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                                 QMessageBox.StandardButton.No)
+                    if reply == QMessageBox.StandardButton.Yes:
+                        # User wants to load all files, switch to directory mode
+                        self.path_edit.setText(str(p.parent))
+                        self.on_path_entered()
+                        return
+                # If user says no, or only one file found, proceed with single file path
 
         if path:
             self.path_edit.setText(path)
             self.on_path_entered()
+
     
     def on_path_entered(self):
         self.chip_input.add_chip_from_input()
@@ -684,6 +753,7 @@ class MainWindow(QMainWindow):
             self.on_path_entered()
 
     def load_project(self, root_path):
+        self.average_user_choices.clear() # Clear cache on new project load
         keywords = self.chip_input.get_chips()
         if not keywords:
             self.data_manager.data.clear()
@@ -764,7 +834,7 @@ class MainWindow(QMainWindow):
             reset_combo(self.xaxis_combo, "Select X-Axis", self.data_manager.get_all_column_names())
             reset_combo(self.yaxis_combo, "Select Y-Axis", self.data_manager.get_all_column_names())
             
-            if self.data_manager.get_study_names():
+            if self.data_manager.get_study_names() or self.data_manager.get_all_system_names():
                 self.add_new_plot_row()
             else:
                 QMessageBox.warning(self, "No Data", "Project loaded, but no valid study or system data was found.")
@@ -799,6 +869,7 @@ class MainWindow(QMainWindow):
         self.update_selected_row_from_dropdowns()
 
     def on_table_selection_changed(self):
+        # Update dropdowns to match selected row
         if not self.plot_table.selectedItems() or self.plot_table.currentRow() == -1:
             return
 
@@ -826,7 +897,7 @@ class MainWindow(QMainWindow):
             set_combo_text(self.study_combo, study)
 
             # Manually update system combo based on the selected study
-            systems = self.data_manager.get_system_names(study) if study != "N/A" else self.data_manager.get_all_system_names()
+            systems = self.data_manager.get_system_names(study) if study not in ["N/A", "."] else self.data_manager.get_all_system_names()
             self.system_combo.clear()
             self.system_combo.addItem("Select System")
             if len(systems) > 1:
@@ -840,6 +911,9 @@ class MainWindow(QMainWindow):
         finally:
             for combo in [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo]:
                 combo.blockSignals(False)
+        
+        # Trigger plot update because x-axis might need to change
+        self.update_plots()
 
     def update_selected_row_from_dropdowns(self, text=""):
         if not self.plot_table.selectedItems() or self.plot_table.currentRow() == -1:
@@ -859,10 +933,7 @@ class MainWindow(QMainWindow):
         plot_name_item.setText(plot_name)
         plot_name_item.setData(Qt.ItemDataRole.UserRole, plot_name)
 
-        is_complete = "N/A" not in [study, system, x_ax, y_ax]
-        color = Qt.GlobalColor.black if is_complete else Qt.GlobalColor.gray
-        plot_name_item.setForeground(color)
-
+        self._update_row_visual_state(selected_row)
         self.update_plots()
         self._update_plot_labels()
 
@@ -888,8 +959,21 @@ class MainWindow(QMainWindow):
             'style': "Solid",
             'thickness': "1"
         }
+        
+        # Smart defaults for new rows
+        is_single_file_mode = len(self.data_manager.get_study_names()) == 1 and self.data_manager.get_study_names()[0] == '.'
+        
+        if is_single_file_mode:
+            study = '.'
+            system = self.data_manager.get_system_names(study)[0]
+            x_ax = "N/A"
+            if "Step" in self.data_manager.available_columns:
+                x_ax = "Step"
+            elif self.data_manager.available_columns:
+                x_ax = self.data_manager.available_columns[0]
+            plot_data['plot_name'] = f"{study} | {system} | {x_ax} | N/A"
 
-        if self.plot_table.rowCount() > 1:
+        elif self.plot_table.rowCount() > 1:
             try:
                 # Get data from the row that was previously at the top
                 old_row_data = self._extract_row_data(1)
@@ -910,6 +994,7 @@ class MainWindow(QMainWindow):
 
     def update_plots(self):
         self.plot_controller.clear_all_plots()
+        selected_row_idx = self.plot_table.currentRow()
 
         all_plot_info = []
         for row in range(self.plot_table.rowCount()):
@@ -919,8 +1004,8 @@ class MainWindow(QMainWindow):
 
                 plot_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
                 study, system, x_ax, y_ax = plot_name.split(' | ')
-                if "N/A" in [study, system, x_ax, y_ax]:
-                    continue
+                
+                is_valid = "N/A" not in [study, system, x_ax, y_ax]
 
                 show_original = self.plot_table.cellWidget(row, 2).findChild(QCheckBox).isChecked()
                 mean_text = self.plot_table.cellWidget(row, 3).findChild(QLineEdit).text()
@@ -931,25 +1016,54 @@ class MainWindow(QMainWindow):
                 style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
                 thickness = float(self.plot_table.cellWidget(row, 7).findChild(QLineEdit).text())
 
+                is_active = show_original or (mean_window > 0) or show_std
+
                 plot_info = {
                     'row': row, 'plot_name': plot_name, 'study': study, 'system': system,
                     'x_ax': x_ax, 'y_ax': y_ax, 'color': color, 'style': style, 'thickness': thickness,
-                    'show_original': show_original, 'mean_window': mean_window, 'show_std': show_std
+                    'show_original': show_original, 'mean_window': mean_window, 'show_std': show_std,
+                    'is_valid': is_valid, 'is_active': is_active
                 }
                 all_plot_info.append(plot_info)
             except (ValueError, AttributeError, IndexError):
                 continue
         
+        # Determine the primary X-axis from the selected row
+        preferred_x_ax = None
+        if selected_row_idx != -1 and selected_row_idx < len(all_plot_info):
+            selected_plot_info = all_plot_info[selected_row_idx]
+            if selected_plot_info['is_active'] and selected_plot_info['is_valid']:
+                preferred_x_ax = selected_plot_info['x_ax']
+
+        # Fallback to the first active and valid plot if none is selected
+        if not preferred_x_ax:
+            for info in all_plot_info:
+                if info['is_active'] and info['is_valid']:
+                    preferred_x_ax = info['x_ax']
+                    break
+        
         for plot_info in all_plot_info:
+            if not (plot_info['is_valid'] and plot_info['is_active']):
+                continue
+
+            z_offset = 100 if plot_info['row'] == selected_row_idx else 0
             user_choices = None
             if plot_info['system'] == 'average':
-                consistency = self.data_manager.check_data_consistency(plot_info['study'])
+                study_name = plot_info['study']
+                consistency = self.data_manager.check_data_consistency(study_name)
                 if consistency:
-                    dialog = InconsistentDataDialog(consistency, self)
-                    if dialog.exec():
-                        user_choices = dialog.get_choices()
+                    cached_data = self.average_user_choices.get(study_name)
+                    # Check if cache is valid for the current data lengths
+                    if cached_data and cached_data.get('lengths') == consistency:
+                        user_choices = cached_data['choice']
                     else:
-                        continue
+                        dialog = InconsistentDataDialog(consistency, self)
+                        if dialog.exec():
+                            user_choices = dialog.get_choices()
+                            # Cache the choice with the current lengths
+                            self.average_user_choices[study_name] = {'choice': user_choices, 'lengths': consistency}
+                        else:
+                            continue # Skip this plot if user cancels dialog
 
             compute_raw_std = (
                 plot_info['system'] == 'average' and 
@@ -957,8 +1071,11 @@ class MainWindow(QMainWindow):
                 plot_info['mean_window'] == 0
             )
             
+            # Use the preferred x-axis for all plots to ensure consistency
+            current_x_ax = preferred_x_ax or plot_info['x_ax']
+
             data = self.data_manager.get_plot_data(
-                plot_info['study'], plot_info['system'], plot_info['x_ax'], plot_info['y_ax'], 
+                plot_info['study'], plot_info['system'], current_x_ax, plot_info['y_ax'], 
                 compute_raw_std, user_choices
             )
             
@@ -975,10 +1092,11 @@ class MainWindow(QMainWindow):
                 
                 self.plot_controller.add_or_update_plot(
                     plot_info['plot_name'], plot_data, plot_info['color'], 
-                    plot_info['style'], thickness=plot_info['thickness']
+                    plot_info['style'], thickness=plot_info['thickness'],
+                    layer_priority=z_offset
                 )
 
-            if plot_info['mean_window'] > 1:
+            if plot_info['mean_window'] >= 1:
                 running_mean_y = self._calculate_running_mean(original_y, plot_info['mean_window'])
                 running_mean_x = original_x[:len(running_mean_y)]
 
@@ -993,18 +1111,24 @@ class MainWindow(QMainWindow):
                         std_color.setHsv(std_color.hue(), int(std_color.saturation() * 0.66), int(std_color.value() * 0.5), int(std_color.alpha() * 0.5))
                         self.plot_controller.add_or_update_plot_with_custom_colors(
                             plot_info['plot_name'] + "_running_mean_std", std_data, std_color, 
-                            plot_info['style'], layer_priority=1
+                            plot_info['style'], layer_priority=1 + z_offset
                         )
+                
+                # Only draw the mean line if the window is > 0, to avoid re-drawing the original plot
+                if plot_info['mean_window'] > 0:
+                    mean_color = QColor(plot_info['color'])
+                    mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.5, mean_color.alphaF())
+                    mean_data = {'x': running_mean_x, 'y': running_mean_y, 'std': None, 'y_col': plot_info['y_ax']}
+                    self.plot_controller.add_or_update_plot_with_custom_colors(
+                        plot_info['plot_name'] + "_running_mean", mean_data, mean_color, 
+                        plot_info['style'], layer_priority=2 + z_offset, thickness=plot_info['thickness']
+                    )
 
-                mean_color = QColor(plot_info['color'])
-                mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.5, mean_color.alphaF())
-                mean_data = {'x': running_mean_x, 'y': running_mean_y, 'std': None, 'y_col': plot_info['y_ax']}
-                self.plot_controller.add_or_update_plot_with_custom_colors(
-                    plot_info['plot_name'] + "_running_mean", mean_data, mean_color, 
-                    plot_info['style'], layer_priority=2, thickness=plot_info['thickness']
-                )
-
-        self._update_axis_properties([p for p in all_plot_info if p['show_original'] or p['mean_window'] > 1])
+        self.current_x_axis = preferred_x_ax
+        # Update axis labels and row visual states
+        self._update_axis_properties([p for p in all_plot_info if p['is_active'] and p['is_valid']], preferred_x_ax)
+        for row in range(self.plot_table.rowCount()):
+            self._update_row_visual_state(row)
         
     def _handle_table_widget_change(self, row, column):
         """
@@ -1016,6 +1140,9 @@ class MainWindow(QMainWindow):
         
         # Second, now that the entire table state is consistent, redraw the plot.
         self.update_plots()
+
+        # Update the visual state of the row (e.g., for greying out)
+        self._update_row_visual_state(row)
 
     def _calculate_running_mean(self, data, window_size):
         """Calculate the running mean of data with specified window size using centered average."""
@@ -1055,8 +1182,8 @@ class MainWindow(QMainWindow):
         
         return result
 
-    def _update_axis_properties(self, visible_plots_info):
-        x_label = ""
+    def _update_axis_properties(self, visible_plots_info, x_label_override: str = None):
+        x_label = x_label_override or ""
         y_labels = {}
         for info in visible_plots_info:
             if not x_label: x_label = info['x_ax']
@@ -1099,6 +1226,32 @@ class MainWindow(QMainWindow):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setContentsMargins(0,0,0,0)
         return container
+    
+    def _update_row_visual_state(self, row: int):
+        """Greys out the plot name if the row is inactive or incomplete."""
+        item = self.plot_table.item(row, 1)
+        if not item:
+            return
+        
+        # Check for activity
+        show_orig = self.plot_table.cellWidget(row, 2).findChild(QCheckBox).isChecked()
+        mean_text = self.plot_table.cellWidget(row, 3).findChild(QLineEdit).text()
+        show_std = self.plot_table.cellWidget(row, 4).findChild(QCheckBox).isChecked()
+        is_mean_active = mean_text.isdigit() and int(mean_text) > 0
+        is_active = show_orig or is_mean_active or show_std
+        
+        # Check for completeness
+        plot_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+        is_complete = "N/A" not in plot_name
+
+        # Apply color
+        if not is_active:
+            item.setForeground(Qt.GlobalColor.lightGray)
+        elif not is_complete:
+            item.setForeground(Qt.GlobalColor.gray)
+        else:
+            item.setForeground(Qt.GlobalColor.black)
+
 
     def _get_distinct_color(self, existing_colors: list[QColor]) -> QColor:
         """Generates a new, visually distinct color by finding the candidate furthest from existing colors."""
@@ -1148,7 +1301,11 @@ class MainWindow(QMainWindow):
         os.makedirs(config_dir, exist_ok=True)
         path = os.path.join(config_dir, 'autosave.json')
 
-        config = {'path': self.path_edit.text(), 'plots': []}
+        config = {
+            'path': self.path_edit.text(),
+            'plots': [],
+            'average_choices': self.average_user_choices
+        }
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
             if item:
@@ -1175,7 +1332,11 @@ class MainWindow(QMainWindow):
         if not path:
             return
             
-        config = {'path': self.path_edit.text(), 'plots': []}
+        config = {
+            'path': self.path_edit.text(),
+            'plots': [],
+            'average_choices': self.average_user_choices
+        }
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
             if item:
@@ -1215,6 +1376,8 @@ class MainWindow(QMainWindow):
         if not config:
             QMessageBox.critical(self, "Error", "Failed to load session file.")
             return
+
+        self.average_user_choices = config.get('average_choices', {})
 
         project_path = config.get('path')
         if project_path:
