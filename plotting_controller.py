@@ -2,6 +2,7 @@ import pyqtgraph as pg
 from PyQt6.QtGui import QColor
 from typing import Dict, Any
 import numpy as np
+import copy
 
 class PlottingController:
     """Manages the pyqtgraph PlotWidget and its items."""
@@ -426,3 +427,81 @@ class PlottingController:
             print(f"Failed to save plot: {e}")
         finally:
             plt.close(fig)
+
+    def get_current_plot_state(self) -> Dict[str, Any]:
+        """
+        Extracts the current state of all visible plots, including data and visual properties,
+        structured for the PopOutWindow.
+        """
+        state = {
+            'title': "", # User can set this in the popout
+            'x_label': self.x_axis_label,
+            'y_axes': {}
+        }
+
+        # Mapping for Qt Pen Styles to Matplotlib strings
+        style_map = {
+            1: '-',      # SolidLine
+            2: '--',     # DashLine
+            3: ':',      # DotLine
+            4: '-.',     # DashDotLine
+        }
+
+        # Identify visible plots and group by Y-axis column
+        for name, plot_info in self.plots.items():
+            item = plot_info.get('item')
+            if not item or not item.isVisible():
+                continue
+
+            y_col = plot_info.get('y_col')
+            if not y_col: continue
+
+            # Initialize Y-axis group if missing
+            if y_col not in state['y_axes']:
+                state['y_axes'][y_col] = {
+                    'label': self.y_axis_labels.get(y_col, y_col),
+                    'series': []
+                }
+
+            # Extract Data
+            x_data, y_data = item.getData()
+            if x_data is None or y_data is None: continue
+            
+            # Extract Std Dev Data if available
+            std_data = None
+            error_item = plot_info.get('error_item')
+            if error_item:
+                # Extract from FillBetweenItem curves
+                c1 = error_item.curves[0].getData()
+                c2 = error_item.curves[1].getData()
+                # Derive std from the difference (assuming symmetric: y - lower)
+                # c1 is lower, c2 is upper usually, or vice versa. 
+                # Logic: y +/- std. So std = (upper - lower) / 2
+                if c1[1] is not None and c2[1] is not None:
+                    diff = np.abs(c2[1] - c1[1])
+                    std_data = diff / 2.0
+
+            # Extract Visuals
+            pen = item.opts['pen']
+            color = pen.color() # QColor
+            qt_style = pen.style()
+            width = pen.width()
+            
+            # Unique ID for the widget map
+            series_id = f"{y_col}_{name}"
+
+            series_entry = {
+                'id': series_id,
+                'name': name,
+                'x': np.array(x_data),
+                'y': np.array(y_data),
+                'std': np.array(std_data) if std_data is not None else None,
+                'color': color,
+                'linestyle_qt': qt_style,
+                'linestyle_matlab': style_map.get(qt_style, '-'),
+                'width': width
+            }
+
+            state['y_axes'][y_col]['series'].append(series_entry)
+            
+        return state

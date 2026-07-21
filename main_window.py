@@ -20,6 +20,7 @@ from plotting_controller import PlottingController
 from settings_manager import SettingsManager
 from ui_components import ColorButton, InconsistentDataDialog, ChipInputWidget
 from global_label_editor_dialog import GlobalLabelEditorDialog
+from popout_window import PopOutWindow
 
 class RightClickButton(QPushButton):
     rightClicked = pyqtSignal()
@@ -43,6 +44,7 @@ class MainWindow(QMainWindow):
         self.running_mean_setting = "symmetric_window" # Default setting for running mean
         self.synchronized_columns = set()
         self.average_user_choices = {}
+        self.popout_windows = []
         self.current_x_axis = None
         self.global_label_map = {}
         self.scale_lock_enabled = False
@@ -614,6 +616,9 @@ class MainWindow(QMainWindow):
 
         # Connect double-click to edit labels
         self.plot_table.cellDoubleClicked.connect(self._on_table_double_click)
+        
+        # Connect pop out button to enable triggering plot pop outs
+        self.popout_btn.clicked.connect(self.launch_popout_window)
 
     def _on_table_double_click(self, row: int, column: int):
         """Handle double-click on table row to edit labels."""
@@ -1714,3 +1719,30 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Export Plot", "", "SVG Files (*.svg);;PDF Files (*.pdf)")
         if path:
             self.plot_controller.export_plot(path)
+
+    def launch_popout_window(self):
+        """Creates a new independent window with the current plot data."""
+        if self.plot_table.rowCount() == 0:
+            return
+
+        try:
+            import matplotlib
+        except ImportError:
+            QMessageBox.critical(self, "Error", "Matplotlib is required for the Pop Out feature.\nPlease install it via pip: pip install matplotlib")
+            return
+
+        plot_state = self.plot_controller.get_current_plot_state()
+        
+        if not plot_state['y_axes']:
+            QMessageBox.information(self, "Info", "No visible data to display in Pop Out.")
+            return
+
+        popout = PopOutWindow(plot_state)
+        popout.show()
+        
+        # Keep reference to prevent GC
+        self.popout_windows.append(popout)
+        
+        # Clean up closed windows
+        # (Optional: Connect destroyed signal to remove from list, or just let list grow - small overhead)
+        popout.destroyed.connect(lambda: self.popout_windows.remove(popout) if popout in self.popout_windows else None)
