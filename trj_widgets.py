@@ -385,10 +385,10 @@ class PlayerControlWidget(QWidget):
         
         main_layout.addWidget(slider_container, 1)
 
-        self.btn_first.clicked.connect(lambda: self.set_step_index(0))
+        self.btn_first.clicked.connect(self._on_first_clicked)
         self.btn_prev.clicked.connect(lambda: self.set_step_index(self.slider.value() - 1))
         self.btn_next.clicked.connect(lambda: self.set_step_index(self.slider.value() + 1))
-        self.btn_last.clicked.connect(lambda: self.set_step_index(self.slider.maximum()))
+        self.btn_last.clicked.connect(self._on_last_clicked)
         
         self.timesteps = []
 
@@ -416,6 +416,16 @@ class PlayerControlWidget(QWidget):
         idx = max(0, min(idx, len(self.timesteps)-1))
         self.slider.setValue(idx)
 
+    def _on_first_clicked(self):
+        if self.btn_play.isChecked():
+            self.btn_play.setChecked(False)
+        self.set_step_index(0)
+
+    def _on_last_clicked(self):
+        if self.btn_play.isChecked():
+            self.btn_play.setChecked(False)
+        self.set_step_index(self.slider.maximum())
+
     def _on_slider_change(self, val):
         self._update_step_label()
         if self.timesteps and 0 <= val < len(self.timesteps):
@@ -427,10 +437,12 @@ class PlayerControlWidget(QWidget):
             self.step_lbl.setText(f"Step: {val}")
 
     def _on_play_toggled(self, checked):
-        self.btn_first.setEnabled(not checked)
+        # Allow jumping to start/end even while playing
+        self.btn_first.setEnabled(True) 
+        self.btn_last.setEnabled(True)
+        
         self.btn_prev.setEnabled(not checked)
         self.btn_next.setEnabled(not checked)
-        self.btn_last.setEnabled(not checked)
         
         if checked:
             self.btn_play.setText("||")

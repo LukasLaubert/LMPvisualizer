@@ -1576,7 +1576,10 @@ class LogPlotPanel(QWidget):
             'plots': [],
             'average_choices': self.average_user_choices,
             'running_mean_setting': self.running_mean_setting,
-            'global_label_map': self.global_label_map
+            'global_label_map': self.global_label_map,
+            'scale_lock': self.scale_lock_enabled,
+            'axes_lock': self.lock_axes_btn.isChecked(),
+            'view_ranges': self.plot_controller.get_view_ranges()
         }
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
@@ -1605,7 +1608,10 @@ class LogPlotPanel(QWidget):
             'plots': [],
             'average_choices': self.average_user_choices,
             'running_mean_setting': self.running_mean_setting,
-            'global_label_map': self.global_label_map
+            'global_label_map': self.global_label_map,
+            'scale_lock': self.scale_lock_enabled,
+            'axes_lock': self.lock_axes_btn.isChecked(),
+            'view_ranges': self.plot_controller.get_view_ranges()
         }
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
@@ -1665,6 +1671,17 @@ class LogPlotPanel(QWidget):
                 
                 # Load settings after project load to prevent them from being reset
                 self.running_mean_setting = config.get('running_mean_setting', 'symmetric_window')
+                
+                # Restore Lock States
+                self.scale_lock_enabled = config.get('scale_lock', False)
+                axes_locked = config.get('axes_lock', False)
+                
+                # Apply 0-Lock (triggers signal to update controller)
+                self.lock_axes_btn.setChecked(axes_locked)
+                
+                # Apply Scale Lock (manual update as it's not a direct button toggle)
+                self.plot_controller.toggle_scale_lock(self.scale_lock_enabled)
+                self._update_lock_button_visuals()
 
                 self.plot_table.setRowCount(0)
                 for plot_info in config.get('plots', []):
@@ -1689,6 +1706,11 @@ class LogPlotPanel(QWidget):
                 self._update_move_buttons_visibility()
                 self.update_plots()
                 self._update_plot_labels()
+                
+                # Restore View Ranges (must be done after plots are updated/created)
+                view_ranges = config.get('view_ranges', {})
+                if view_ranges:
+                    self.plot_controller.set_view_ranges(view_ranges)
 
             except FileNotFoundError as e:
                 QMessageBox.critical(self, "Error", f"Could not find project path from session file:\n{e}")

@@ -48,13 +48,13 @@ class LogParser:
 
         # Case 2: Path is a directory, try normal discovery first
         if path.is_dir():
-            study_dirs = [d for d in path.iterdir() if d.is_dir() and "input_files" not in d.name]
+            study_dirs = [d for d in path.iterdir() if d.is_dir() and not d.name.startswith(('.', '_'))]
             
             if study_dirs:
                 studies = {}
                 base_systems = None
                 for study_dir in study_dirs:
-                    systems = sorted([s.name for s in study_dir.iterdir() if s.is_dir()])
+                    systems = sorted([s.name for s in study_dir.iterdir() if s.is_dir() and not s.name.startswith(('.', '_'))])
                     if not systems:
                         warnings.append(f"Study '{study_dir.name}' contains no system subdirectories.")
                         continue

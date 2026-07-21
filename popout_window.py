@@ -638,8 +638,9 @@ class PopOutWindow(QMainWindow):
             frame = self.legend_frame.isChecked()
             draggable = self.legend_draggable.isChecked()
             
-            leg = ax_primary.legend(all_handles, all_labels, loc=loc, frameon=frame, fontsize=font_legend)
-            
+            target_ax = axes_map[y_cols[-1]]
+            leg = target_ax.legend(all_handles, all_labels, loc=loc, frameon=frame, fontsize=font_legend)
+            leg.set_zorder(10000) # Force on top
             leg.set_in_layout(False)
             if draggable:
                 leg.set_draggable(True)

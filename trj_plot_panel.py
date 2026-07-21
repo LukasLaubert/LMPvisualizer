@@ -356,11 +356,20 @@ class TrjPlotPanel(QWidget):
         
         if text != "Select System":
             study = self.study_combo.currentText()
+            
+            # Check if study changed BEFORE updating controller
+            is_study_change = (self.controller.current_study != study)
+            
             parser = self.data_manager.get_parser(study, text)
             if parser:
                 cols = parser.get_column_names()
                 self.controller.set_active_system(study, text)
                 self.player_controls.set_timesteps(self.controller.get_available_timesteps())
+                
+                # Explicitly reset UI slider if study changed
+                if is_study_change:
+                    self.player_controls.set_step_index(0)
+                
                 if cols:
                     enable_props = True
 
@@ -1030,6 +1039,7 @@ class TrjPlotPanel(QWidget):
             self.controller.export_plot(path, figsize=(width_in, height_in))
 
     def save_session(self):
+        self._save_current_row_state() # Capture latest state (e.g. view range)
         path, _ = QFileDialog.getSaveFileName(self, "Save Trj Session", "", "JSON Files (*.json)")
         if not path: return
         

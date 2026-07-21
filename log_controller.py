@@ -45,10 +45,9 @@ class LogController:
             if self.axes_locked or self.scale_locked:
                 vb.sigRangeChanged.connect(self._on_axis_range_changed)
         
-        # If we are locking, trigger an initial sync to align everything
-        if self.axes_locked and self.y_axes:
-            # Use the main viewbox as source for initial sync
-            self._synchronize_axes(source_vb=self.plot_item.getViewBox())
+        # Trigger reset view to apply the new locking logic immediately
+        if self.y_axes:
+            self.reset_view()
 
     def toggle_scale_lock(self, locked: bool):
         """Toggles scaling lock state and updates connections."""
@@ -66,13 +65,14 @@ class LogController:
                 vb.sigRangeChanged.connect(self._on_axis_range_changed)
         
         # Trigger immediate sync if enabling scale lock
-        if self.scale_locked and self.y_axes:
-            self._synchronize_axes(source_vb=self.plot_item.getViewBox())
+        if self.y_axes:
+            self.reset_view()
 
     def apply_current_locks(self):
-        """Forces synchronization if any locks are active. Useful after reloading plots."""
-        if (self.axes_locked or self.scale_locked) and self.y_axes:
-            self._synchronize_axes(source_vb=self.plot_item.getViewBox())
+        """Forces synchronization/reset of views. Useful after reloading plots."""
+        # This ensures the view resets (to auto-fit) even when No Locks are active.
+        if self.y_axes:
+            self.reset_view()
 
     def _on_axis_range_changed(self, changed_vb: pg.ViewBox):
         """Signal handler that triggers when any connected axis is moved."""
@@ -406,7 +406,11 @@ class LogController:
         ax_primary.xaxis.label.set_color('black')
         ax_primary.grid(True, alpha=0.3)
         
-        if all_handles: ax_primary.legend(all_handles, all_labels, loc='best')
+        if all_handles:
+            # Place legend on the last added axis (top of stack) to ensure z-order
+            target_ax = matplotlib_axes[y_axis_order[-1]]
+            leg = target_ax.legend(all_handles, all_labels, loc='best')
+            leg.set_zorder(10000) # Ensure legend is on top of everything
         
         fig.tight_layout()
         try:
@@ -475,15 +479,215 @@ class LogController:
             
         return state
 
+    def get_global_y_range(self):
+        """Calculates the global min and max Y values across all visible plots."""
+        global_min = float('inf')
+        global_max = float('-inf')
+        found_data = False
+
+        for plot_info in self.plots.values():
+            item = plot_info.get('item')
+            if not item or not item.isVisible():
+                continue
+            
+            _, y = item.getData()
+            if y is not None and len(y) > 0:
+                found_data = True
+                global_min = min(global_min, np.min(y))
+                global_max = max(global_max, np.max(y))
+                
+                # Check error band if present
+                error_item = plot_info.get('error_item')
+                if error_item:
+                    c1 = error_item.curves[0].getData()
+                    c2 = error_item.curves[1].getData()
+                    if c1[1] is not None: global_min = min(global_min, np.min(c1[1]))
+                    if c2[1] is not None: global_max = max(global_max, np.max(c2[1]))
+
+        if not found_data:
+            return None
+        return global_min, global_max
+
     def reset_view(self):
-        """Resets the view of the main plot and all auxiliary axes to auto-range."""
-        # Reset main viewbox (X and primary Y)
+        """
+        Resets the view based on current lock states.
+        Calculates ranges manually to avoid pyqtgraph auto-range issues.
+        """
+        # Always reset X to auto first
         self.plot_item.enableAutoRange(axis='x')
-        self.plot_item.enableAutoRange(axis='y')
+
+        # 1. Gather all active ViewBoxes and their specific data bounds
+        axes_data = []
         
-        # Reset all auxiliary viewboxes
+        # Main ViewBox
+        main_vb = self.plot_item.getViewBox()
+        dmin, dmax = self._get_data_bounds_for_viewbox(main_vb)
+        axes_data.append({'vb': main_vb, 'min': dmin, 'max': dmax})
+        
+        # Aux ViewBoxes
         for axis_info in self.y_axes.values():
-            axis_info['viewbox'].enableAutoRange(axis='y')
+            vb = axis_info['viewbox']
+            if vb is not main_vb:
+                dmin, dmax = self._get_data_bounds_for_viewbox(vb)
+                axes_data.append({'vb': vb, 'min': dmin, 'max': dmax})
+
+        # Padding factor (e.g., 5%)
+        pad = 0.05
+
+        # --- SCENARIO 1: BOTH LOCKS (Global Union) ---
+        if self.axes_locked and self.scale_locked:
+            # Find global min/max
+            gmin, gmax = float('inf'), float('-inf')
+            has_data = False
+            for d in axes_data:
+                if d['min'] is not None:
+                    gmin = min(gmin, d['min'])
+                    gmax = max(gmax, d['max'])
+                    has_data = True
+            
+            if not has_data:
+                gmin, gmax = 0.0, 1.0
+            
+            # Apply global range to ALL viewboxes
+            for d in axes_data:
+                d['vb'].setYRange(gmin, gmax, padding=pad)
+
+        # --- SCENARIO 2: AXES LOCK ONLY (Smart Zero Alignment) ---
+        elif self.axes_locked:
+            # Step A: Calculate Ideal Ratio (R) for each axis
+            ideal_ratios = []
+            
+            for d in axes_data:
+                dmin, dmax = d['min'], d['max']
+                if dmin is None: continue
+
+                span = dmax - dmin
+                if span == 0: span = 1.0 if dmax == 0 else abs(dmax)
+
+                if dmin >= 0:
+                    r_i = 0.0 # All positive -> 0 at bottom
+                elif dmax <= 0:
+                    r_i = 1.0 # All negative -> 0 at top
+                else:
+                    # Crossing zero -> R is fraction of space for negative
+                    r_i = abs(dmin) / (abs(dmin) + dmax)
+                
+                ideal_ratios.append(r_i)
+            
+            target_R = float(np.median(ideal_ratios)) if ideal_ratios else 0.5
+
+            # Step B: Scale each axis individually to fit data into target_R
+            for d in axes_data:
+                vb, dmin, dmax = d['vb'], d['min'], d['max']
+                if dmin is None:
+                    vb.setYRange(-target_R, 1-target_R, padding=pad)
+                    continue
+
+                # Calculate Height (H) required
+                req_h_min = 0.0
+                req_h_max = 0.0
+                
+                if target_R > 1e-6 and dmin < 0:
+                    req_h_min = abs(dmin) / target_R
+                
+                if (1 - target_R) > 1e-6 and dmax > 0:
+                    req_h_max = dmax / (1 - target_R)
+                
+                H = max(req_h_min, req_h_max)
+                if H == 0: H = 1.0
+                
+                # Apply bounds
+                new_min = -H * target_R
+                new_max = H * (1 - target_R)
+                vb.setYRange(new_min, new_max, padding=pad)
+
+        # --- SCENARIO 3: SCALE LOCK ONLY (Uniform Zoom) ---
+        elif self.scale_locked:
+            # Find the Maximum Data Span across all axes
+            max_span = 0.0
+            for d in axes_data:
+                if d['min'] is not None:
+                    span = d['max'] - d['min']
+                    if span > max_span: max_span = span
+            
+            if max_span == 0: max_span = 1.0
+            
+            # Apply Max Span to each axis, centered on its own data
+            # This ensures every axis has the same 'zoom level' (units per pixel)
+            for d in axes_data:
+                vb, dmin, dmax = d['vb'], d['min'], d['max']
+                if dmin is None:
+                    center = 0.5
+                else:
+                    center = (dmin + dmax) / 2.0
+                
+                half = max_span / 2.0
+                vb.setYRange(center - half, center + half, padding=pad)
+
+        # --- SCENARIO 4: NO LOCKS (Pure Independent) ---
+        else:
+            # Replicate the "Auto Scale" button behavior exactly.
+            # This enables continuous auto-scaling and hides the 'A' symbol.
+            for d in axes_data:
+                d['vb'].enableAutoRange(axis='y')
+
+    def get_view_ranges(self) -> Dict[str, Any]:
+        """Returns a dictionary of view ranges for all active axes."""
+        ranges = {}
+        # Main ViewBox (associated with left axis)
+        ranges['main'] = self.plot_item.getViewBox().viewRange()
+        
+        # Auxiliary Axes
+        for y_col, axis_info in self.y_axes.items():
+            if axis_info['viewbox'] is not self.plot_item.getViewBox():
+                ranges[y_col] = axis_info['viewbox'].viewRange()
+        return ranges
+
+    def set_view_ranges(self, ranges: Dict[str, Any]):
+        """Restores view ranges from a dictionary."""
+        if not ranges: return
+        
+        # Restore Main
+        if 'main' in ranges:
+            xr, yr = ranges['main']
+            self.plot_item.getViewBox().setRange(xRange=xr, yRange=yr, padding=0)
+            
+        # Restore Aux
+        for y_col, axis_info in self.y_axes.items():
+            if y_col in ranges:
+                xr, yr = ranges[y_col]
+                axis_info['viewbox'].setYRange(yr[0], yr[1], padding=0)
+                # X is linked to main, so no need to set X
+    
+    def _get_data_bounds_for_viewbox(self, viewbox: pg.ViewBox):
+        """Helper to get min/max Y data from all visible plots associated with a given ViewBox."""
+        vmin = float('inf')
+        vmax = float('-inf')
+        has_data = False
+
+        for plot_info in self.plots.values():
+            if plot_info['view_box'] is viewbox:
+                item = plot_info.get('item')
+                if not item or not item.isVisible():
+                    continue
+                
+                _, y = item.getData()
+                if y is not None and len(y) > 0:
+                    has_data = True
+                    vmin = min(vmin, np.min(y))
+                    vmax = max(vmax, np.max(y))
+                    
+                    error_item = plot_info.get('error_item')
+                    if error_item:
+                        # FillBetweenItem stores curves. Check their data.
+                        c1 = error_item.curves[0].getData()
+                        c2 = error_item.curves[1].getData()
+                        if c1[1] is not None: vmin = min(vmin, np.min(c1[1]))
+                        if c2[1] is not None: vmax = max(vmax, np.max(c2[1]))
+        
+        if not has_data:
+            return None, None
+        return vmin, vmax
 
     def _get_mpl_linestyle(self, qt_style):
         """Maps Qt PenStyle enums/ints to Matplotlib linestyle strings."""

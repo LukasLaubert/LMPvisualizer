@@ -62,6 +62,12 @@ class MainWindow(QMainWindow):
         self.browse_btn.clicked.connect(self.browse_for_path)
         top_controls_layout.addWidget(self.browse_btn, 0, 2)
 
+        self.refresh_btn = QPushButton("⟳")
+        self.refresh_btn.setFixedWidth(30)
+        self.refresh_btn.setToolTip("Reload Path")
+        self.refresh_btn.clicked.connect(self.on_refresh_clicked)
+        top_controls_layout.addWidget(self.refresh_btn, 0, 3)
+
         # Row 1: Keywords and Info
         kw_lbl = QLabel("Keywords:")
         kw_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
@@ -162,7 +168,16 @@ class MainWindow(QMainWindow):
         self.chip_input.add_chip_from_input()
         path_str = self.path_edit.text()
         
-        if not path_str or path_str == self.current_project_path:
+        if not path_str:
+             # Path cleared: Reset current panel to default
+             self.current_project_path = ""
+             current_panel = self.stacked_widget.currentWidget()
+             if hasattr(current_panel, '_update_ui_state'):
+                 current_panel.loaded_path = None
+                 current_panel._update_ui_state(project_loaded=False)
+             return
+
+        if path_str == self.current_project_path:
             return
         
         path = Path(path_str)
@@ -182,6 +197,11 @@ class MainWindow(QMainWindow):
         
         self.current_project_path = self.path_edit.text()
         self.propagate_load(path)
+
+    def on_refresh_clicked(self):
+        path_str = self.path_edit.text()
+        if path_str and os.path.exists(path_str):
+            self.propagate_load(Path(path_str), force_reload=True)
 
     def on_keywords_changed(self, keywords):
         path_str = self.path_edit.text()

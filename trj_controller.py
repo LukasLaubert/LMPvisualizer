@@ -63,6 +63,9 @@ class TrjController(QObject):
         """Called when Study/System selection changes."""
         # Only reset if actually changing system
         if self.current_study != study or self.current_system != system:
+            
+            is_study_change = (self.current_study != study)
+            
             self.current_study = study
             self.current_system = system
             self.timesteps = self.data_manager.get_timesteps(study, system)
@@ -75,10 +78,39 @@ class TrjController(QObject):
                 df_init, _ = self.data_manager.get_frame(study, system, self.timesteps[0])
                 if df_init is not None:
                     self._ref_cache['initial'] = df_init
-            
-            # Reset to first step
-            self.current_timestep = self.timesteps[0] if self.timesteps else 0
+
+            # Handle Playback and Step Reset Logic
+            if is_study_change:
+                # 1. Study Change: Reset everything
+                if self.is_playing:
+                    self.pause()
+                    self.playbackStopped.emit()
                 
+                self.current_timestep = self.timesteps[0] if self.timesteps else 0
+            else:
+                # 2. System Change (Same Study): Keep state
+                # Try to keep current timestep
+                if self.current_timestep not in self.timesteps:
+                    if self.timesteps:
+                        # Find closest or just fallback to 0
+                        # For simplicity, if exact step not found, go to 0, or maybe clamp?
+                        # User said: "keep the current step... if play is active... let it run"
+                        # Usually systems in same study have same timesteps. 
+                        # If not, we'll fallback to 0 to be safe.
+                        self.current_timestep = self.timesteps[0]
+                    else:
+                        self.current_timestep = 0
+                
+                # If playing, we need to re-anchor the timer to avoid jumps or index errors
+                if self.is_playing and self.timesteps:
+                    try:
+                        curr_idx = self.timesteps.index(self.current_timestep)
+                    except ValueError:
+                        curr_idx = 0
+                    
+                    self.playback_start_index = curr_idx
+                    self.playback_start_time = time.time()
+
             # Reset view limits to auto only on system change
             self.plot_item.autoRange()
 
