@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QMenu, QCheckBox, QTextEdit, QTableWidget
 )
 from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import QColor, QIntValidator, QActionGroup, QAction
+from PyQt6.QtGui import QColor, QIntValidator, QActionGroup, QAction, QFont, QFontMetrics
 import pyqtgraph as pg
 import numpy as np
 
@@ -105,17 +105,17 @@ class DSDPlotPanel(QWidget):
         self.zfilter_ref_combo.setFixedWidth(far_right_fixed_width)
         self.right_grid.addWidget(self.zfilter_ref_combo, 0, 2)
 
-        self.right_grid.addWidget(QLabel("Options"), 1, 0)
-        
-        self.options_btn = QPushButton("Options")
-        self.options_btn.setMinimumWidth(middle_min_width)
-        self.options_menu = QMenu(self)
-        self.options_btn.setMenu(self.options_menu)
-        self.right_grid.addWidget(self.options_btn, 1, 1)
+        self.right_grid.addWidget(QLabel("Type"), 1, 0)
         
         self.plot_type_combo = self._create_combo("Displacement plot", ["Displacement plot", "Strain Over Step", "Strain Over Strain"])
-        self.plot_type_combo.setFixedWidth(far_right_fixed_width)
-        self.right_grid.addWidget(self.plot_type_combo, 1, 2)
+        self.plot_type_combo.setFixedWidth(middle_min_width)
+        self.right_grid.addWidget(self.plot_type_combo, 1, 1)
+
+        self.options_btn = QPushButton("Options")
+        self.options_btn.setMinimumWidth(far_right_fixed_width)
+        self.options_menu = QMenu(self)
+        self.options_btn.setMenu(self.options_menu)
+        self.right_grid.addWidget(self.options_btn, 1, 2)
 
         # Right side takes only what it needs (stretch=0)
         top_layout.addLayout(self.right_grid, stretch=0)
@@ -129,7 +129,7 @@ class DSDPlotPanel(QWidget):
         main_layout.addWidget(top_container)
 
         # --- Main Splitter ---
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         
         # Left: Viz Area
         canvas_container = QWidget()
@@ -175,7 +175,7 @@ class DSDPlotPanel(QWidget):
         self.player_controls = PlayerControlWidget()
         canvas_layout.addWidget(self.player_controls)
         
-        main_splitter.addWidget(canvas_container)
+        self.main_splitter.addWidget(canvas_container)
 
         # Right: Config Panel (Table + Display)
         config_container = QWidget()
@@ -197,8 +197,9 @@ class DSDPlotPanel(QWidget):
         self.display_text = QTextEdit()
         self.display_text.setReadOnly(True)
         self.display_text.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Sunken)
+        self.display_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap) # Prevent auto-wrap to detect overflow
         font = self.display_text.font()
-        font.setFamily("Courier New") # Monospace for nice alignment
+        font.setFamily("Courier New") 
         font.setPointSize(9)
         self.display_text.setFont(font)
         self.display_text.setText("...")
@@ -222,10 +223,10 @@ class DSDPlotPanel(QWidget):
         btns_layout.addWidget(self.exit_btn)
         config_layout.addLayout(btns_layout)
         
-        main_splitter.addWidget(config_container)
-        main_splitter.setSizes([900, 300])
+        self.main_splitter.addWidget(config_container)
+        self.main_splitter.setSizes([900, 300])
         
-        main_layout.addWidget(main_splitter, 1)
+        main_layout.addWidget(self.main_splitter, 1)
 
         self._init_options_menu()
         self.plot_type_combo.currentTextChanged.connect(self._update_options_menu)
@@ -238,10 +239,10 @@ class DSDPlotPanel(QWidget):
         # Options with mode assignment
         self.opts_config = [
             ('disp_std', "Show displacement standard deviation"),
+            ('strain_std', "Strain standard deviation"),
+            ('opt_line', "Show optimal line"),
             ('total_count', "Show total box particle numbers"),
             ('weighted_count', "Show weighted box particle numbers"),
-            ('opt_line', "Show optimal line"),
-            ('strain_std', "Strain standard deviation")
         ]
         
         for key, text in self.opts_config:
@@ -260,17 +261,27 @@ class DSDPlotPanel(QWidget):
     def _update_options_menu(self):
         self.options_menu.clear()
         plot_type = self.plot_type_combo.currentText()
+        is_strain_plot = "Strain Over" in plot_type
         
-        self.options_menu.addAction(self.opt_actions['total_count'])
-        self.options_menu.addAction(self.opt_actions['weighted_count'])
-        self.options_menu.addSeparator()
-        
-        if plot_type == "Displacement plot":
+        # 1. Displacement/Strain STD (mutually exclusive in menu display)
+        if not is_strain_plot:
             self.options_menu.addAction(self.opt_actions['disp_std'])
         else:
             self.options_menu.addAction(self.opt_actions['strain_std'])
             
+        # 2. Optimal Line
         self.options_menu.addAction(self.opt_actions['opt_line'])
+        
+        # 3. Particle Counts (only for Displacement plot)
+        if not is_strain_plot:
+            self.options_menu.addSeparator()
+            self.options_menu.addAction(self.opt_actions['total_count'])
+            self.options_menu.addAction(self.opt_actions['weighted_count'])
+        else:
+            # When switching to strain plot, these are "hidden" but we don't need to do 
+            # anything special here as we just don't add them to the menu.
+            # However, the controller logic should also respect this.
+            pass
         
     def on_opt_line_deleted(self):
         # Called only when explicit user action disables it
@@ -304,6 +315,12 @@ class DSDPlotPanel(QWidget):
 
     def set_options(self, options):
         self.current_options.update(options)
+        
+        # Enforce mutual exclusivity for particle counts
+        if self.current_options.get('total_count') and self.current_options.get('weighted_count'):
+             # Priority to weighted if both unexpectedly True in saved state
+             self.current_options['total_count'] = False
+             
         for key, action in self.opt_actions.items():
             if key in self.current_options:
                 action.setChecked(self.current_options.get(key, False))
@@ -337,8 +354,8 @@ class DSDPlotPanel(QWidget):
         self.controller.boundsChanged.connect(self._on_controller_bounds_changed)
         self.filter_bar.rangesChanged.connect(self.update_plot)
         
-        # Connect to TextEdit
-        self.controller.errorUpdated.connect(self.display_text.setText)
+        # Connect to TextEdit with adaptive font sizing
+        self.controller.errorUpdated.connect(self._on_error_updated)
         self.controller.frameChanged.connect(self._on_frame_changed)
         
         self.player_controls.stepChanged.connect(self._on_step_changed_by_user)
@@ -354,6 +371,9 @@ class DSDPlotPanel(QWidget):
         
         self.lock_axes_btn.toggled.connect(self._on_lock_toggled)
         self.lock_axes_btn.rightClicked.connect(self._on_lock_right_clicked)
+        
+        # Trigger font size adjustment when the splitter divider is moved
+        self.main_splitter.splitterMoved.connect(self._adjust_display_font_size)
 
     def _on_stats_updated(self, data):
         self.stats_table.setRowCount(0)
@@ -402,6 +422,48 @@ class DSDPlotPanel(QWidget):
             item_w = QTableWidgetItem(w_str)
             item_w.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.stats_table.setItem(r, 4, item_w)
+
+    def _on_error_updated(self, text):
+        self.display_text.setText(text)
+        self._adjust_display_font_size()
+
+    def _adjust_display_font_size(self):
+        text = self.display_text.toPlainText()
+        if not text: return
+        
+        # Determine max line width
+        lines = text.split('\n')
+        if not lines: return
+        max_line = max(lines, key=len)
+        
+        target_width = self.display_text.viewport().width() - 10
+        if target_width <= 0: return
+
+        current_font = self.display_text.font()
+        size = 9 # Start with default 9pt
+        
+        # Shrink to fit
+        while size > 5:
+            if hasattr(current_font, 'setPointSizeF'):
+                current_font.setPointSizeF(float(size))
+            else:
+                current_font.setPointSize(int(size))
+            
+            metrics = QFontMetrics(current_font)
+            if metrics.horizontalAdvance(max_line) <= target_width:
+                break
+            size -= 0.5 if hasattr(current_font, 'setPointSizeF') else 1
+            
+        if hasattr(current_font, 'setPointSizeF'):
+            current_font.setPointSizeF(float(size))
+        else:
+            current_font.setPointSize(int(size))
+            
+        self.display_text.setFont(current_font)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._adjust_display_font_size()
 
     def _on_controller_bounds_changed(self, bounds):
         """

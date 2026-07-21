@@ -510,11 +510,222 @@ class DSDDataManager:
                 'center': eff_center,
                 'mean_disp': mean_disp,
                 'std_dev': np.sqrt(variance),
-                'count': n_main, 
-                'sum_weights': sum_w_display 
+                'count': n_main,
+                'sum_weights': sum_w_display
             })
-            
         return pd.DataFrame(results)
+
+    def calculate_strain_evolution_cached(self, domains, timesteps, study, system, slice_axis, observe_axis, options):
+        """
+        Pre-computes strain and target strain for ALL timesteps.
+        Returns: {
+            'timesteps': List[int],
+            'target_strains': List[float],
+            'domains': [
+                {
+                    'name': str,
+                    'strains': List[float], # mean strain per timestep
+                    'stds': List[float],    # std of strain per timestep
+                    'color': str,
+                    'style': str
+                }, ...
+            ]
+        }
+        """
+        # 1. Expand domains into segments (virtual domains)
+        virtual_domains = []
+        for d_idx, domain in enumerate(domains):
+            if domain.get('is_optimal_line'): continue
+            
+            d_base = domain.copy()
+            d_base['_source_index'] = d_idx
+
+            splits = domain.get('splits', [])
+            active_segments = domain.get('active_segments', [])
+            
+            if not splits:
+                virtual_domains.append( (d_base, domain.get('name', f"Domain {d_idx}")) )
+            else:
+                sorted_splits = sorted(splits)
+                segments = []
+                segments.append((None, sorted_splits[0]))
+                for i in range(len(sorted_splits) - 1):
+                    segments.append((sorted_splits[i], sorted_splits[i+1]))
+                segments.append((sorted_splits[-1], None))
+                
+                if len(active_segments) < len(segments):
+                    active_segments.extend([True] * (len(segments) - len(active_segments)))
+                
+                active_count = sum(active_segments)
+                active_rank = 0
+                for i, (seg_min, seg_max) in enumerate(segments):
+                    if active_segments[i]:
+                        active_rank += 1
+                        d_new = d_base.copy()
+                        d_new['box_edges'] = (seg_min, seg_max)
+                        d_new['_is_split'] = True
+                        d_new['_split_rank'] = active_rank
+                        
+                        base_name = domain.get('name', f"Domain {d_idx+1}")
+                        name = f"{base_name}{active_rank}" if active_count > 1 else base_name
+                        virtual_domains.append( (d_new, name) )
+
+        # 2. Iterate Timesteps
+        df_init, box_init = self.load_frame(study, system, timesteps[0])
+        if df_init is None: return None
+
+        # Check PBC (Logic from DSDController)
+        any_domain_pbc = False
+        for d in domains:
+             if d.get('is_optimal_line'): continue
+             if d.get('pbc', False): 
+                 any_domain_pbc = True
+                 break
+
+        # Resolve box edges once using df_init if they are None (domain start/end)
+        for v_domain, _ in virtual_domains:
+            edges = v_domain.get('box_edges')
+            if edges and (edges[0] is None or edges[1] is None):
+                atom_types = v_domain.get('atom_types', [])
+                sub = df_init[df_init['type'].isin(atom_types)] if atom_types else df_init
+                if not sub.empty:
+                    d_min, d_max = sub[slice_axis].min(), sub[slice_axis].max()
+                    v_domain['box_edges'] = (
+                        edges[0] if edges[0] is not None else d_min,
+                        edges[1] if edges[1] is not None else d_max
+                    )
+
+        # Pre-allocate results
+        results = {
+            'timesteps': timesteps,
+            'target_strains': [],
+            'domains': [
+                {
+                    'name': name,
+                    'strains': [],
+                    'stds': [],
+                    'color': v_domain.get('color', 'blue'),
+                    'style': v_domain.get('style', '-'),
+                    'source_index': v_domain.get('_source_index')
+                } for v_domain, name in virtual_domains
+            ]
+        }
+
+        s_idx = {'x':0,'y':1,'z':2}.get(slice_axis.lower())
+        o_idx = {'x':0,'y':1,'z':2}.get(observe_axis.lower())
+
+        for ts in timesteps:
+            df_curr, box_curr = self.load_frame(study, system, ts)
+            if df_curr is None:
+                results['target_strains'].append(np.nan)
+                for d_res in results['domains']:
+                    d_res['strains'].append(np.nan)
+                    d_res['stds'].append(0.0)
+                continue
+
+            step_domain_results = []
+
+            for i, (v_domain, _) in enumerate(virtual_domains):
+                res = self._slice_disp_single_domain(
+                    df_init, df_curr, v_domain, slice_axis, observe_axis, box_curr,
+                    z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'),
+                    z_ranges=options.get('z_ranges'), box_init=box_init
+                )
+                
+                mean_strain, std_strain = np.nan, 0.0
+                if res is not None and not res.empty:
+                    step_domain_results.append(res)
+                    mean_strain, std_strain = self._calculate_segment_strain(res['center'].values, res['mean_disp'].values)
+                
+                results['domains'][i]['strains'].append(mean_strain)
+                results['domains'][i]['stds'].append(std_strain)
+            
+            # Target Strain Calculation (Harmonized with Controller)
+            # If PBC is active -> Use global box deformation
+            # If PBC is inactive -> Use data slope (min/max points)
+            if any_domain_pbc:
+                target_strain = self._calculate_target_strain(box_init, box_curr, s_idx, o_idx)
+            else:
+                target_strain = self._calculate_data_target_strain(step_domain_results)
+            
+            results['target_strains'].append(target_strain)
+
+        return results
+
+    def _calculate_data_target_strain(self, domain_results_list):
+        """Calculates slope between first and last data point (Secant)."""
+        if not domain_results_list: return np.nan
+        
+        all_centers = []
+        all_disps = []
+        
+        for df in domain_results_list:
+             if df is not None and not df.empty:
+                 all_centers.append(df['center'].values)
+                 all_disps.append(df['mean_disp'].values)
+        
+        if not all_centers: return np.nan
+        
+        x_all = np.concatenate(all_centers)
+        y_all = np.concatenate(all_disps)
+        
+        if len(x_all) < 2: return 0.0 
+        
+        # Sort by X
+        sorted_indices = np.argsort(x_all)
+        x_sorted = x_all[sorted_indices]
+        y_sorted = y_all[sorted_indices]
+        
+        x1, x2 = x_sorted[0], x_sorted[-1]
+        y1, y2 = y_sorted[0], y_sorted[-1]
+        
+        if x2 == x1: return 0.0
+        
+        return (y2 - y1) / (x2 - x1)
+
+    def _calculate_target_strain(self, box_init, box_curr, s_idx, o_idx):
+        if not box_init or not box_curr or s_idx is None or o_idx is None:
+            return 0.0
+        
+        def get_box_params(box_data):
+            xb, yb, zb = box_data[0], box_data[1], box_data[2]
+            xy = xb[2] if len(xb) > 2 else 0.0
+            xz = yb[2] if len(yb) > 2 else 0.0 
+            yz = zb[2] if len(zb) > 2 else 0.0
+            zlo, lz = zb[0], zb[1] - zb[0]
+            ylo, ly = yb[0] - min(0.0, yz), (yb[1] - yb[0]) - abs(yz)
+            mins_x = min(0.0, xy, xz, xy+xz)
+            maxs_x = max(0.0, xy, xz, xy+xz)
+            xlo, lx = xb[0] - mins_x, (xb[1] - xb[0]) - (maxs_x - mins_x)
+            return {'xlo': xlo, 'ylo': ylo, 'zlo': zlo, 'lx': max(1e-9, lx), 'ly': max(1e-9, ly), 'lz': max(1e-9, lz), 'xy': xy, 'xz': xz, 'yz': yz}
+
+        p_i = get_box_params(box_init)
+        p_c = get_box_params(box_curr)
+
+        def calc_u(obj_idx, x_i, y_i, z_i):
+            w0 = (z_i - p_i['zlo']) / p_i['lz']
+            v0 = (y_i - (p_i['ylo'] + w0 * p_i['yz'])) / p_i['ly']
+            u0 = (x_i - (p_i['xlo'] + v0 * p_i['xy'] + w0 * p_i['xz'])) / p_i['lx']
+            x_c = p_c['xlo'] + u0 * p_c['lx'] + v0 * p_c['xy'] + w0 * p_c['xz']
+            y_c = p_c['ylo'] + v0 * p_c['ly'] + w0 * p_c['yz']
+            z_c = p_c['zlo'] + w0 * p_c['lz']
+            return [x_c - x_i, y_c - y_i, z_c - z_i][obj_idx]
+
+        c_i = [p_i['xlo'] + 0.5*p_i['lx'], p_i['ylo'] + 0.5*p_i['ly'], p_i['zlo'] + 0.5*p_i['lz']]
+        x1, x2 = box_init[s_idx][0], box_init[s_idx][1]
+        
+        pos1 = list(c_i); pos1[s_idx] = x1
+        pos2 = list(c_i); pos2[s_idx] = x2
+        u1, u2 = calc_u(o_idx, *pos1), calc_u(o_idx, *pos2)
+        
+        return (u2 - u1) / (x2 - x1) if x2 != x1 else 0.0
+
+    def _calculate_segment_strain(self, centers, displacements):
+        if len(centers) < 2:
+            return np.nan, 0.0
+        # pairwise slopes (MATLAB equivalent)
+        slopes = np.diff(displacements) / np.diff(centers)
+        return float(np.nanmean(slopes)), float(np.nanstd(slopes))
 
     def calculate_full_evolution(self, domains, timesteps, study, system, slice_axis, observe_axis, options):
         output = []
@@ -539,16 +750,17 @@ class DSDDataManager:
                  if len(active_segments) < len(segments):
                     active_segments.extend([True] * (len(segments) - len(active_segments)))
                  
+                 active_count = sum(active_segments)
+                 active_rank = 0
                  for i, (seg_min, seg_max) in enumerate(segments):
                      if active_segments[i]:
-                         # Clone domain settings
+                         active_rank += 1
                          d_new = domain.copy()
-                         # We can't easily resolve None here without data access
-                         # But calculate_full_evolution loads frames anyway.
-                         d_new['box_edges'] = (seg_min, seg_max) # Might contain None, handle later
+                         d_new['box_edges'] = (seg_min, seg_max)
                          d_new['_is_split'] = True
-                         d_new['_split_idx'] = i
-                         virtual_domains.append( (d_new, domain.get('name', f"Domain {d_idx}")) )
+                         d_new['_split_rank'] = active_rank
+                         d_new['_has_multiple_active'] = (active_count > 1)
+                         virtual_domains.append( (d_new, domain.get('name', f"Domain {d_idx+1}")) )
 
         # 2. Iterate
         # Pre-load init
@@ -602,9 +814,9 @@ class DSDDataManager:
 
         # 3. Output
         for i, (v_domain, orig_name) in enumerate(virtual_domains):
-            # Name
-            if v_domain.get('_is_split'):
-                name = f"{orig_name}{v_domain['_split_idx'] + 1}"
+            # Name alignment with dialog/displacement numbering
+            if v_domain.get('_is_split') and v_domain.get('_has_multiple_active'):
+                name = f"{orig_name}{v_domain.get('_split_rank', 1)}"
             else:
                 name = orig_name
                 

@@ -56,6 +56,10 @@ class DSDController(QObject):
             self.vb2.linkedViewChanged(self.plot_item.vb, self.vb2.XAxis)
             
         self.plot_item.vb.sigResized.connect(update_vb2_views)
+
+        # Caching for Strain Plots
+        self._strain_cache = None
+        self._strain_cache_key = None
         
     def set_active_system(self, study, system):
         if self.current_study != study or self.current_system != system:
@@ -94,10 +98,11 @@ class DSDController(QObject):
             pass
 
         if locked:
-            # Capture the CURRENT view immediately when locking. 
-            # This overwrites any previously stored limit to ensure we lock *this* view.
+            # Always capture the CURRENT view when locking.
+            # This ensures "what you see is what you lock".
+            # Session loading sets the view range BEFORE locking, so this remains correct for loading too.
             self.view_limits[current_type] = self.plot_item.getViewBox().viewRange()
-                
+            
             self.plot_item.disableAutoRange()
             self.plot_item.vb.sigRangeChanged.connect(self._on_vb_range_changed)
         else:
@@ -111,6 +116,16 @@ class DSDController(QObject):
     def auto_scale(self, mode='final'):
         if not self.timesteps: return
         
+        # Temporarily disconnect the range change signal during auto_scale
+        # to prevent premature updates from overwriting our calculated range.
+        was_connected = False
+        if self.view_locked:
+            try:
+                self.plot_item.vb.sigRangeChanged.disconnect(self._on_vb_range_changed)
+                was_connected = True
+            except:
+                pass
+
         target_step = self.current_timestep
         search_steps = [self.current_timestep]
         
@@ -124,9 +139,10 @@ class DSDController(QObject):
         g_min_y, g_max_y = float('inf'), float('-inf')
         
         study, system = self.current_study, self.current_system
-        slice_axis = self.plot_config.get('slice_axis')
-        observe_axis = self.plot_config.get('observe_axis')
         options = self.plot_config.get('global_options', {})
+        slice_axis = self.plot_config.get('slice_axis', 'X')
+        observe_axis = self.plot_config.get('observe_axis', 'Y')
+        plot_type = self.plot_config.get('plot_type', 'Displacement plot')
         
         # Load Initial and Final Frames (if needed for filtering)
         df_init, box_init = self.data_manager.load_frame(study, system, self.timesteps[0])
@@ -134,39 +150,81 @@ class DSDController(QObject):
         if options.get('z_filter_ref') == 'Final' and len(self.timesteps) > 0:
             df_final, _ = self.data_manager.load_frame(study, system, self.timesteps[-1])
             
-        if df_init is None: return
+        if df_init is None:
+            if was_connected: self.plot_item.vb.sigRangeChanged.connect(self._on_vb_range_changed)
+            return
 
-        for ts in search_steps:
-             df_curr, box_curr = self.data_manager.load_frame(study, system, ts)
-             if df_curr is None: continue
-             
-             for domain in self.domains:
-                 results = self.data_manager.slice_disp_mean(
-                    df_init, df_curr, domain, slice_axis, observe_axis, box_curr, 
-                    z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'), 
-                    z_ranges=self.plot_config.get('z_ranges'), 
-                    df_final=df_final, box_init=box_init
-                 )
-                 for df_res in results:
-                     if df_res is not None and not df_res.empty:
-                         x = df_res['center'].values
-                         y = df_res['mean_disp'].values
-                         
-                         if len(x) > 0:
-                             g_min_x = min(g_min_x, np.min(x))
-                             g_max_x = max(g_max_x, np.max(x))
-                             g_min_y = min(g_min_y, np.min(y))
-                             g_max_y = max(g_max_y, np.max(y))
-                     
+        if 'Strain' in plot_type:
+            # Scale based on strain cache
+            if self._strain_cache is None:
+                self._strain_cache = self.data_manager.calculate_strain_evolution_cached(
+                    self.domains, self.timesteps, study, system, slice_axis, observe_axis, options
+                )
+            if self._strain_cache:
+                current_ts_idx = self.timesteps.index(self.current_timestep) if self.current_timestep in self.timesteps else 0
+                
+                # Let's collect all valid points up to the target slice
+                slice_idx = 0
+                if mode == 'final': slice_idx = len(self.timesteps) # Full range
+                elif mode == 'max': slice_idx = len(self.timesteps) # Full range
+                else: slice_idx = current_ts_idx + 1 # Up to current
+
+                # Target strains for X (if Strain Over Strain)
+                if plot_type == 'Strain Over Strain':
+                    x_pts = np.array(self._strain_cache['target_strains'][:slice_idx])
+                else: # Strain Over Step
+                    x_pts = np.array(self._strain_cache['timesteps'][:slice_idx])
+                
+                valid_mask_x = ~np.isnan(x_pts)
+                if np.any(valid_mask_x):
+                    g_min_x, g_max_x = np.min(x_pts[valid_mask_x]), np.max(x_pts[valid_mask_x])
+
+                for d_res in self._strain_cache['domains']:
+                    y_pts = np.array(d_res['strains'][:slice_idx])
+                    valid_mask_y = ~np.isnan(y_pts)
+                    if np.any(valid_mask_y):
+                        g_min_y = min(g_min_y, np.min(y_pts[valid_mask_y]))
+                        g_max_y = max(g_max_y, np.max(y_pts[valid_mask_y]))
+        else:
+            # Displacement plot logic (original)
+            for ts in search_steps:
+                 df_curr, box_curr = self.data_manager.load_frame(study, system, ts)
+                 if df_curr is None: continue
+                 
+                 for domain in self.domains:
+                     results = self.data_manager.slice_disp_mean(
+                        df_init, df_curr, domain, slice_axis, observe_axis, box_curr, 
+                        z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'), 
+                        z_ranges=self.plot_config.get('z_ranges'), 
+                        df_final=df_final, box_init=box_init
+                     )
+                     for df_res in results:
+                         if df_res is not None and not df_res.empty:
+                             x = df_res['center'].values
+                             y = df_res['mean_disp'].values
+                             
+                             if len(x) > 0:
+                                 g_min_x = min(g_min_x, np.min(x))
+                                 g_max_x = max(g_max_x, np.max(x))
+                                 g_min_y = min(g_min_y, np.min(y))
+                                 g_max_y = max(g_max_y, np.max(y))
+                      
         if g_min_x != float('inf'):
             pad_x = (g_max_x - g_min_x) * 0.05 if g_max_x != g_min_x else 1.0
-            pad_y = (g_max_y - g_min_y) * 0.05 if g_max_y != g_min_y else 1.0
-            
             self.plot_item.setXRange(g_min_x - pad_x, g_max_x + pad_x, padding=0)
+            
+        if g_min_y != float('inf'):
+            pad_y = (g_max_y - g_min_y) * 0.05 if g_max_y != g_min_y else 1.0
             self.plot_item.setYRange(g_min_y - pad_y, g_max_y + pad_y, padding=0)
             
-            if self.view_locked:
-                self.view_limits[self.plot_config.get('plot_type', 'Displacement plot')] = self.plot_item.getViewBox().viewRange()
+        # ALWAYS save the new limits if locked
+        if self.view_locked:
+            plot_type = self.plot_config.get('plot_type', 'Displacement plot')
+            self.view_limits[plot_type] = self.plot_item.getViewBox().viewRange()
+
+        # Reconnect signal
+        if was_connected:
+            self.plot_item.vb.sigRangeChanged.connect(self._on_vb_range_changed)
 
     def get_available_timesteps(self):
         return self.timesteps
@@ -235,6 +293,21 @@ class DSDController(QObject):
             self.frameChanged.emit(target_idx)
 
     def update_config(self, domains, global_options, slice_axis, observe_axis, plot_type, z_ranges=None):
+        old_type = self.plot_config.get('plot_type')
+        
+        # Cache Invalidation Check - EXCLUDE color, style, size for instant updates
+        new_key = (
+            tuple(sorted([ (d.get('name'), tuple(d.get('splits', [])), tuple(d.get('active_segments', []))) for d in domains if not d.get('is_optimal_line')])),
+            self.current_study, self.current_system,
+            slice_axis, observe_axis, 
+            global_options.get('z_filter_col'), global_options.get('z_filter_ref'),
+            tuple(sorted(z_ranges)) if z_ranges else None
+        )
+
+        if self._strain_cache_key != new_key:
+            self._strain_cache = None  # Invalidate
+            self._strain_cache_key = new_key
+
         self.domains = domains
         self.plot_config = {
             'global_options': global_options,
@@ -243,6 +316,11 @@ class DSDController(QObject):
             'plot_type': plot_type,
             'z_ranges': z_ranges
         }
+        
+        # If switching plot types, ALWAYS auto-scale because units/scales differ fundamentally
+        if old_type != plot_type:
+            self.auto_scale(mode='max')
+
         self.update_scene()
 
     def get_scope_min_max(self, study, system, col, ref):
@@ -271,17 +349,38 @@ class DSDController(QObject):
     def update_scene(self):
         if not self.timesteps: return
         
-        # Clear / Setup
-        self.plot_item.clear()
-        self.vb2.clear()
-        self.plot_item.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_items = {}
-        
-        # Labels default
+        plot_type = self.plot_config.get('plot_type', 'Displacement plot')
         slice_axis = self.plot_config.get('slice_axis', 'X')
         observe_axis = self.plot_config.get('observe_axis', 'Y')
-        self.plot_item.setLabel('bottom', f"Initial box center in {slice_axis}")
-        self.plot_item.setLabel('left', f"Change in {observe_axis}")
+        
+        # CRITICAL: Disable auto-range BEFORE clearing/drawing when view is locked
+        # This prevents any intermediate auto-range during scene setup
+        if self.view_locked:
+            self.plot_item.disableAutoRange()
+        
+        # Clear EVERYTHING first
+        self.plot_item.clear()
+        self.vb2.clear()
+        self.plot_items = {}
+        
+        # Restore fundamental visual state
+        self.plot_item.showGrid(x=True, y=True, alpha=0.3)
+        self.vb2.setZValue(0)
+        self.plot_item.vb.setZValue(10)
+        
+        # Ensure right axis is hidden by default (Displacement plot will show if needed)
+        self.plot_item.hideAxis('right')
+        
+        # Set labels AFTER clear, specific to plot type
+        if plot_type == 'Displacement plot':
+            self.plot_item.setLabel('bottom', f"Initial box center in {slice_axis}")
+            self.plot_item.setLabel('left', f"Change in {observe_axis}")
+        elif plot_type == 'Strain Over Step':
+            self.plot_item.setLabel('bottom', 'Timestep')
+            self.plot_item.setLabel('left', 'Actual strain')
+        elif plot_type == 'Strain Over Strain':
+            self.plot_item.setLabel('bottom', 'Target strain')
+            self.plot_item.setLabel('left', 'Actual strain')
         
         study, system = self.current_study, self.current_system
         ts = self.current_timestep
@@ -290,30 +389,33 @@ class DSDController(QObject):
         df_init, box_init = self.data_manager.load_frame(study, system, self.timesteps[0])
         df_curr, box_curr = self.data_manager.load_frame(study, system, ts)
         
-        # Load Final Frame if filtering requires it (The Fix)
-        options = self.plot_config.get('global_options', {})
+        # Prepare options for drawing (inject z_ranges into global_options)
+        options = self.plot_config.get('global_options', {}).copy()
+        options['z_ranges'] = self.plot_config.get('z_ranges')
+        
         df_final = None
         if options.get('z_filter_ref') == 'Final' and len(self.timesteps) > 0:
              df_final, _ = self.data_manager.load_frame(study, system, self.timesteps[-1])
         
         if df_init is None or df_curr is None: return
-        
-        plot_type = self.plot_config.get('plot_type', 'Displacement plot')
-        
-        # Auto-Resize Logic
-        if self.view_locked:
-             if plot_type in self.view_limits:
-                xr, yr = self.view_limits[plot_type]
-                self.plot_item.setXRange(xr[0], xr[1], padding=0)
-                self.plot_item.setYRange(yr[0], yr[1], padding=0)
-        else:
-            self.plot_item.enableAutoRange()
             
-        # Dispatch
+        # Dispatch to appropriate draw method
         if plot_type == 'Displacement plot':
             self._draw_displacement_plot(df_init, df_curr, df_final, box_init, box_curr, slice_axis, observe_axis, options)
         elif 'Strain' in plot_type:
             self._draw_strain_plots(study, system, slice_axis, observe_axis, ts, options, plot_type)
+
+        # Apply View Limits AFTER drawing (critical for locked view stability)
+        if self.view_locked:
+             if plot_type in self.view_limits:
+                xr, yr = self.view_limits[plot_type]
+                # Block signals to prevent "tiny jumps" or recursive calls during step change
+                self.plot_item.vb.blockSignals(True)
+                self.plot_item.setXRange(xr[0], xr[1], padding=0)
+                self.plot_item.setYRange(yr[0], yr[1], padding=0)
+                self.plot_item.vb.blockSignals(False)
+        else:
+            self.plot_item.enableAutoRange()
 
     def _draw_displacement_plot(self, df_init, df_curr, df_final, box_init, box_curr, slice_axis, observe_axis, options):
         # Check particle count mode
@@ -494,7 +596,7 @@ class DSDController(QObject):
         # Report Generation
         headers = ["Split", "Strain", "Error", "#Parts", "#Weights"]
         data_rows = []
-        data_rows.append(["Target", f"{slope: .4e}", f"{0.0: .4e}", "-", "-"])
+        data_rows.append(["Target", f"{slope: .3e}", f"{0.0: .3e}", "-", "-"])
         
         for item in report_data:
             derivs = self.data_manager.calculate_derivatives(item['df'])
@@ -502,8 +604,8 @@ class DSDController(QObject):
                 act_strain = derivs['strain'].mean()
                 if slope != 0: rel_err = (act_strain - slope) / slope
                 else: rel_err = 0.0 if act_strain == 0 else np.nan
-                s_str = f"{act_strain: .4e}"
-                e_str = f"{rel_err: .4e}"
+                s_str = f"{act_strain: .3e}"
+                e_str = f"{rel_err: .3e}"
             else:
                 s_str, e_str = "N/A", "N/A"
             
@@ -524,62 +626,208 @@ class DSDController(QObject):
         self.errorUpdated.emit("\n".join(lines))
 
     def _draw_strain_plots(self, study, system, slice_axis, observe_axis, ts, options, plot_type):
-        valid_timesteps = self.timesteps[:self.timesteps.index(ts)+1] if ts in self.timesteps else self.timesteps
-        evolution_data = self.data_manager.calculate_full_evolution(
-            self.domains, valid_timesteps, study, system, slice_axis, observe_axis, options
-        )
-        
-        for curve in evolution_data:
-            color = QColor(curve['color'])
-            pen_style = Qt.PenStyle.DashLine if curve['style'] == '--' else Qt.PenStyle.SolidLine
-            pen = pg.mkPen(color, width=2, style=pen_style)
-            
-            x_vals = []
-            if plot_type == 'Strain Over Step':
-                self.plot_item.setLabel('bottom', 'Load Step')
-                x_vals = curve['x']
-            elif plot_type == 'Strain Over Strain':
-                self.plot_item.setLabel('bottom', 'Target Strain')
-                if len(curve['y']) > 0:
-                    x_vals = np.linspace(0, 1, len(curve['y'])) 
-            
-            if x_vals is not None and len(x_vals) == len(curve['y']):
-                if options.get('strain_std', False) and 'y_err' in curve:
-                    y_vals = np.array(curve['y'])
-                    y_err = np.array(curve['y_err'])
-                    mask = ~np.isnan(y_vals) & ~np.isnan(y_err)
-                    if np.any(mask):
-                        c1 = pg.PlotCurveItem(np.array(x_vals)[mask], y_vals[mask] + y_err[mask], pen=pg.mkPen(None))
-                        c2 = pg.PlotCurveItem(np.array(x_vals)[mask], y_vals[mask] - y_err[mask], pen=pg.mkPen(None))
-                        bc = QColor(color); bc.setAlpha(50)
-                        self.plot_item.addItem(pg.FillBetweenItem(c1, c2, brush=pg.mkBrush(bc)))
+        if not self.timesteps: 
+            self.errorUpdated.emit("No timesteps available.")
+            return
 
-                self.plot_item.plot(x_vals, curve['y'], pen=pen, name=curve['name'])
+        # 1. Ensure Cache is Populated
+        if self._strain_cache is None:
+            self._strain_cache = self.data_manager.calculate_strain_evolution_cached(
+                self.domains, self.timesteps, study, system, slice_axis, observe_axis, options
+            )
         
-        if options.get('opt_line', False) and evolution_data:
-            t_strain = getattr(self, 'last_target_strain', None)
-            if t_strain is not None:
-                all_xs = []
-                for c in evolution_data:
-                    if plot_type == 'Strain Over Step':
-                        all_xs.extend(c['x'])
-                    elif plot_type == 'Strain Over Strain':
-                        all_xs.extend(np.linspace(0, 1, len(c['y'])))
+        if not self._strain_cache:
+            self.errorUpdated.emit("Failed to calculate strain evolution.")
+            return
+
+        # 2. Determine X-axis and Current Index
+        try:
+            curr_idx = self.timesteps.index(ts)
+        except ValueError:
+            curr_idx = 0
+
+        # Plot up to current timestep
+        steps_to_plot = slice(0, curr_idx + 1)
+        
+        if plot_type == 'Strain Over Step':
+            x_full = np.array(self._strain_cache['timesteps'], dtype=float)
+        else: # Strain Over Strain
+            x_full = np.array(self._strain_cache['target_strains'], dtype=float)
+
+        x_plot = x_full[steps_to_plot]
+        
+        # 3. Plot Domains
+        for d_data in self._strain_cache['domains']:
+            name = d_data['name']
+            
+            # Resolve current style from table using stored source index
+            # This aligns with displacement plot behavior (row-based) and handles duplicate names correctly
+            d_idx = d_data.get('source_index')
+            domain_cfg = None
+            
+            if d_idx is not None and 0 <= d_idx < len(self.domains):
+                domain_cfg = self.domains[d_idx]
+            
+            if domain_cfg:
+                color = QColor(domain_cfg.get('color', 'blue'))
+                style_str = domain_cfg.get('style', 'o')
+                try: width = int(domain_cfg.get('size', 2))
+                except: width = 2
+            else:
+                color = QColor(d_data['color'])
+                style_str = d_data['style']
+                width = 2
+
+            y_full = np.array(d_data['strains'])
+            y_err_full = np.array(d_data['stds'])
+            
+            y_plot = y_full[steps_to_plot]
+            y_err_plot = y_err_full[steps_to_plot]
+            
+            symbol, pen_style = self._get_pyqtgraph_style(style_str)
+            
+            # Mask NaNs for plotting error bands
+            mask = ~np.isnan(x_plot) & ~np.isnan(y_plot)
+            if np.any(mask):
+                if options.get('strain_std', False) and np.any(y_err_plot[mask] > 0):
+                    c1 = pg.PlotCurveItem(x_plot[mask], y_plot[mask] + y_err_plot[mask], pen=None)
+                    c2 = pg.PlotCurveItem(x_plot[mask], y_plot[mask] - y_err_plot[mask], pen=None)
+                    bc = QColor(color); bc.setAlpha(50)
+                    self.plot_item.addItem(pg.FillBetweenItem(c1, c2, brush=pg.mkBrush(bc)))
+
+                pen = pg.mkPen(color, width=width, style=pen_style) if pen_style != Qt.PenStyle.NoPen else None
+                if symbol:
+                    self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, symbol=symbol, 
+                                        symbolBrush=color, symbolPen=color, symbolSize=width*2, name=name)
+                else:
+                    self.plot_item.plot(x_plot[mask], y_plot[mask], pen=pen, name=name)
+
+        # 4. Optimal Line (Target Strain)
+        if options.get('opt_line', False):
+            if plot_type == 'Strain Over Strain':
+                # Optimal is y=x
+                valid_x = x_plot[~np.isnan(x_plot)]
+                if len(valid_x) > 0:
+                    x_min, x_max = np.min(valid_x), np.max(valid_x)
+                    p_item = self.plot_item.plot([x_min, x_max], [x_min, x_max], 
+                                               pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="Target")
+                    p_item.is_opt_line = True
+            else: # Strain Over Step
+                # Optimal is a curve of target strains over timesteps
+                mask = ~np.isnan(x_full) & ~np.isnan(self._strain_cache['target_strains'])
+                if np.any(mask):
+                    effective_target = np.array(self._strain_cache['target_strains'])[steps_to_plot]
+                    p_item = self.plot_item.plot(x_plot, effective_target, 
+                                               pen=pg.mkPen('k', width=1, style=Qt.PenStyle.DashLine), name="Target")
+                    p_item.is_opt_line = True
+
+        # 5. Generate Error Report
+        report = self._generate_strain_error_report(self._strain_cache, curr_idx)
+        self.errorUpdated.emit(report)
+
+    def _generate_strain_error_report(self, cache, curr_idx):
+        """
+        Calculates errors based on MATLAB logic:
+        - Cum Abs: sum(|act-tar|) / sum(|tar|)
+        - Cum Sign: sum(act-tar) / sum(|tar|)
+        - Indv Abs: mean(|act-tar| / |tar|)
+        - Indv Sign: mean((act-tar) / |tar|)
+        """
+        timesteps = cache['timesteps'][:curr_idx+1]
+        target_strains = np.array(cache['target_strains'][:curr_idx+1])
+        
+        # Mask for valid target strains (avoid div by zero/NaN)
+        mask = ~np.isnan(target_strains) & (np.abs(target_strains) > 1e-12)
+        if not np.any(mask):
+            return "No valid target strain data for error calculation."
+            
+        tar_m = target_strains[mask]
+        sum_abs_tar = np.sum(np.abs(tar_m))
+        
+        headers = ["Domain", "Cum.Abs", "Cum.Sign", "Indv.Abs", "Indv.Sign"]
+        rows = []
+        
+        # Group by original domain name to calculate row means
+        domain_groups = {} # {base_name: [ {results} ]}
+        
+        for d_data in cache['domains']:
+            # Find base name (remove segment suffix if exists)
+            name = d_data['name']
+            # Heuristic: split names like "Domain1", "Domain2" or "Domain1_1"
+            # Actually, calculate_strain_evolution_cached uses name + segment index
+            # We need to know which ones belong together.
+            # Let's use the 'name' and look for group peers.
+            
+            y_m = np.array(d_data['strains'][:curr_idx+1])[mask]
+            valid_mask = ~np.isnan(y_m)
+            
+            if not np.any(valid_mask):
+                res = {"name": name, "errs": [np.nan]*4}
+            else:
+                y = y_m[valid_mask]
+                t = tar_m[valid_mask]
+                diff = y - t
                 
-                if all_xs:
-                    x_min, x_max = min(all_xs), max(all_xs)
-                    opt_x = np.array([x_min, x_max])
-                    opt_y = np.array([t_strain, t_strain])
-                    
-                    opt_settings = next((d for d in self.domains if d.get('is_optimal_line')), None)
-                    if opt_settings:
-                        oc = QColor(opt_settings.get('color', 'black'))
-                        os_str = opt_settings.get('style', '--')
-                        ops = Qt.PenStyle.DashLine if os_str == '--' else Qt.PenStyle.SolidLine
-                        p_item = self.plot_item.plot(opt_x, opt_y, pen=pg.mkPen(oc, width=2, style=ops), name="Optimal Line")
-                        p_item.is_opt_line = True
+                # Cum errors
+                c_abs = np.sum(np.abs(diff)) / np.sum(np.abs(t))
+                c_sign = np.sum(diff) / np.sum(np.abs(t))
+                
+                # Indv errors
+                indv_diff_rel = diff / t
+                i_abs = np.mean(np.abs(indv_diff_rel))
+                i_sign = np.mean(indv_diff_rel)
+                
+                res = {"name": name, "errs": [c_abs, c_sign, i_abs, i_sign]}
+            
+            # Grouping logic: "NameSplit" -> "Name"
+            # Try to strip trailing digits
+            import re
+            match = re.search(r'^(.*?)(\d+)$', name)
+            if match: base_name = match.group(1)
+            else: base_name = name
+            
+            if base_name not in domain_groups: domain_groups[base_name] = []
+            domain_groups[base_name].append(res)
+
+        all_row_means = []
+
+        for base_name, segments in domain_groups.items():
+            for seg in segments:
+                rows.append([seg['name']] + [f"{v:.3e}" if not np.isnan(v) else "N/A" for v in seg['errs']])
+            
+            if len(segments) > 1:
+                # Calculate mean for this row (domain)
+                row_errs = []
+                for i in range(4):
+                    vals = [s['errs'][i] for s in segments if not np.isnan(s['errs'][i])]
+                    row_errs.append(np.mean(vals) if vals else np.nan)
+                
+                rows.append([f"{base_name} Mean"] + [f"{v:.3e}" if not np.isnan(v) else "N/A" for v in row_errs])
+                all_row_means.append(row_errs)
+            else:
+                # Add the only segment's error as a row mean for global mean calculation
+                all_row_means.append(segments[0]['errs'])
+
+        # Global Mean (mean of row means)
+        if all_row_means:
+            global_errs = []
+            for i in range(4):
+                vals = [r[i] for r in all_row_means if not np.isnan(r[i])]
+                global_errs.append(np.mean(vals) if vals else np.nan)
+            
+            rows.append(["-"*10]*5)
+            rows.append(["Overall Mean"] + [f"{v:.3e}" if not np.isnan(v) else "N/A" for v in global_errs])
+
+        # Format table
+        widths = [max(len(str(h)), max([len(str(r[i])) for r in rows if len(r)>i] or [0])) for i, h in enumerate(headers)]
+        fmt = " | ".join([f"{{:<{w}}}" if i==0 else f"{{:>{w}}}" for i, w in enumerate(widths)])
         
-        self.errorUpdated.emit("")
+        lines = [fmt.format(*headers), "-" * (sum(widths) + 3*len(headers))]
+        for r in rows:
+            if len(r) == 1: lines.append(r[0]) # separator
+            else: lines.append(fmt.format(*r))
+            
+        return "\n".join(lines)
 
     def export_plot(self, filename: str, figsize=None):
         """Dispatches to image or text export based on file extension."""
