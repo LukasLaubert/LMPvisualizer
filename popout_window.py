@@ -412,6 +412,10 @@ class PopOutWindow(QMainWindow):
         ax_primary.set_title(self.title_edit.text())
         ax_primary.set_xlabel(self.x_label_edit.text())
         
+        # Apply X-Limits from state
+        if 'x_limits' in self.plot_data:
+            ax_primary.set_xlim(self.plot_data['x_limits'])
+        
         if self.x_log_check.isChecked():
             ax_primary.set_xscale('log')
         
@@ -430,6 +434,10 @@ class PopOutWindow(QMainWindow):
         ax_primary.set_ylabel(config_prim['label_edit'].text())
         if config_prim['log_check'].isChecked():
             ax_primary.set_yscale('log')
+            
+        # Apply Y-Limits for Primary
+        if 'y_limits' in self.plot_data['y_axes'][y_cols[0]]:
+            ax_primary.set_ylim(self.plot_data['y_axes'][y_cols[0]]['y_limits'])
         
         # Configure Secondary Axes
         for i, y_col in enumerate(y_cols[1:], start=1):
@@ -441,6 +449,11 @@ class PopOutWindow(QMainWindow):
             ax_new.set_ylabel(config['label_edit'].text())
             if config['log_check'].isChecked():
                 ax_new.set_yscale('log')
+                
+            # Apply Y-Limits for Secondary
+            if 'y_limits' in self.plot_data['y_axes'][y_col]:
+                ax_new.set_ylim(self.plot_data['y_axes'][y_col]['y_limits'])
+                
             axes_map[y_col] = ax_new
 
         all_handles = []
@@ -483,13 +496,11 @@ class PopOutWindow(QMainWindow):
             draggable = self.legend_draggable.isChecked()
             
             leg = ax_primary.legend(all_handles, all_labels, loc=loc, frameon=frame)
-            
-            # CRITICAL: Exclude legend from layout calculations to prevent plot resizing
             leg.set_in_layout(False)
             
             if draggable:
                 leg.set_draggable(True)
-
+        
         # Force tight layout to calculate axes based on labels/titles, IGNORING the legend
         self.figure.tight_layout()
         self.canvas.draw()

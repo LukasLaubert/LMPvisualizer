@@ -181,14 +181,22 @@ class MainWindow(QMainWindow):
     def on_keywords_changed(self, keywords):
         path_str = self.path_edit.text()
         if path_str:
-            self.propagate_load(Path(path_str), force_reload=True)
+            # Pass keep_table=True so we don't wipe the user's work when adding a keyword
+            self.propagate_load(Path(path_str), force_reload=True, keep_table=True)
 
-    def propagate_load(self, path, force_reload=False):
+    def propagate_load(self, path, force_reload=False, keep_table=False):
         # Send load command to CURRENT panel
         current_panel = self.stacked_widget.currentWidget()
         if hasattr(current_panel, 'load_project'):
             keywords = self.chip_input.get_chips()
-            current_panel.load_project(path, keywords, force_reload=force_reload)
+            
+            # Check if the panel accepts 'keep_table' (LogPlotPanel does, Trj might not yet)
+            import inspect
+            sig = inspect.signature(current_panel.load_project)
+            if 'keep_table' in sig.parameters:
+                current_panel.load_project(path, keywords, force_reload=force_reload, keep_table=keep_table)
+            else:
+                current_panel.load_project(path, keywords, force_reload=force_reload)
 
     def on_mode_changed(self, index):
         # 1. Save keywords of the *previous* mode

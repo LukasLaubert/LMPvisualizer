@@ -610,12 +610,7 @@ class LogPlotPanel(QWidget):
         return f"{study} | {system} | {x_axis} | {y_axis}"
 
     def _update_selected_row_name_component(self, component: str, value: str):
-        """Update only a specific component of the selected row's plot name.
-        
-        Args:
-            component: One of 'study', 'system', 'x_axis', 'y_axis'
-            value: New value for that component
-        """
+        """Update only a specific component of the selected row's plot name."""
         if self.plot_table.currentRow() == -1:
             return
         
@@ -647,6 +642,10 @@ class LogPlotPanel(QWidget):
         self._update_row_visual_state(selected_row)
         self.update_plots()
         self._update_plot_labels()
+        
+        # Reset view when user manually changes an axis configuration
+        if self.plot_controller:
+            self.plot_controller.reset_view()
 
     def _connect_signals(self):
         self.add_btn.clicked.connect(self.add_new_plot_row)
@@ -919,20 +918,21 @@ class LogPlotPanel(QWidget):
                 line_edit.setText(new_value)
                 line_edit.blockSignals(False)
 
-    def load_project(self, root_path, keywords, show_discovery_warnings: bool = True, force_reload: bool = False):
+    def load_project(self, root_path, keywords, show_discovery_warnings: bool = True, force_reload: bool = False, keep_table: bool = False):
         # Prevent redundant reloading if path is same and not forced
         if not force_reload and self.loaded_path == root_path:
             return
 
-        self.running_mean_setting = "symmetric_window" 
-        self.average_user_choices.clear()
+        if not keep_table:
+            self.running_mean_setting = "symmetric_window" 
+            self.average_user_choices.clear()
         
         # Use the passed keywords argument
         if not keywords:
             self.data_manager.data.clear()
             self.data_manager.available_columns = []
             self.loaded_path = None # Clear loaded path
-            self._update_ui_state(project_loaded=False)
+            self._update_ui_state(project_loaded=False, keep_table=keep_table)
             return
 
         studies, warnings, file_map = LogParser.discover_studies_systems(root_path, keywords)
@@ -980,12 +980,18 @@ class LogPlotPanel(QWidget):
         # Update state tracking
         self.loaded_path = root_path
         
-        self._update_ui_state(project_loaded=True)
+        self._update_ui_state(project_loaded=True, keep_table=keep_table)
+        
+        # If keeping table, trigger a plot update to refresh data sources
+        if keep_table:
+            self.update_plots()
 
-    def _update_ui_state(self, project_loaded: bool):
-        self.plot_table.setRowCount(0)
-        self._update_move_buttons_visibility()
-        self.plot_controller.clear_all_plots()
+    def _update_ui_state(self, project_loaded: bool, keep_table: bool = False):
+        # Only clear table/plots if we are NOT keeping the table (e.g., new path load)
+        if not keep_table:
+            self.plot_table.setRowCount(0)
+            self._update_move_buttons_visibility()
+            self.plot_controller.clear_all_plots()
 
         def reset_combo(combo, placeholder, items):
             combo.blockSignals(True)
@@ -1012,10 +1018,12 @@ class LogPlotPanel(QWidget):
             reset_combo(self.xaxis_combo, "Select X-Axis", self.data_manager.get_all_column_names())
             reset_combo(self.yaxis_combo, "Select Y-Axis", self.data_manager.get_all_column_names())
             
-            if self.data_manager.get_study_names() or self.data_manager.get_all_system_names():
-                self.add_new_plot_row()
-            else:
-                QMessageBox.warning(self, "No Data", "Project loaded, but no valid study or system data was found.")
+            # Only add a default row if we cleared the table and have data
+            if not keep_table:
+                if self.data_manager.get_study_names() or self.data_manager.get_all_system_names():
+                    self.add_new_plot_row()
+                else:
+                    QMessageBox.warning(self, "No Data", "Project loaded, but no valid study or system data was found.")
 
         else:
             for combo in all_combos:

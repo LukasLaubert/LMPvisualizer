@@ -27,8 +27,7 @@ class TrjPlotPanel(QWidget):
         # Attach to 0,0 spanning 2 rows, same as LogPlotPanel
         self.controls_layout.addWidget(combo_box, 0, 0, 2, 1)
 
-    def load_project(self, path, keywords, force_reload=False):
+    def load_project(self, path, keywords, force_reload=False, keep_table=False):
         # Placeholder for future implementation
-        # Accepts force_reload to prevent the crash in MainWindow
-        print(f"TrjPlotPanel loading: {path} with keywords {keywords}")
+        print(f"TrjPlotPanel loading: {path} with keywords {keywords} (keep_table={keep_table})")
         pass

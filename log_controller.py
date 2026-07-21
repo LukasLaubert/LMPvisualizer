@@ -293,7 +293,7 @@ class LogController:
             self.y_axis_colors[y_col] = color  # Store for export
 
     def export_plot(self, filename: str):
-        """Exports the current plot view using Matplotlib with multiple y-axes support."""
+        """Exports the current plot view using Matplotlib with multiple y-axes support and current zoom limits."""
         try:
             import matplotlib.pyplot as plt
             from matplotlib import rcParams
@@ -320,7 +320,7 @@ class LogController:
             print("No visible plots to export.")
             return
         
-        # Determine the order of y-axes (use the order from self.y_axes which matches visual order)
+        # Determine the order of y-axes
         y_axis_order = [y_col for y_col in self.y_axes.keys() if y_col in plots_by_yaxis]
         
         if not y_axis_order:
@@ -338,15 +338,27 @@ class LogController:
         for i, y_col in enumerate(y_axis_order[1:], start=1):
             ax_new = ax_primary.twinx()
             ax_new.spines['top'].set_visible(False)
-            ax_new.spines['left'].set_visible(False) # Fix: Hide the left spine so it doesn't cover the primary axis
+            ax_new.spines['left'].set_visible(False)
             
-            # Position right-side axes with offset if there are multiple
             if i > 1:
-                # Offset additional right axes
                 ax_new.spines['right'].set_position(('outward', 60 * (i - 1)))
             
             matplotlib_axes[y_col] = ax_new
         
+        # --- Apply Limits from PyQtGraph ViewBoxes ---
+        # 1. X-Axis Limit (taken from the main plot item)
+        vb_main = self.plot_item.getViewBox()
+        x_range = vb_main.viewRange()[0]
+        ax_primary.set_xlim(x_range)
+
+        # 2. Y-Axis Limits (taken from each specific ViewBox)
+        for y_col in y_axis_order:
+            ax = matplotlib_axes[y_col]
+            if y_col in self.y_axes:
+                vb = self.y_axes[y_col]['viewbox']
+                y_range = vb.viewRange()[1]
+                ax.set_ylim(y_range)
+
         # Plot each curve on its corresponding axis
         all_handles = []
         all_labels = []
@@ -354,21 +366,16 @@ class LogController:
         for y_col in y_axis_order:
             ax = matplotlib_axes[y_col]
             
-            # Get axis color (default to black if not set)
             axis_color = self.y_axis_colors.get(y_col, QColor("black"))
-            mpl_axis_color = axis_color.getRgbF()[:3]  # RGB without alpha
+            mpl_axis_color = axis_color.getRgbF()[:3]
             
-            # Set axis color
             ax.spines['left' if y_col == y_axis_order[0] else 'right'].set_edgecolor(mpl_axis_color)
-            # Added direction='in' to point ticks inside
             ax.tick_params(axis='y', colors=mpl_axis_color, direction='in')
             ax.yaxis.label.set_color(mpl_axis_color)
             
-            # Set axis label
             axis_label = self.y_axis_labels.get(y_col, y_col)
             ax.set_ylabel(axis_label)
             
-            # Plot all curves for this y-axis
             for name, plot_info in plots_by_yaxis[y_col]:
                 item = plot_info['item']
                 data = item.getData()
@@ -377,23 +384,15 @@ class LogController:
                     continue
                 
                 pen = item.opts['pen']
-                color = pen.color().getRgbF()[:3]  # RGB without alpha
+                color = pen.color().getRgbF()[:3]
                 width = pen.width()
                 
-                # Determine line style
-                style_map = {
-                    1: '-',      # SolidLine
-                    2: '--',     # DashLine
-                    3: ':',      # DotLine
-                    4: '-.',     # DashDotLine
-                }
+                style_map = {1: '-', 2: '--', 3: ':', 4: '-.'}
                 linestyle = style_map.get(pen.style(), '-')
                 
-                # Plot the main line
                 line, = ax.plot(data[0], data[1], color=color, label=name, 
                                linewidth=width, linestyle=linestyle)
                 
-                # Handle error bands
                 error_item = plot_info.get('error_item')
                 if error_item:
                     curve1_data = error_item.curves[0].getData()
@@ -405,16 +404,13 @@ class LogController:
                 all_handles.append(line)
                 all_labels.append(name)
         
-        # Set x-axis label and color to black
         ax_primary.set_xlabel(self.x_axis_label)
         ax_primary.spines['bottom'].set_edgecolor('black')
-        # Added direction='in' to point ticks inside
         ax_primary.tick_params(axis='x', colors='black', direction='in')
         ax_primary.xaxis.label.set_color('black')
         
         ax_primary.grid(True, alpha=0.3)
         
-        # Create a unified legend
         if all_handles:
             ax_primary.legend(all_handles, all_labels, loc='best')
         
@@ -430,24 +426,21 @@ class LogController:
 
     def get_current_plot_state(self) -> Dict[str, Any]:
         """
-        Extracts the current state of all visible plots, including data and visual properties,
-        structured for the PopOutWindow.
+        Extracts the current state of all visible plots, including data, visual properties,
+        and current view limits for the PopOutWindow.
         """
+        # Capture X limits from main viewbox
+        x_limits = self.plot_item.getViewBox().viewRange()[0]
+
         state = {
-            'title': "", # User can set this in the popout
+            'title': "", 
             'x_label': self.x_axis_label,
+            'x_limits': x_limits,
             'y_axes': {}
         }
 
-        # Mapping for Qt Pen Styles to Matplotlib strings
-        style_map = {
-            1: '-',      # SolidLine
-            2: '--',     # DashLine
-            3: ':',      # DotLine
-            4: '-.',     # DashDotLine
-        }
+        style_map = {1: '-', 2: '--', 3: ':', 4: '-.'}
 
-        # Identify visible plots and group by Y-axis column
         for name, plot_info in self.plots.items():
             item = plot_info.get('item')
             if not item or not item.isVisible():
@@ -456,52 +449,54 @@ class LogController:
             y_col = plot_info.get('y_col')
             if not y_col: continue
 
-            # Initialize Y-axis group if missing
             if y_col not in state['y_axes']:
+                # Capture Y limits for this specific axis
+                y_viewbox = self.y_axes[y_col]['viewbox']
+                y_limits = y_viewbox.viewRange()[1]
+                
                 state['y_axes'][y_col] = {
                     'label': self.y_axis_labels.get(y_col, y_col),
+                    'y_limits': y_limits,
                     'series': []
                 }
 
-            # Extract Data
             x_data, y_data = item.getData()
             if x_data is None or y_data is None: continue
             
-            # Extract Std Dev Data if available
             std_data = None
             error_item = plot_info.get('error_item')
             if error_item:
-                # Extract from FillBetweenItem curves
                 c1 = error_item.curves[0].getData()
                 c2 = error_item.curves[1].getData()
-                # Derive std from the difference (assuming symmetric: y - lower)
-                # c1 is lower, c2 is upper usually, or vice versa. 
-                # Logic: y +/- std. So std = (upper - lower) / 2
                 if c1[1] is not None and c2[1] is not None:
                     diff = np.abs(c2[1] - c1[1])
                     std_data = diff / 2.0
 
-            # Extract Visuals
             pen = item.opts['pen']
-            color = pen.color() # QColor
-            qt_style = pen.style()
-            width = pen.width()
             
-            # Unique ID for the widget map
             series_id = f"{y_col}_{name}"
-
             series_entry = {
                 'id': series_id,
                 'name': name,
                 'x': np.array(x_data),
                 'y': np.array(y_data),
                 'std': np.array(std_data) if std_data is not None else None,
-                'color': color,
-                'linestyle_qt': qt_style,
-                'linestyle_matlab': style_map.get(qt_style, '-'),
-                'width': width
+                'color': pen.color(),
+                'linestyle_qt': pen.style(),
+                'linestyle_matlab': style_map.get(pen.style(), '-'),
+                'width': pen.width()
             }
 
             state['y_axes'][y_col]['series'].append(series_entry)
             
         return state
+
+    def reset_view(self):
+        """Resets the view of the main plot and all auxiliary axes to auto-range."""
+        # Reset main viewbox (X and primary Y)
+        self.plot_item.enableAutoRange(axis='x')
+        self.plot_item.enableAutoRange(axis='y')
+        
+        # Reset all auxiliary viewboxes
+        for axis_info in self.y_axes.values():
+            axis_info['viewbox'].enableAutoRange(axis='y')
