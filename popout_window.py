@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QDoubleSpinBox, QGroupBox, QPushButton, QColorDialog, 
                              QFrame, QSizePolicy, QMessageBox, QToolBar)
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QFont, QFontMetrics
 
 import matplotlib
 matplotlib.use('qtagg')
@@ -25,7 +25,15 @@ class LinePropertiesWidget(QGroupBox):
     propertiesChanged = pyqtSignal()
 
     def __init__(self, series_id, initial_props, parent=None):
-        super().__init__(initial_props['name'], parent)
+        # Elide the title text to prevent the dock from expanding too much
+        # We target approx 250px width for the title
+        full_name = initial_props['name']
+        fm = QFontMetrics(QFont())
+        elided_name = fm.elidedText(full_name, Qt.TextElideMode.ElideMiddle, 250)
+        
+        super().__init__(elided_name, parent)
+        self.setToolTip(full_name)
+        
         self.series_id = series_id
         self.is_scatter = initial_props.get('mode') == 'scatter'
         
@@ -40,6 +48,7 @@ class LinePropertiesWidget(QGroupBox):
         # Label
         self.label_edit = QLineEdit(initial_props['name'])
         self.label_edit.editingFinished.connect(self.propertiesChanged)
+        self.label_edit.setMaximumWidth(200)
         layout.addRow("Legend:", self.label_edit)
 
         # Color
@@ -57,12 +66,14 @@ class LinePropertiesWidget(QGroupBox):
             self.size_spin.setRange(1.0, 200.0)
             self.size_spin.setValue(float(initial_props.get('size', 10)))
             self.size_spin.valueChanged.connect(self.propertiesChanged)
+            self.size_spin.setFixedWidth(100)
             layout.addRow("Size:", self.size_spin)
             
             self.marker_combo = QComboBox()
             self.marker_combo.addItems(['o', 'x', '+', 'v', '^', '<', '>', 's', 'p', '*', 'h', 'H', 'D', 'd'])
             self.marker_combo.setCurrentText(initial_props.get('marker', 'o'))
             self.marker_combo.currentTextChanged.connect(self.propertiesChanged)
+            self.marker_combo.setMaximumWidth(100)
             layout.addRow("Marker:", self.marker_combo)
             
             self.style_combo = QComboBox() 
@@ -74,6 +85,7 @@ class LinePropertiesWidget(QGroupBox):
             self.style_combo.addItems(['-', '--', ':', '-.'])
             self.style_combo.setCurrentText(initial_props.get('linestyle', '-'))
             self.style_combo.currentTextChanged.connect(self.propertiesChanged)
+            self.style_combo.setMaximumWidth(100)
             layout.addRow("Style:", self.style_combo)
 
             self.width_spin = QDoubleSpinBox()
@@ -81,6 +93,7 @@ class LinePropertiesWidget(QGroupBox):
             self.width_spin.setSingleStep(0.5)
             self.width_spin.setValue(initial_props.get('linewidth', 1.5))
             self.width_spin.valueChanged.connect(self.propertiesChanged)
+            self.width_spin.setFixedWidth(100)
             layout.addRow("Width:", self.width_spin)
 
             self.marker_combo = QComboBox()
@@ -89,6 +102,7 @@ class LinePropertiesWidget(QGroupBox):
             if current_marker is None: current_marker = 'None'
             self.marker_combo.setCurrentText(current_marker)
             self.marker_combo.currentTextChanged.connect(self.propertiesChanged)
+            self.marker_combo.setMaximumWidth(100)
             layout.addRow("Marker:", self.marker_combo)
             
             self.has_std = initial_props.get('has_std', False)
@@ -193,21 +207,21 @@ class PopOutWindow(QMainWindow):
         self.width_spin.setPrefix("W: ")
         self.width_spin.setRange(10, 10000)
         self.width_spin.setDecimals(1)
-        # FIX: Connect Enter key / Focus loss to apply function
         self.width_spin.editingFinished.connect(self.apply_canvas_size)
+        self.width_spin.setFixedWidth(90)
         
         self.height_spin = QDoubleSpinBox()
         self.height_spin.setPrefix("H: ")
         self.height_spin.setRange(10, 10000)
         self.height_spin.setDecimals(1)
-        # FIX: Connect Enter key / Focus loss to apply function
         self.height_spin.editingFinished.connect(self.apply_canvas_size)
+        self.height_spin.setFixedWidth(90)
         
         self.unit_combo = QComboBox()
         self.unit_combo.addItems(['px', 'in', 'mm', 'cm'])
         self.unit_combo.setCurrentText('px')
         self.unit_combo.currentTextChanged.connect(self.update_size_display)
-        self.unit_combo.setFixedWidth(45)
+        self.unit_combo.setFixedWidth(60)
         
         set_size_btn = QPushButton("Set")
         set_size_btn.setFixedWidth(40)
@@ -223,6 +237,7 @@ class PopOutWindow(QMainWindow):
         # Text props
         self.title_edit = QLineEdit(self.plot_data.get('title', ''))
         self.title_edit.editingFinished.connect(self.redraw_plot)
+        self.title_edit.setMaximumWidth(160)
         layout.addRow("Title:", self.title_edit)
 
         self.latex_check = QCheckBox("Use LaTeX")
@@ -244,24 +259,28 @@ class PopOutWindow(QMainWindow):
         self.font_title_spin.setRange(6, 72)
         self.font_title_spin.setValue(12)
         self.font_title_spin.valueChanged.connect(self.redraw_plot)
+        self.font_title_spin.setFixedWidth(70)
         layout.addRow("Title:", self.font_title_spin)
 
         self.font_label_spin = QSpinBox()
         self.font_label_spin.setRange(6, 72)
         self.font_label_spin.setValue(10)
         self.font_label_spin.valueChanged.connect(self.redraw_plot)
+        self.font_label_spin.setFixedWidth(70)
         layout.addRow("Axis Labels:", self.font_label_spin)
 
         self.font_tick_spin = QSpinBox()
         self.font_tick_spin.setRange(6, 72)
         self.font_tick_spin.setValue(10)
         self.font_tick_spin.valueChanged.connect(self.redraw_plot)
+        self.font_tick_spin.setFixedWidth(70)
         layout.addRow("Tick Labels:", self.font_tick_spin)
 
         self.font_legend_spin = QSpinBox()
         self.font_legend_spin.setRange(6, 72)
         self.font_legend_spin.setValue(10)
         self.font_legend_spin.valueChanged.connect(self.redraw_plot)
+        self.font_legend_spin.setFixedWidth(70)
         layout.addRow("Legend:", self.font_legend_spin)
 
         self.form_layout.addWidget(group)
@@ -274,6 +293,7 @@ class PopOutWindow(QMainWindow):
         default_x = self.plot_data.get('x_label', '')
         self.x_label_edit = QLineEdit(default_x)
         self.x_label_edit.editingFinished.connect(self.redraw_plot)
+        self.x_label_edit.setMaximumWidth(200)
         layout.addRow("X Label:", self.x_label_edit)
         
         self.x_log_check = QCheckBox("Log Scale X")
@@ -289,6 +309,7 @@ class PopOutWindow(QMainWindow):
             default_y = axis_data.get('label', y_col)
             label_edit = QLineEdit(default_y)
             label_edit.editingFinished.connect(self.redraw_plot)
+            label_edit.setMaximumWidth(200)
             layout.addRow("Label:", label_edit)
             
             log_check = QCheckBox("Log Scale Y")
@@ -311,6 +332,7 @@ class PopOutWindow(QMainWindow):
         self.legend_loc = QComboBox()
         self.legend_loc.addItems(['best', 'upper right', 'upper left', 'lower left', 'lower right', 'center left', 'center right', 'upper center', 'lower center'])
         self.legend_loc.currentTextChanged.connect(self.redraw_plot)
+        self.legend_loc.setMaximumWidth(140)
         layout.addRow("Location:", self.legend_loc)
 
         self.legend_frame = QCheckBox("Frame")
@@ -475,7 +497,8 @@ class PopOutWindow(QMainWindow):
         ax_primary = self.figure.add_subplot(111)
         ax_primary.set_title(self.title_edit.text(), fontsize=font_title)
         ax_primary.set_xlabel(self.x_label_edit.text(), fontsize=font_label)
-        ax_primary.tick_params(axis='both', labelsize=font_tick)
+        
+        ax_primary.tick_params(axis='both', labelsize=font_tick, direction='in')
         
         if 'x_limits' in self.plot_data:
             ax_primary.set_xlim(self.plot_data['x_limits'])
@@ -518,13 +541,13 @@ class PopOutWindow(QMainWindow):
             col = y_data_prim['color']
             rgb = (col.redF(), col.greenF(), col.blueF())
             ax_primary.yaxis.label.set_color(rgb)
-            ax_primary.tick_params(axis='y', colors=rgb)
+            ax_primary.tick_params(axis='y', colors=rgb, direction='in')
             # Primary left spine
             ax_primary.spines['left'].set_color(rgb)
             
             # X-axis color is usually black, but we can keep it standard
             ax_primary.xaxis.label.set_color('black')
-            ax_primary.tick_params(axis='x', colors='black')
+            ax_primary.tick_params(axis='x', colors='black', direction='in')
             ax_primary.spines['bottom'].set_color('black')
             ax_primary.spines['top'].set_visible(False)
             ax_primary.spines['right'].set_visible(False)
@@ -540,7 +563,7 @@ class PopOutWindow(QMainWindow):
             
             config = self.y_configs[y_col]
             ax_new.set_ylabel(config['label_edit'].text(), fontsize=font_label)
-            ax_new.tick_params(axis='y', labelsize=font_tick)
+            ax_new.tick_params(axis='y', labelsize=font_tick, direction='in')
             
             if config['log_check'].isChecked():
                 ax_new.set_yscale('log')
@@ -553,7 +576,7 @@ class PopOutWindow(QMainWindow):
                 col = y_data_sec['color']
                 rgb = (col.redF(), col.greenF(), col.blueF())
                 ax_new.yaxis.label.set_color(rgb)
-                ax_new.tick_params(axis='y', colors=rgb)
+                ax_new.tick_params(axis='y', colors=rgb, direction='in')
                 ax_new.spines['right'].set_color(rgb)
             
             axes_map[y_col] = ax_new
@@ -565,16 +588,18 @@ class PopOutWindow(QMainWindow):
         for y_col, axis_data in self.plot_data['y_axes'].items():
             ax = axes_map[y_col]
             
-            # Sort series if controller didn't, but LogController already sorts by layer_priority. 
-            # TrjController has one series. 
-            # We rely on the list order provided.
+            # Explicitly sort by layer_priority to match the desired Z-order logic
+            sorted_series = sorted(axis_data['series'], key=lambda s: s.get('layer_priority', 0))
             
-            for series in axis_data['series']:
+            for series in sorted_series:
                 sid = series['id']
                 if sid not in self.line_widgets: continue
                 
                 props = self.line_widgets[sid].get_properties()
                 if not props['visible']: continue
+
+                # Calculate explicit z-order: Orig(~2) < Std(~3) < Mean(~4)	 
+                z_val = 2.0 + series.get('layer_priority', 0)
 
                 if series.get('mode') == 'scatter':
                     colors_to_use = None
@@ -592,7 +617,8 @@ class PopOutWindow(QMainWindow):
                         c=colors_to_use, 
                         s=props['size']**2,
                         marker=props['marker'],
-                        edgecolors='none'
+                        edgecolors='none',
+                        zorder=z_val
                     )
                     
                     if props['label']: # Only add to legend if label is not empty
@@ -607,11 +633,12 @@ class PopOutWindow(QMainWindow):
                     has_error_band = props['show_std'] and series['std'] is not None
                     
                     if has_error_band:
-                        # ONLY plot the error band, skip the line entirely
+                        # ONLY plot the error band. This prevents the "extra line" inside the band for Std plots.				   
                         try:
                             lower = series['y'] - series['std']
                             upper = series['y'] + series['std']
-                            fill = ax.fill_between(series['x'], lower, upper, color=color_tuple, alpha=0.25, linewidth=0, label=props['label'])
+                            fill = ax.fill_between(series['x'], lower, upper, color=color_tuple, 
+                                                 alpha=0.25, linewidth=0, label=props['label'], zorder=z_val)
                             
                             if props['label']:
                                 all_handles.append(fill)
@@ -619,14 +646,15 @@ class PopOutWindow(QMainWindow):
                         except Exception:
                             pass
                     else:
-                        # Plot normal line (no error band)
+                        # Plot normal line (Orig or Mean)
                         line, = ax.plot(
                             series['x'], series['y'], 
                             label=props['label'],
                             color=color_tuple,
                             linestyle=props['linestyle'],
                             linewidth=props['linewidth'],
-                            marker=props['marker']
+                            marker=props['marker'],
+                            zorder=z_val
                         )
                         
                         if props['label']:

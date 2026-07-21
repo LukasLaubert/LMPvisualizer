@@ -326,6 +326,7 @@ class LogController:
             else:
                 axis_max_priority[y_col] = max(axis_max_priority[y_col], prio)
         
+        # Sort plots within each axis by priority
         for y_col in plots_by_yaxis:
             plots_by_yaxis[y_col].sort(key=lambda x: x[1].get('layer_priority', 0))
 
@@ -386,17 +387,23 @@ class LogController:
                 error_item = plot_info.get('error_item')
                 has_error_band = error_item is not None
                 
+                # Z-order derived from priority (Orig=0, Std=1, Mean=2)
+                # + 2.0 ensures we are above default grid (0.5) and patches (1.0)
+                z_val = 2.0 + plot_info.get('layer_priority', 0)
+
                 if has_error_band:
-                    # ONLY plot the error band, skip the line entirely
+                    # ONLY plot the error band.
                     c1 = error_item.curves[0].getData()
                     c2 = error_item.curves[1].getData()
                     if all(d is not None for d in c1) and all(d is not None for d in c2):
-                        fill = ax.fill_between(c1[0], c1[1], c2[1], color=color, alpha=0.25, linewidth=0, label=name)
+                        fill = ax.fill_between(c1[0], c1[1], c2[1], color=color, 
+                                             alpha=0.25, linewidth=0, label=name, zorder=z_val)
                         all_handles.append(fill)
                         all_labels.append(name)
                 else:
                     # Plot normal line (no error band)
-                    line, = ax.plot(data[0], data[1], color=color, label=name, linewidth=width, linestyle=linestyle)
+                    line, = ax.plot(data[0], data[1], color=color, label=name, 
+                                  linewidth=width, linestyle=linestyle, zorder=z_val)
                     all_handles.append(line)
                     all_labels.append(name)
         
