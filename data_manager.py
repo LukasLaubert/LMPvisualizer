@@ -18,7 +18,7 @@ class DataManager:
         self.warnings = []
         self.available_columns = []
         
-        all_cols = set()
+        all_cols_ordered = []
         successful_keywords = set()
 
         for study_name, system_list in studies.items():
@@ -54,11 +54,16 @@ class DataManager:
 
                 if df is not None and not df.empty:
                     self.data[study_name][system_name] = df
-                    all_cols.update(df.columns)
+                    # Add new columns to the ordered list while preserving order
+                    for col in df.columns:
+                        if col not in all_cols_ordered:
+                            all_cols_ordered.append(col)
                 else:
                     self.warnings.append(f"Could not parse thermo data for: {study_name}/{system_name}")
         
-        self.available_columns = sorted(list(all_cols))
+        # Preserve original column order as they appear in log files
+        # We need to maintain the order of columns as they first appear
+        self.available_columns = all_cols_ordered
         return self.warnings, successful_keywords
 
     def get_study_names(self) -> List[str]:
