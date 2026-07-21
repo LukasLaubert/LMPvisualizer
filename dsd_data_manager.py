@@ -188,13 +188,52 @@ class DSDDataManager:
                     
         return results
 
-    def _slice_disp_single_domain(self, df_initial, df_curr, settings, slice_axis, observe_axis, box_curr, 
+    def _get_slice_cache_key(self, df_initial, df_curr, settings, slice_axis, observe_axis, 
+                             z_col, z_ref, z_ranges, df_final):
+        # Create a stable identity for the settings dictionary
+        # Only include keys that affect calculation
+        relevant_keys = [
+            'atom_types', 'box_edges', 'number_boxes', 'num_boxes', 
+            'box_arrangement', 'arrangement', 'overlap_percentage', 'overlap',
+            'pbc', 'weighting_shape', 'weighted', 'bary_mid_twoside_weight', 'fit_outer_box'
+        ]
+        
+        settings_tuple = []
+        for k in sorted(relevant_keys):
+            val = settings.get(k)
+            if isinstance(val, list):
+                val = tuple(sorted(val)) if k == 'atom_types' else tuple(val)
+            settings_tuple.append((k, val))
+            
+        z_ranges_tuple = tuple(sorted(z_ranges)) if z_ranges else None
+        
+        return (
+            id(df_initial), 
+            id(df_curr), 
+            tuple(settings_tuple), 
+            slice_axis, 
+            observe_axis,
+            z_col, 
+            z_ref, 
+            z_ranges_tuple, 
+            id(df_final) if df_final is not None else None
+        )
+
+    def _slice_disp_single_domain(self, df_initial, df_curr, settings, slice_axis, observe_axis, box_curr,
                         z_col=None, z_ref='Current', z_ranges=None, df_final=None, box_init=None):
         """
         Implements the slice_disp_mean logic with full triclinic (shear) support.
         Separates Geometry Definition (from Atom Types) and Population Filtering (from Z/Property).
         """
         
+        # Check cache first
+        cache_key = self._get_slice_cache_key(df_initial, df_curr, settings, slice_axis, observe_axis, 
+                                              z_col, z_ref, z_ranges, df_final)
+        
+        if cache_key in self.slicing_results:
+            cached = self.slicing_results[cache_key]
+            return cached.copy() if cached is not None else None
+
         # --- 1. GEOMETRY PHASE: Filter by Atom Type ---
         # This defines the "stable" domain and box boundaries.
         atom_types = settings.get('atom_types', [])
@@ -216,6 +255,7 @@ class DSDDataManager:
             df_curr_geo = df_curr.set_index('id').sort_index()
 
         if df_init_geo.empty:
+            self.slicing_results[cache_key] = None
             return None
 
         # --- 2. POPULATION PHASE: Property (Z) Filtering ---
@@ -257,6 +297,7 @@ class DSDDataManager:
                 df_curr_pop = df_curr_geo[mask]
 
         if df_init_pop.empty:
+            self.slicing_results[cache_key] = None
             return None
 
         # --- 3. PREPARE COORDINATES (Population) ---
@@ -530,7 +571,10 @@ class DSDDataManager:
                 'count': n_main,
                 'sum_weights': sum_w_display
             })
-        return pd.DataFrame(results)
+        
+        final_df = pd.DataFrame(results)
+        self.slicing_results[cache_key] = final_df
+        return final_df
 
     def calculate_strain_evolution_cached(self, domains, timesteps, study, system, slice_axis, observe_axis, options):
         """
@@ -619,6 +663,8 @@ class DSDDataManager:
                 'name': name,
                 'strains': [],
                 'stds': [],
+                'min_x': [], 'max_x': [],
+                'y_at_min_x': [], 'y_at_max_x': [],
                 'color': v_domain.get('color', 'blue'),
                 'style': v_domain.get('style', '-'),
                 'source_index': v_domain.get('_source_index'),
@@ -628,6 +674,11 @@ class DSDDataManager:
             if cached and len(cached['strains']) == len(timesteps):
                 d_res['strains'] = cached['strains']
                 d_res['stds'] = cached['stds']
+                # Retrieve new fields with fallback for old cache entries
+                d_res['min_x'] = cached.get('min_x', [np.nan]*len(timesteps))
+                d_res['max_x'] = cached.get('max_x', [np.nan]*len(timesteps))
+                d_res['y_at_min_x'] = cached.get('y_at_min_x', [np.nan]*len(timesteps))
+                d_res['y_at_max_x'] = cached.get('y_at_max_x', [np.nan]*len(timesteps))
             else:
                 domain_tasks.append((i, v_domain, ident))
             
@@ -645,6 +696,10 @@ class DSDDataManager:
                     for res_idx, _, _ in domain_tasks:
                         final_domains_data[res_idx]['strains'].append(np.nan)
                         final_domains_data[res_idx]['stds'].append(0.0)
+                        final_domains_data[res_idx]['min_x'].append(np.nan)
+                        final_domains_data[res_idx]['max_x'].append(np.nan)
+                        final_domains_data[res_idx]['y_at_min_x'].append(np.nan)
+                        final_domains_data[res_idx]['y_at_max_x'].append(np.nan)
                     continue
 
                 for res_idx, v_domain, _ in domain_tasks:
@@ -655,17 +710,44 @@ class DSDDataManager:
                     )
                     
                     mean_strain, std_strain = np.nan, 0.0
+                    bx_min, bx_max, by_min, by_max = np.nan, np.nan, np.nan, np.nan
+
                     if res is not None and not res.empty:
-                        mean_strain, std_strain = self._calculate_segment_strain(res['center'].values, res['mean_disp'].values)
+                        # ALWAYS use the connecting line (Secant) between min/max center
+                        centers = res['center'].values
+                        disps = res['mean_disp'].values
+                        if len(centers) >= 2:
+                            idxs = np.argsort(centers)
+                            x_sorted = centers[idxs]
+                            y_sorted = disps[idxs]
+                            
+                            bx_min, bx_max = x_sorted[0], x_sorted[-1]
+                            by_min, by_max = y_sorted[0], y_sorted[-1]
+                            
+                            if bx_max > bx_min:
+                                mean_strain = (by_max - by_min) / (bx_max - bx_min)
+                                std_strain = 0.0 
+                            else:
+                                mean_strain = 0.0
+                        else:
+                            mean_strain = 0.0
                     
                     final_domains_data[res_idx]['strains'].append(mean_strain)
                     final_domains_data[res_idx]['stds'].append(std_strain)
+                    final_domains_data[res_idx]['min_x'].append(bx_min)
+                    final_domains_data[res_idx]['max_x'].append(bx_max)
+                    final_domains_data[res_idx]['y_at_min_x'].append(by_min)
+                    final_domains_data[res_idx]['y_at_max_x'].append(by_max)
 
             # Store new results in cache
             for res_idx, _, ident in domain_tasks:
                 self.strain_evolution_cache[ident] = {
                     'strains': final_domains_data[res_idx]['strains'],
-                    'stds': final_domains_data[res_idx]['stds']
+                    'stds': final_domains_data[res_idx]['stds'],
+                    'min_x': final_domains_data[res_idx]['min_x'],
+                    'max_x': final_domains_data[res_idx]['max_x'],
+                    'y_at_min_x': final_domains_data[res_idx]['y_at_min_x'],
+                    'y_at_max_x': final_domains_data[res_idx]['y_at_max_x']
                 }
 
         # 4. Target Strain Calculation (Harmonized with Controller)
@@ -682,13 +764,40 @@ class DSDDataManager:
                 _, box_curr = self.load_frame(study, system, ts)
                 target_strains.append(self._calculate_target_strain(box_init, box_curr, s_idx, o_idx))
             else:
-                # This requires raw slice results which we didn't cache.
-                # Re-calculate box min/max if PBC is off? 
-                # Or just rely on global box if possible.
-                # For now, if PBC is off, we might need a cheaper target strain proxy or 
-                # accept a small calculation cost for the target line.
-                _, box_curr = self.load_frame(study, system, ts)
-                target_strains.append(self._calculate_target_strain(box_init, box_curr, s_idx, o_idx))
+                # Non-PBC: Target strain is the slope of the line connecting 
+                # the global min and max X of the system (Optimal Line).
+                g_min_x, g_max_x = np.inf, -np.inf
+                val_at_min, val_at_max = np.nan, np.nan
+                
+                found_data = False
+                
+                # Check all domains for this timestep
+                for d_data in final_domains_data:
+                    # Skip if no data for this timestep
+                    if ts_idx >= len(d_data['min_x']): continue
+                    
+                    x_min = d_data['min_x'][ts_idx]
+                    x_max = d_data['max_x'][ts_idx]
+                    y_min = d_data['y_at_min_x'][ts_idx]
+                    y_max = d_data['y_at_max_x'][ts_idx]
+                    
+                    if np.isnan(x_min) or np.isnan(x_max): continue
+                    
+                    if x_min < g_min_x:
+                        g_min_x = x_min
+                        val_at_min = y_min
+                        found_data = True
+                        
+                    if x_max > g_max_x:
+                        g_max_x = x_max
+                        val_at_max = y_max
+                        found_data = True
+                
+                if found_data and g_max_x > g_min_x:
+                     ts_val = (val_at_max - val_at_min) / (g_max_x - g_min_x)
+                     target_strains.append(ts_val)
+                else:
+                     target_strains.append(0.0)
 
         return {
             'timesteps': timesteps,
@@ -696,36 +805,7 @@ class DSDDataManager:
             'domains': final_domains_data
         }
 
-    def _calculate_data_target_strain(self, domain_results_list):
-        """Calculates slope between first and last data point (Secant)."""
-        if not domain_results_list: return np.nan
-        
-        all_centers = []
-        all_disps = []
-        
-        for df in domain_results_list:
-             if df is not None and not df.empty:
-                 all_centers.append(df['center'].values)
-                 all_disps.append(df['mean_disp'].values)
-        
-        if not all_centers: return np.nan
-        
-        x_all = np.concatenate(all_centers)
-        y_all = np.concatenate(all_disps)
-        
-        if len(x_all) < 2: return 0.0 
-        
-        # Sort by X
-        sorted_indices = np.argsort(x_all)
-        x_sorted = x_all[sorted_indices]
-        y_sorted = y_all[sorted_indices]
-        
-        x1, x2 = x_sorted[0], x_sorted[-1]
-        y1, y2 = y_sorted[0], y_sorted[-1]
-        
-        if x2 == x1: return 0.0
-        
-        return (y2 - y1) / (x2 - x1)
+
 
     def _calculate_target_strain(self, box_init, box_curr, s_idx, o_idx):
         if not box_init or not box_curr or s_idx is None or o_idx is None:

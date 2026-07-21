@@ -606,12 +606,15 @@ class DSDController(QObject):
             slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0.0
 
         elif all_pts_flat:
-            # Fallback
-            all_pts_flat.sort(key=lambda p: p[0])
-            x_vals = [p[0] for p in all_pts_flat]
-            x1, x2 = min(x_vals), max(x_vals)
-            y1 = all_pts_flat[0][1]
-            y2 = all_pts_flat[-1][1]
+            # Fallback - Optimized O(N)
+            # all_pts_flat is list of (x, y) tuples
+            
+            min_p = min(all_pts_flat, key=lambda p: p[0])
+            max_p = max(all_pts_flat, key=lambda p: p[0])
+            
+            x1, y1 = min_p
+            x2, y2 = max_p
+            
             slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0.0
         
         self.last_target_strain = slope
