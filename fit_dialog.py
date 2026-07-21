@@ -100,6 +100,7 @@ class FitFunctionDialog(QWidget):
         # Internal state for fit repetitions
         self.target_reps = 1
         self.current_rep_count = 0
+        self.best_fit_result = None # Initialized to prevent AttributeError
         
         # Map friendly names to SciPy method codes
         self.methods_map = {
@@ -144,17 +145,34 @@ class FitFunctionDialog(QWidget):
         layout.addLayout(func_box)
 
         # --- Zone 2: Parameters (The "Smart" part) ---
-        # Modified header layout to include Shuffle button
         param_header_layout = QHBoxLayout()
         param_header_layout.addWidget(QLabel("Parameters (Initial Guess):"))
         param_header_layout.addStretch()
         
         self.shuffle_btn = QPushButton("Shuffle")
-        self.shuffle_btn.setToolTip("Multiply unlocked parameters by a random factor (0.01 - 100)")
+        self.shuffle_btn.setToolTip("Multiply unlocked parameters by a random factor (1e-2 to 1e2)")
         self.shuffle_btn.setFixedWidth(60)
         self.shuffle_btn.setStyleSheet("padding: 2px; font-size: 10pt;")
         self.shuffle_btn.clicked.connect(self._shuffle_params)
         param_header_layout.addWidget(self.shuffle_btn)
+        
+        # --- NEW AUTO PLOT BUTTON ---
+        self.auto_plot_btn = QPushButton("Activate Auto Plot")
+        self.auto_plot_btn.setCheckable(True)
+        self.auto_plot_btn.setToolTip("If active, changing parameters manually immediately updates the plot.")
+        # Fixed width to accommodate text, specific stylesheet for readability when checked
+        self.auto_plot_btn.setFixedWidth(140)
+        self.auto_plot_btn.setStyleSheet("""
+            QPushButton { padding: 2px; font-size: 10pt; }
+            QPushButton:checked { 
+                background-color: #d0f0c0; 
+                color: black; 
+                border: 1px solid #808080; 
+                font-weight: bold;
+            }
+        """)
+        self.auto_plot_btn.toggled.connect(self._on_auto_plot_toggled)
+        param_header_layout.addWidget(self.auto_plot_btn)
         
         layout.addLayout(param_header_layout)
         
@@ -240,16 +258,12 @@ class FitFunctionDialog(QWidget):
         self.perturb_spin.setFixedWidth(90)
         adv_grid.addWidget(self.perturb_spin, 1, 3)
 
-        # Column Stretches: 
-        # Method: 0 (Fit to max width)
-        # Error: 1 (Take all remaining space)
-        # Reps/Perturb: 0 (Fit to fixed width)
+        # Column Stretches
         adv_grid.setColumnStretch(0, 0)
         adv_grid.setColumnStretch(1, 1)
         adv_grid.setColumnStretch(2, 0)
         adv_grid.setColumnStretch(3, 0)
         
-        # Align labels to match field start
         adv_grid.setAlignment(reps_lbl, Qt.AlignmentFlag.AlignLeft)
         adv_grid.setAlignment(perturb_lbl, Qt.AlignmentFlag.AlignLeft)
 
@@ -328,7 +342,6 @@ class FitFunctionDialog(QWidget):
             val_widget = self.param_table.cellWidget(row, 1)
             val = val_widget.value() if val_widget else 1.0
             
-            # Robustly check lock state
             locked = False
             container = self.param_table.cellWidget(row, 2)
             if container:
@@ -346,26 +359,98 @@ class FitFunctionDialog(QWidget):
             item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self.param_table.setItem(i, 0, item)
             
-            # Value (Must use ScientificSpinBox to show e-17 correctly)
+            # Value
             spin = ScientificSpinBox()
             if p in current_data:
                 spin.setValue(current_data[p][0])
             else:
                 spin.setValue(0.0 if p in ['b', 'c', 'd'] else 1.0)
+            
+            # Connect for Auto-Plot
+            spin.valueChanged.connect(self._on_param_changed)
+            
             self.param_table.setCellWidget(i, 1, spin)
             
-            # Lock Checkbox (Centered)
+            # Lock Checkbox
             chk = QCheckBox()
             if p in current_data:
                 chk.setChecked(current_data[p][1])
                 
-            # Centering Container
             container = QWidget()
             l = QHBoxLayout(container)
             l.setContentsMargins(0,0,0,0)
             l.setAlignment(Qt.AlignmentFlag.AlignCenter)
             l.addWidget(chk)
             self.param_table.setCellWidget(i, 2, container)
+
+    # --- New Auto-Plot Methods ---
+
+    def _on_auto_plot_toggled(self, checked):
+        if checked:
+            self.auto_plot_btn.setText("Deactivate Auto Plot")
+            self._try_generate_preview() # Plot immediately on activation
+        else:
+            self.auto_plot_btn.setText("Activate Auto Plot")
+
+    def _on_param_changed(self):
+        if self.auto_plot_btn.isChecked():
+            self._try_generate_preview()
+
+    def _try_generate_preview(self):
+        """Generates a curve based on current parameters without running optimization."""
+        try:
+            func_str = self.func_input.text().replace('^', '**')
+            
+            # 1. Bounds & Grid
+            x_min = self.min_spin.value()
+            x_max = self.max_spin.value()
+            if x_max <= x_min: x_max = x_min + 1.0
+            
+            x_plot = np.linspace(x_min, x_max, 1000)
+            
+            # 2. Gather Params
+            params = {}
+            for row in range(self.param_table.rowCount()):
+                name = self.param_table.item(row, 0).text()
+                val = self.param_table.cellWidget(row, 1).value()
+                params[name] = val
+            
+            # 3. Evaluate
+            safe_globals = {
+                "__builtins__": None, "np": np,
+                "sqrt": np.sqrt, "sin": np.sin, "cos": np.cos, "tan": np.tan,
+                "exp": np.exp, "log": np.log, "log10": np.log10, "abs": np.abs,
+                "e": np.e, "pi": np.pi, "power": np.power
+            }
+            
+            def eval_wrapper(x_val):
+                local_vars = {'x': x_val}
+                local_vars.update(params)
+                res = eval(func_str, safe_globals, local_vars)
+                if np.isscalar(res):
+                    return np.full_like(x_val, res)
+                return res
+
+            y_plot = eval_wrapper(x_plot)
+            
+            # Filter huge numbers
+            if hasattr(y_plot, '__len__'):
+                 valid_mask = (np.abs(y_plot) < 1e20)
+                 y_plot = np.where(valid_mask, y_plot, np.nan)
+            
+            # 4. Emit Dummy Result (Infinite error implies 'Preview' mode to user)
+            preview_result = {
+                'best_params': params,
+                'final_error': float('nan'), # Signal that this isn't a fit
+                'x_fit': x_plot,
+                'y_fit': y_plot,
+                'status': 'Preview'
+            }
+            self.fitUpdated.emit(preview_result)
+            
+        except Exception as e:
+            # Silent fail for preview is usually better than spamming errors while typing
+            print(f"Preview failed: {e}")
 
     def set_data(self, x_data, y_data):
         # Check for change
@@ -413,7 +498,7 @@ class FitFunctionDialog(QWidget):
         return changed
 
     def _shuffle_params(self):
-        """Randomize all unlocked parameters by a factor of 0.01 to 100."""
+        """Randomize all unlocked parameters by a factor of 0.01 to 100 (Log-Uniform)."""
         for row in range(self.param_table.rowCount()):
             # Check lock state
             container = self.param_table.cellWidget(row, 2)
@@ -426,9 +511,20 @@ class FitFunctionDialog(QWidget):
             if not locked:
                 spin = self.param_table.cellWidget(row, 1)
                 current_val = spin.value()
-                # Multiply by random factor
-                factor = random.uniform(0.01, 100.0)
-                spin.setValue(current_val * factor)
+                
+                # Log-Uniform distribution: 10^(-2) to 10^(2) -> 0.01 to 100
+                exponent = random.uniform(-2, 2)
+                factor = 10.0 ** exponent
+                
+                if current_val == 0:
+                     # If exactly zero, nudge it slightly so multiplication works next time
+                    spin.setValue(random.uniform(-0.1, 0.1))
+                else:
+                    spin.setValue(current_val * factor)
+                    
+        # Trigger preview if auto-plot is on
+        if self.auto_plot_btn.isChecked():
+            self._try_generate_preview()
 
     def _apply_perturbation(self):
         """Apply random perturbation to unlocked parameters before next rep."""
@@ -460,21 +556,25 @@ class FitFunctionDialog(QWidget):
                     spin.setValue(current_val * factor)
 
     def _trigger_fit(self):
-        """Initialize repetition logic and start the first fit."""
-        if self.current_worker:
-            return
+        """Initialize repetition logic and start the first fit via button."""
+        self.calculate_fit(init_sequence=True)
 
-        # Initialize loop variables
-        self.target_reps = self.reps_spin.value()
-        self.current_rep_count = 0
+    def calculate_fit(self, init_sequence=True):
+        """Triggers the fitting process. Defaults to starting a new sequence."""
+        # SAFETY: ALWAYS disable auto-plot when a real fit calculation starts
+        self.auto_plot_btn.setChecked(False)
         
-        self.calculate_fit()
-
-    def calculate_fit(self):
-        """Triggers the fitting process. Can be called internally (button loop) or externally."""
         if self.x_data is None or len(self.x_data) == 0:
             self.result_lbl.setText("Status: No Data Source linked.")
             return
+
+        # If starting a new sequence (e.g. Button click or Load Session), reset state
+        if init_sequence:
+            if self.current_worker: 
+                return # Don't interrupt if already running
+            self.target_reps = self.reps_spin.value()
+            self.current_rep_count = 0
+            self.best_fit_result = None
 
         # Gather config
         func_str = self.func_input.text()
@@ -488,7 +588,6 @@ class FitFunctionDialog(QWidget):
             val_widget = self.param_table.cellWidget(row, 1)
             val = val_widget.value()
             
-            # Robust Checkbox Retrieval
             locked = False
             container = self.param_table.cellWidget(row, 2)
             if container:
@@ -509,18 +608,16 @@ class FitFunctionDialog(QWidget):
             status_msg = f"Status: Fitting (Rep {self.current_rep_count + 1}/{self.target_reps})..."
         self.result_lbl.setText(status_msg)
         
-        # NOTE: We do NOT disable the button here to preserve focus logic
         self.calc_btn.setText("Fitting...") 
 
         friendly_method = self.method_combo.currentText()
         tech_method = self.methods_map.get(friendly_method, "Nelder-Mead")
 
-        # Pass None/Default for time limit since UI control was removed
         self.current_worker = FitWorker(
             self.x_data, self.y_data, func_str, params_config, bounds,
             tech_method,
             self.error_combo.currentText(),
-            10.0 # Default fallback time limit, logic now relies on repetitions
+            10.0 
         )
         self.current_worker.signals.finished.connect(self._on_fit_finished)
         self.current_worker.signals.error.connect(self._on_fit_error)
@@ -530,7 +627,14 @@ class FitFunctionDialog(QWidget):
     def _on_fit_finished(self, result):
         self.current_worker = None
         
-        # Update table with results of THIS run
+        # 1. Track Best Result
+        # If this is the first result, or if it has a lower error than the previous best, save it.
+        if self.best_fit_result is None:
+            self.best_fit_result = result
+        elif result['final_error'] < self.best_fit_result['final_error']:
+            self.best_fit_result = result
+        
+        # 2. Update table with results of THIS run (Visual feedback)
         for row in range(self.param_table.rowCount()):
             name_item = self.param_table.item(row, 0)
             if not name_item: continue
@@ -539,26 +643,39 @@ class FitFunctionDialog(QWidget):
             if name in result['best_params']:
                 self.param_table.cellWidget(row, 1).setValue(result['best_params'][name])
 
-        # Repetition Logic
+        # 3. Repetition Logic
         self.current_rep_count += 1
         
         if self.current_rep_count < self.target_reps:
             # Prepare for next rep
             self._apply_perturbation()
-            # Trigger next run immediately
-            self.calculate_fit()
+            # Trigger next run (Continue sequence -> False)
+            self.calculate_fit(init_sequence=False)
         else:
-            # All reps finished
+            # 4. All reps finished - RESTORE THE BEST RESULT
+            # We overwrite the current "last" result with the "best" one we found.
+            final_res = self.best_fit_result
+            
+            # Restore UI parameters to match the Best Result
+            for row in range(self.param_table.rowCount()):
+                name_item = self.param_table.item(row, 0)
+                if not name_item: continue
+                name = name_item.text()
+                
+                if name in final_res['best_params']:
+                    self.param_table.cellWidget(row, 1).setValue(final_res['best_params'][name])
+            
             self.calc_btn.setText("Calculate Fit")
             
-            # Final Status Update
+            # Final Status Update with BEST error
             err_name = self.error_combo.currentText()
-            err_val = result['final_error']
-            p_str = "\n".join([f"{k} = {v:.4g}" for k, v in result['best_params'].items()])
+            err_val = final_res['final_error']
+            p_str = "\n".join([f"{k} = {v:.4g}" for k, v in final_res['best_params'].items()])
             
-            self.result_lbl.setText(f"<b>Fit Successful!</b> (Reps: {self.target_reps})<br>Error ({err_name}): {err_val:.4g}<br>Parameters:<br>{p_str}")
+            self.result_lbl.setText(f"<b>Fit Successful!</b> (Reps: {self.target_reps})<br>Best Error ({err_name}): {err_val:.4g}<br>Parameters:<br>{p_str}")
             
-            self.fitUpdated.emit(result)
+            # Emit the BEST result to the main window
+            self.fitUpdated.emit(final_res)
 
     def _on_fit_error(self, msg):
         self.current_worker = None
