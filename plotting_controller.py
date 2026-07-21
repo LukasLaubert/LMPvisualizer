@@ -20,6 +20,53 @@ class PlottingController:
         self.plots: Dict[str, Dict[str, Any]] = {}
         # Dictionary to manage y-axes and their associated viewboxes
         self.y_axes: Dict[str, Dict[str, Any]] = {}
+        self.axes_locked = False
+        self._is_updating_ranges = False
+        self._master_viewbox = None
+
+    def toggle_axes_lock(self, locked: bool):
+        self.axes_locked = locked
+        if self._master_viewbox:
+            if locked:
+                self._master_viewbox.sigRangeChanged.connect(self._on_master_range_changed)
+                # Trigger a sync immediately
+                self._on_master_range_changed()
+            else:
+                try:
+                    self._master_viewbox.sigRangeChanged.disconnect(self._on_master_range_changed)
+                except (TypeError, RuntimeError):
+                    pass # Ignore if not connected
+
+    def _on_master_range_changed(self):
+        if self._is_updating_ranges or not self.axes_locked or not self._master_viewbox:
+            return
+
+        self._is_updating_ranges = True
+        
+        try:
+            y_range = self._master_viewbox.viewRange()[1]
+            height = y_range[1] - y_range[0]
+            if height == 0: return
+
+            # Relative position of the zero line on the master axis (0.0 to 1.0)
+            zero_pos = -y_range[0] / height
+
+            for y_col, axis_info in self.y_axes.items():
+                vb = axis_info['viewbox']
+                if vb is self._master_viewbox:
+                    continue
+
+                current_range = vb.viewRange()[1]
+                current_height = current_range[1] - current_range[0]
+                if current_height == 0: continue
+                
+                new_min = -zero_pos * current_height
+                new_max = (1 - zero_pos) * current_height
+                
+                vb.setYRange(new_min, new_max, padding=0)
+
+        finally:
+            self._is_updating_ranges = False
 
     def add_or_update_plot(self, name: str, data: dict, color: QColor, style, thickness: float = 1.0):
         """Adds a new plot or updates an existing one by name."""
@@ -45,10 +92,12 @@ class PlottingController:
         # --- Y-Axis and ViewBox Management ---
         if y_col_name not in self.y_axes:
             if not self.y_axes: # First axis is the default one
+                vb = self.plot_item.getViewBox()
                 self.y_axes[y_col_name] = {
                     'axis': self.plot_item.getAxis('left'),
-                    'viewbox': self.plot_item.getViewBox()
+                    'viewbox': vb
                 }
+                self._master_viewbox = vb
             else: # Create a new ViewBox and Axis for subsequent plots
                 vb = pg.ViewBox()
                 ax = pg.AxisItem('right')
@@ -110,6 +159,8 @@ class PlottingController:
     
     def clear_all_plots(self):
         """Removes all plots from the graph."""
+        self.toggle_axes_lock(False) # Ensure lock is disengaged
+        self._master_viewbox = None
         for name in list(self.plots.keys()):
             self.remove_plot(name)
         # Also clear the dynamically added axes

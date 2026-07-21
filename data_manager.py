@@ -1,6 +1,7 @@
 # lmp_visualizer/data_manager.py
 
 import pandas as pd
+from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
 class DataManager:
@@ -11,7 +12,7 @@ class DataManager:
         self.warnings = []
         self.available_columns = []
 
-    def load_project_data(self, studies: Dict[str, List[str]], root_path, log_keywords: List[str] = None):
+    def load_project_data(self, studies: Dict[str, List[str]], root_path, log_keywords: List[str] = None, file_map: Dict[str, Path] = None):
         """Loads all log file data for the discovered studies and systems."""
         from lammps_parser import LammpsParser # Local import
         self.data.clear()
@@ -20,49 +21,46 @@ class DataManager:
         
         all_cols_ordered = []
         successful_keywords = set()
+        if file_map is None:
+            file_map = {}
 
         for study_name, system_list in studies.items():
             self.data[study_name] = {}
             for system_name in system_list:
-                log_path = root_path / study_name / system_name
-                
-                # Determine the list of files to parse
                 log_files = []
-                if not log_keywords:
-                    log_files = list(log_path.glob("log.lammps"))
-                else:
-                    for keyword in log_keywords:
-                        log_files.extend(log_path.glob(f"*{keyword}*"))
-                    log_files = sorted(list(set(log_files))) # Use set to get unique files
+                if study_name == '.': # Flat directory or single file mode
+                    if system_name in file_map:
+                        log_files = [file_map[system_name]]
+                else: # Standard project structure
+                    log_path = root_path / study_name / system_name
+                    if not log_keywords:
+                        log_files = list(log_path.glob("log.lammps"))
+                    else:
+                        for keyword in log_keywords:
+                            log_files.extend(log_path.glob(f"*{keyword}*"))
+                        log_files = sorted(list(set(log_files)))
 
                 if not log_files:
                     self.warnings.append(f"No log files found for: {study_name}/{system_name}")
                     continue
                 
-                # Check which keywords were successful and parse data for the system
-                if log_keywords:
+                # This check is now implicitly handled by the fact that we found the files.
+                # We can simplify the successful_keywords logic.
+                for keyword in log_keywords:
                     for file_path in log_files:
-                        # This check is inefficient if done naively, but we need to see if a file is valid.
-                        # We can parse it once and if valid, credit all matching keywords.
-                        df_check = LammpsParser.extract_thermo_data(file_path)
-                        if df_check is not None and not df_check.empty:
-                            for keyword in log_keywords:
-                                if keyword in file_path.name:
-                                    successful_keywords.add(keyword)
+                        if keyword in file_path.name:
+                            successful_keywords.add(keyword)
 
                 df = LammpsParser.parse_multiple_logs(log_files)
 
                 if df is not None and not df.empty:
                     self.data[study_name][system_name] = df
-                    # Add new columns to the ordered list while preserving order
                     for col in df.columns:
                         if col not in all_cols_ordered:
                             all_cols_ordered.append(col)
                 else:
                     self.warnings.append(f"Could not parse thermo data for: {study_name}/{system_name}")
         
-        # Preserve original column order as they appear in log files
-        # We need to maintain the order of columns as they first appear
         self.available_columns = all_cols_ordered
         return self.warnings, successful_keywords
 
@@ -106,7 +104,7 @@ class DataManager:
     ) -> Optional[Dict]:
         """
         Retrieves data for plotting. Handles averaging and standard deviation.
-        user_choices = {'truncate_step': int, 'exclude': [str]}
+        user_choices = {'truncate_len': int, 'exclude': [str]}
         """
         if study not in self.data:
             return None
@@ -117,11 +115,10 @@ class DataManager:
                 return {'x': df[x_col], 'y': df[y_col], 'std': None}
             return None
         
-        # Handle averaging
+        # --- Averaging Logic ---
         study_dfs = self.data[study]
         
-        # Apply user choices if provided
-        dfs_to_average = []
+        dfs_to_process = []
         if user_choices:
             truncate_len = user_choices.get('truncate_len')
             exclude_systems = user_choices.get('exclude', [])
@@ -130,29 +127,59 @@ class DataManager:
                 if sys_name in exclude_systems:
                     continue
                 if truncate_len is not None:
-                    dfs_to_average.append(df.iloc[:truncate_len])
+                    dfs_to_process.append(df.iloc[:truncate_len])
                 else:
-                    dfs_to_average.append(df)
+                    dfs_to_process.append(df)
         else:
-            dfs_to_average = list(study_dfs.values())
+            dfs_to_process = list(study_dfs.values())
 
-        if not dfs_to_average:
+        if not dfs_to_process:
             return None
 
-        # Concatenate and group by the x-axis values (assuming 'Step' or similar index)
-        try:
-            combined_df = pd.concat(dfs_to_average)
-            grouped = combined_df.groupby(x_col)
-            
-            mean_df = grouped.mean()
-            
-            result = {'x': mean_df.index.values, 'y': mean_df[y_col].values, 'std': None}
-            
-            if compute_std:
-                std_df = grouped.std()
-                result['std'] = std_df[y_col].values
+        # Determine alignment column ('Step' or 'index')
+        align_col = 'Step'
+        if not all(align_col in df.columns for df in dfs_to_process):
+            align_col = 'index'
 
-            return result
-        except Exception:
-            # This can fail if x_col is not suitable for grouping (e.g. not monotonic)
+        processed_dfs = []
+        for df in dfs_to_process:
+            temp_df = df.copy()
+            if align_col == 'index':
+                temp_df = temp_df.reset_index()
+            
+            # Use last occurrence of a step
+            temp_df = temp_df.drop_duplicates(subset=[align_col], keep='last')
+            temp_df = temp_df.set_index(align_col)
+            processed_dfs.append(temp_df)
+
+        if not processed_dfs:
             return None
+
+        # Extract the series for x and y columns
+        x_series_list = [df[x_col] for df in processed_dfs if x_col in df.columns]
+        y_series_list = [df[y_col] for df in processed_dfs if y_col in df.columns]
+
+        if not y_series_list:
+            return None
+
+        # Create dataframes from the series lists for easy averaging
+        # Use an inner join to only average over common steps/indices
+        y_df = pd.concat(y_series_list, axis=1, join='inner')
+        
+        y_mean = y_df.mean(axis=1)
+        y_std = y_df.std(axis=1) if compute_std else None
+
+        # Average x-values to get a representative x-axis
+        if x_series_list:
+            x_df = pd.concat(x_series_list, axis=1, join='inner')
+            x_mean = x_df.mean(axis=1)
+        else: # Should not happen if we have y_series
+            x_mean = y_mean.index.to_series()
+
+        # Ensure all results are aligned to the same index
+        final_index = y_mean.index
+        x_mean = x_mean.reindex(final_index)
+        if y_std is not None:
+            y_std = y_std.reindex(final_index)
+
+        return {'x': x_mean, 'y': y_mean, 'std': y_std}

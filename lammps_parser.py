@@ -19,12 +19,11 @@ class LammpsParser:
         start_path = Path(path).resolve()
         for i in range(3):
             current_path = start_path if i == 0 else start_path.parents[i-1]
-            if not current_path.exists():
+            if not current_path.is_dir():
                 continue
 
             subdirs = [d for d in current_path.iterdir() if d.is_dir()]
             if any("input_files" not in d.name for d in subdirs):
-                # A basic check to see if it looks like a project root
                 has_input_files = any("input_files" in d.name for d in subdirs)
                 if has_input_files:
                     return current_path
@@ -32,49 +31,67 @@ class LammpsParser:
         raise FileNotFoundError(f"Could not find a valid LAMMPS project root in or above '{path}'.")
 
     @staticmethod
-    def discover_studies_systems(root_path: Path) -> Tuple[Dict[str, List[str]], List[str]]:
+    def discover_studies_systems(path: Path, log_keywords: List[str]) -> Tuple[Dict[str, List[str]], List[str], Dict[str, Path]]:
         """
-        Discovers studies and systems from the root path.
-        Returns a dictionary of {study: [systems]} and a list of warnings.
+        Discovers studies and systems. Handles normal project structures,
+        flat directories with log files, and single log file paths.
+        Returns studies dict, warnings list, and a map of {system_name: full_path} for flat modes.
         """
-        studies = {}
         warnings = []
-        
-        study_dirs = [d for d in root_path.iterdir() if d.is_dir() and "input_files" not in d.name]
-        
-        if not study_dirs:
-            return {}, ["No study directories found in the root path."]
+        file_map = {}
 
-        # First pass to find all systems and establish a base set
-        base_systems = None
-        for study_dir in study_dirs:
-            systems = sorted([s.name for s in study_dir.iterdir() if s.is_dir()])
-            if not systems:
-                warnings.append(f"Study '{study_dir.name}' contains no system subdirectories.")
-                continue
-            studies[study_dir.name] = systems
-            if base_systems is None:
-                base_systems = set(systems)
+        # Case 1: Path is a single file
+        if path.is_file():
+            studies = {'.': [path.stem]}
+            file_map = {path.stem: path}
+            return studies, warnings, file_map
 
-        if base_systems is None:
-             return {}, ["No valid systems found across any studies."]
+        # Case 2: Path is a directory, try normal discovery first
+        if path.is_dir():
+            study_dirs = [d for d in path.iterdir() if d.is_dir() and "input_files" not in d.name]
+            
+            if study_dirs:
+                studies = {}
+                base_systems = None
+                for study_dir in study_dirs:
+                    systems = sorted([s.name for s in study_dir.iterdir() if s.is_dir()])
+                    if not systems:
+                        warnings.append(f"Study '{study_dir.name}' contains no system subdirectories.")
+                        continue
+                    studies[study_dir.name] = systems
+                    if base_systems is None:
+                        base_systems = set(systems)
+                
+                if base_systems is not None:
+                    consistent_studies = {}
+                    all_systems_found = set()
+                    for study_name, system_list in studies.items():
+                        if set(system_list) == base_systems:
+                            consistent_studies[study_name] = system_list
+                            all_systems_found.update(system_list)
+                    
+                    if consistent_studies:
+                        # Found a valid, consistent project structure
+                        return consistent_studies, warnings, {}
 
-        # Second pass to check for consistency
-        consistent_studies = {}
-        all_systems_found = set()
-        for study_name, system_list in studies.items():
-            current_systems = set(system_list)
-            if current_systems != base_systems:
-                warnings.append(
-                    f"Study '{study_name}' has an inconsistent system set. "
-                    f"Missing: {base_systems - current_systems}. "
-                    f"Extra: {current_systems - base_systems}. Skipping study."
-                )
+        # Fallback: Path is a directory with no valid study structure, or a single file was provided
+        log_files = []
+        if path.is_dir():
+            if not log_keywords:
+                log_files = list(path.glob("log.lammps"))
             else:
-                consistent_studies[study_name] = system_list
-                all_systems_found.update(system_list)
+                for keyword in log_keywords:
+                    log_files.extend(path.glob(f"*{keyword}*"))
+                log_files = sorted(list(set(log_files)))
 
-        return consistent_studies, warnings
+        if log_files:
+            systems = [f.stem for f in log_files]
+            studies = {'.': systems}
+            file_map = {f.stem: f for f in log_files}
+            return studies, warnings, file_map
+
+        # If we reach here, nothing was found
+        return {}, ["No study directories or log files found in the given path."], {}
     
     @staticmethod
     def extract_thermo_data(logfile_path: Path) -> Optional[pd.DataFrame]:
