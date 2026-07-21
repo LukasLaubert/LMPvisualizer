@@ -1,6 +1,8 @@
 # lmp_visualizer/main_window.py
 
 import sys
+import os
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QComboBox, QFrame, QTableWidget, QHeaderView, QTableWidgetItem,
@@ -22,31 +24,42 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("LAMMPS Log Visualizer")
         self.setGeometry(100, 100, 1400, 800)
-        self.setStyleSheet("QMainWindow { background-color: #f0f0f0; }") # Light gray background
+        self.setStyleSheet("QMainWindow { background-color: #f0f0f0; }")
 
-        # Backend components
         self.data_manager = DataManager()
-        self.plot_controller = None # Will be initialized after layout
+        self.plot_controller = None
 
-        # Central widget and layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # --- Top Controls (Path and Info) ---
-        top_controls_layout = QHBoxLayout()
-
-        # Path selection
-        path_layout = QHBoxLayout()
-        path_layout.addWidget(QLabel("Path:"))
+        top_controls_group = QFrame()
+        top_controls_group.setFrameShape(QFrame.Shape.StyledPanel)
+        top_controls_layout = QGridLayout(top_controls_group)
+        
+        top_controls_layout.addWidget(QLabel("Path:"), 0, 0)
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText("Select Project Root Directory...")
+        top_controls_layout.addWidget(self.path_edit, 0, 1, 1, 3)
         self.browse_btn = QPushButton("Browse...")
-        path_layout.addWidget(self.path_edit)
-        path_layout.addWidget(self.browse_btn)
-        top_controls_layout.addLayout(path_layout)
-        
-        # Info panel (compact)
+        top_controls_layout.addWidget(self.browse_btn, 0, 4)
+
+        top_controls_layout.addWidget(QLabel("Study"), 1, 0)
+        self.study_combo = self._create_combo("Select Study")
+        top_controls_layout.addWidget(self.study_combo, 1, 1)
+
+        top_controls_layout.addWidget(QLabel("System"), 2, 0)
+        self.system_combo = self._create_combo("Select System")
+        top_controls_layout.addWidget(self.system_combo, 2, 1)
+
+        top_controls_layout.addWidget(QLabel("X-Axis"), 1, 2)
+        self.xaxis_combo = self._create_combo("Select X-Axis")
+        top_controls_layout.addWidget(self.xaxis_combo, 1, 3)
+
+        top_controls_layout.addWidget(QLabel("Y-Axis"), 2, 2)
+        self.yaxis_combo = self._create_combo("Select Y-Axis")
+        top_controls_layout.addWidget(self.yaxis_combo, 2, 3)
+
         info_widget = QWidget()
         info_layout = QVBoxLayout(info_widget)
         info_layout.setContentsMargins(10, 0, 0, 0)
@@ -58,53 +71,20 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(self.systems_label)
         info_layout.addWidget(self.units_label)
         info_layout.addWidget(self.timestep_label)
-        info_widget.setFixedWidth(200) # Keep this panel compact
-        top_controls_layout.addWidget(info_widget)
-        
-        main_layout.addLayout(top_controls_layout)
+        info_layout.addStretch()
+        top_controls_layout.addWidget(info_widget, 1, 4, 2, 1)
 
-        # --- Selection Dropdowns (reorganized) ---
-        selection_layout = QHBoxLayout()
-        
-        # Left side dropdowns
-        left_selection_layout = QGridLayout()
-        left_selection_layout.addWidget(QLabel("Study"), 0, 0)
-        self.study_combo = self._create_combo("Select Study")
-        left_selection_layout.addWidget(self.study_combo, 0, 1)
-        
-        left_selection_layout.addWidget(QLabel("System"), 1, 0)
-        self.system_combo = self._create_combo("Select System")
-        left_selection_layout.addWidget(self.system_combo, 1, 1)
-        
-        # Right side dropdowns
-        right_selection_layout = QGridLayout()
-        right_selection_layout.addWidget(QLabel("X-Axis"), 0, 0)
-        self.xaxis_combo = self._create_combo("Select X-Axis")
-        right_selection_layout.addWidget(self.xaxis_combo, 0, 1)
+        top_controls_layout.setColumnStretch(1, 1)
+        top_controls_layout.setColumnStretch(3, 1)
+        main_layout.addWidget(top_controls_group)
 
-        right_selection_layout.addWidget(QLabel("Y-Axis"), 1, 0)
-        self.yaxis_combo = self._create_combo("Select Y-Axis")
-        right_selection_layout.addWidget(self.yaxis_combo, 1, 1)
-        
-        selection_layout.addLayout(left_selection_layout)
-        selection_layout.addLayout(right_selection_layout)
-        
-        self.std_checkbox = QCheckBox("Compute std")
-        selection_layout.addWidget(self.std_checkbox, alignment=Qt.AlignmentFlag.AlignVCenter)
-        selection_layout.addStretch() # Push everything to the left
-        
-        main_layout.addLayout(selection_layout)
-
-
-        # --- Main content area (Plot + Controls/Table) ---
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         
-        # Left side: Plot + Action buttons
         left_panel = QWidget()
         left_layout = QHBoxLayout(left_panel)
         
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground('w') # White background for the plot
+        self.plot_widget.setBackground('w')
         self.plot_controller = PlottingController(self.plot_widget)
 
         action_buttons_layout = QVBoxLayout()
@@ -123,89 +103,68 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.plot_widget)
         left_layout.addLayout(action_buttons_layout)
         
-        # Right side: Plot Table (with adjusted columns)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        
+        self.std_checkbox = QCheckBox("Compute std")
+        right_layout.addWidget(self.std_checkbox)
+
         self.plot_table = QTableWidget()
         self.plot_table.setColumnCount(5)
         self.plot_table.setHorizontalHeaderLabels(["Plot", "Color", "Style", "Show", "Del"])
         header = self.plot_table.horizontalHeader()
-        # Set column resize modes
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch) # 'Plot' column
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents) # 'Color'
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive) # 'Style'
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # 'Show'
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # 'Del'
-        self.plot_table.setColumnWidth(2, 80) # Give style dropdown more space
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.plot_table.setColumnWidth(2, 80)
+        self.plot_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.plot_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.plot_table.verticalHeader().hide()
-        self._setup_plot_table()
+        right_layout.addWidget(self.plot_table)
 
         main_splitter.addWidget(left_panel)
-        main_splitter.addWidget(self.plot_table)
-        main_splitter.setSizes([900, 500]) # Adjust initial splitter sizes
-        main_layout.addWidget(main_splitter, 1) # Add with stretch factor
+        main_splitter.addWidget(right_panel)
+        main_splitter.setSizes([900, 500])
+        main_layout.addWidget(main_splitter, 1)
 
         self._connect_signals()
-        self._update_ui_state()
-
-    def _setup_plot_table(self):
-        """Creates the permanent staging row at the top of the table."""
-        self.plot_table.insertRow(0)
-        
-        # Name Item
-        name_item = QTableWidgetItem("-(Staging)-")
-        name_item.setData(Qt.ItemDataRole.UserRole, 'staging')
-        name_item.setForeground(Qt.GlobalColor.gray)
-        self.plot_table.setItem(0, 0, name_item)
-
-        # Color Button
-        color_btn = ColorButton(QColor('gray'))
-        color_btn.colorChanged.connect(self.update_plots)
-        self.plot_table.setCellWidget(0, 1, color_btn)
-
-        # Style Combo
-        style_combo = self._create_style_combo()
-        style_combo.setCurrentText("Solid")
-        style_combo.currentTextChanged.connect(self.update_plots)
-        self.plot_table.setCellWidget(0, 2, style_combo)
-
-        # Show Checkbox (disabled for staging)
-        show_check = QCheckBox()
-        show_check.setChecked(True)
-        show_widget = self._create_centered_widget(show_check)
-        show_widget.setEnabled(False)
-        self.plot_table.setCellWidget(0, 3, show_widget)
-
-        # Del Button (placeholder)
-        self.plot_table.setCellWidget(0, 4, self._create_centered_widget(QLabel("-")))
+        self._update_ui_state(project_loaded=False)
 
     def _create_combo(self, placeholder: str) -> QComboBox:
         combo = QComboBox()
-        # The placeholder is now set via addItem and setting the first index
         combo.addItem(placeholder)
         combo.setCurrentIndex(0)
         return combo
 
     def _connect_signals(self):
         self.browse_btn.clicked.connect(self.browse_for_directory)
-        self.path_edit.returnPressed.connect(self.on_path_entered)
+        self.path_edit.editingFinished.connect(self.on_path_entered)
         
-        # Connections that trigger updates
+        self.plot_table.itemSelectionChanged.connect(self.on_table_selection_changed)
+        
         self.study_combo.currentTextChanged.connect(self.on_study_selected)
-        self.system_combo.currentTextChanged.connect(self.on_system_combo_changed)
-        self.xaxis_combo.currentTextChanged.connect(self.update_plots)
-        self.yaxis_combo.currentTextChanged.connect(self.update_plots)
+        self.system_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
+        self.xaxis_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
+        self.yaxis_combo.currentTextChanged.connect(self.update_selected_row_from_dropdowns)
+        
         self.std_checkbox.stateChanged.connect(self.update_plots)
-
-        # Connections for table actions and session management
-        self.add_btn.clicked.connect(self.add_plot_from_selection)
+        self.add_btn.clicked.connect(self.add_new_plot_row)
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
         self.export_btn.clicked.connect(self.export_plot)
     
     def browse_for_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, "Select Project Root")
+        start_path = self.path_edit.text()
+        start_path = os.path.expanduser(start_path)
+        if not os.path.isdir(start_path):
+            start_path = str(Path.home())
+
+        directory = QFileDialog.getExistingDirectory(self, "Select Project Root", directory=start_path)
         if directory:
             self.path_edit.setText(directory)
-            self.on_path_entered() # Use same logic as pressing enter
+            self.on_path_entered()
     
     def on_path_entered(self):
         path = self.path_edit.text()
@@ -229,7 +188,6 @@ class MainWindow(QMainWindow):
             
         self.studies_label.setText(f"Studies: {len(self.data_manager.get_study_names())}")
         
-        # Get system count from the first available study after loading
         studies_dict = self.data_manager.data
         if studies_dict:
             first_study_name = next(iter(studies_dict))
@@ -238,236 +196,273 @@ class MainWindow(QMainWindow):
         else:
             self.systems_label.setText("Systems: 0")
 
-        # Map units to their time unit according to LAMMPS docs
-        time_units_map = {
-            'lj': 'tau',
-            'real': 'fs',
-            'metal': 'ps',
-            'si': 's',
-            'cgs': 's',
-            'electron': 'fs',
-            'micro': 'us',
-            'nano': 'ns'
-        }
-
-        # Update metadata including units for timestep
+        time_units_map = {'lj': 'tau', 'real': 'fs', 'metal': 'ps', 'si': 's', 'cgs': 's', 'electron': 'fs', 'micro': 'us', 'nano': 'ns'}
         units = LammpsParser.get_units(root_path)
         self.units_label.setText(f"Unit: {units or 'N/A'}")
         timestep = LammpsParser.get_timestep(root_path)
         time_unit = time_units_map.get(units, "")
-        if timestep:
-            self.timestep_label.setText(f"Timestep: {timestep} {time_unit}")
-        else:
-            self.timestep_label.setText(f"Timestep: N/A")
+        self.timestep_label.setText(f"Timestep: {timestep} {time_unit}" if timestep else "Timestep: N/A")
 
-        self._update_ui_state()
+        self._update_ui_state(project_loaded=True)
 
-    def _update_ui_state(self, clear_plots=True):
-        if clear_plots:
-            # Clear permanent rows only, leaving the staging row at index 0
-            for row in reversed(range(1, self.plot_table.rowCount())):
-                self.plot_table.removeRow(row)
-            
-            # Clear the plot controller and reset the staging row text
-            self.plot_controller.clear_all_plots()
-            if self.plot_table.item(0, 0):
-                self.plot_table.item(0, 0).setText("-(Staging)-")
+    def _update_ui_state(self, project_loaded: bool):
+        self.plot_table.setRowCount(0)
+        self.plot_controller.clear_all_plots()
 
-        # Helper to reset a combo box with a placeholder
         def reset_combo(combo, placeholder, items):
             combo.blockSignals(True)
+            current_text = combo.currentText()
             combo.clear()
             combo.addItem(placeholder)
-            combo.addItems(items)
-            combo.setCurrentIndex(0)
+            if items:
+                combo.addItems(items)
+            
+            if current_text in items:
+                combo.setCurrentText(current_text)
+            else:
+                combo.setCurrentIndex(0)
             combo.blockSignals(False)
 
-        reset_combo(self.study_combo, "Select Study", self.data_manager.get_study_names())
-        self.on_study_selected() # Trigger update for other combos
+        all_combos = [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo]
+        if project_loaded:
+            for combo in all_combos:
+                combo.setEnabled(True)
+            self.add_btn.setEnabled(True)
 
-    def on_study_selected(self):
+            reset_combo(self.study_combo, "Select Study", self.data_manager.get_study_names())
+            reset_combo(self.system_combo, "Select System", self.data_manager.get_all_system_names())
+            reset_combo(self.xaxis_combo, "Select X-Axis", self.data_manager.get_all_column_names())
+            reset_combo(self.yaxis_combo, "Select Y-Axis", self.data_manager.get_all_column_names())
+            
+            if self.data_manager.get_study_names():
+                self.add_new_plot_row()
+            else:
+                QMessageBox.warning(self, "No Data", "Project loaded, but no valid study or system data was found.")
+
+        else:
+            for combo in all_combos:
+                combo.clear()
+                combo.addItem("...")
+                combo.setEnabled(False)
+            self.add_btn.setEnabled(False)
+
+    def on_study_selected(self, text=""):
         study = self.study_combo.currentText()
         
         def reset_combo_with_systems(combo, placeholder, items):
             combo.blockSignals(True)
+            current_text = combo.currentText()
             combo.clear()
             combo.addItem(placeholder)
             if len(items) > 1:
                 combo.addItem("average")
             combo.addItems(items)
-            combo.setCurrentIndex(0)
+            if current_text in items or (current_text == "average" and len(items) > 1):
+                combo.setCurrentText(current_text)
+            else:
+                combo.setCurrentIndex(0)
             combo.blockSignals(False)
 
-        systems = self.data_manager.get_system_names(study)
+        systems = self.data_manager.get_system_names(study) if self.study_combo.currentIndex() > 0 else self.data_manager.get_all_system_names()
         reset_combo_with_systems(self.system_combo, "Select System", systems)
-
-        def reset_combo(combo, placeholder, items):
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem(placeholder)
-            combo.addItems(items)
-            combo.setCurrentIndex(0)
-            combo.blockSignals(False)
-
-        reset_combo(self.xaxis_combo, "Select X-Axis", self.data_manager.available_columns)
-        reset_combo(self.yaxis_combo, "Select Y-Axis", self.data_manager.available_columns)
         
-        self.update_plots()
+        self.update_selected_row_from_dropdowns()
 
-    def on_system_combo_changed(self):
-        """Handles visibility of the std checkbox and updates plots."""
-        is_average = self.system_combo.currentText() == "average"
-        self.std_checkbox.setVisible(is_average)
-        self.update_plots()
-
-    def is_selection_valid(self):
-        """Check if dropdowns have a valid selection (not placeholder)."""
-        return all(combo.currentIndex() > 0 for combo in [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo])
-
-    def add_plot_from_selection(self):
-        if not self.is_selection_valid():
+    def on_table_selection_changed(self):
+        if not self.plot_table.selectedItems() or self.plot_table.currentRow() == -1:
             return
 
-        # --- Read properties from the staging row (row 0) ---
-        staging_name = self.plot_table.item(0, 0).text()
+        selected_row = self.plot_table.currentRow()
+        plot_name_item = self.plot_table.item(selected_row, 0)
+        if not plot_name_item:
+            return
+
+        plot_name = plot_name_item.text()
         
-        # Prevent adding duplicate plots
-        for row in range(1, self.plot_table.rowCount()): # Skip staging row
-            perm_item = self.plot_table.item(row, 0)
-            if perm_item and perm_item.text() == staging_name:
-                QMessageBox.warning(self, "Duplicate Plot", "This plot has already been added.")
-                return
+        for combo in [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo]:
+            combo.blockSignals(True)
 
-        staging_color = self.plot_table.cellWidget(0, 1).color()
-        staging_style = self.plot_table.cellWidget(0, 2).currentText()
+        try:
+            parts = plot_name.split(' | ')
+            study, system, x_ax, y_ax = (parts + ['N/A'] * 4)[:4]
 
-        # --- Insert new permanent row at row 1 ---
-        self.plot_table.insertRow(1)
+            def set_combo_text(combo, text):
+                if text == 'N/A' or text not in [combo.itemText(i) for i in range(combo.count())]:
+                    combo.setCurrentIndex(0)
+                else:
+                    combo.setCurrentText(text)
+
+            set_combo_text(self.study_combo, study)
+            set_combo_text(self.system_combo, system)
+            set_combo_text(self.xaxis_combo, x_ax)
+            set_combo_text(self.yaxis_combo, y_ax)
         
-        # Name Item
-        name_item = QTableWidgetItem(staging_name)
-        name_item.setData(Qt.ItemDataRole.UserRole, 'permanent')
-        self.plot_table.setItem(1, 0, name_item)
+        finally:
+            for combo in [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo]:
+                combo.blockSignals(False)
 
-        # Color Button
-        color_btn = ColorButton(staging_color)
+    def update_selected_row_from_dropdowns(self, text=""):
+        if not self.plot_table.selectedItems() or self.plot_table.currentRow() == -1:
+            return
+
+        selected_row = self.plot_table.currentRow()
+        plot_name_item = self.plot_table.item(selected_row, 0)
+        if not plot_name_item:
+            return
+
+        study = self.study_combo.currentText() if self.study_combo.currentIndex() > 0 else "N/A"
+        system = self.system_combo.currentText() if self.system_combo.currentIndex() > 0 else "N/A"
+        x_ax = self.xaxis_combo.currentText() if self.xaxis_combo.currentIndex() > 0 else "N/A"
+        y_ax = self.yaxis_combo.currentText() if self.yaxis_combo.currentIndex() > 0 else "N/A"
+        
+        plot_name = f"{study} | {system} | {x_ax} | {y_ax}"
+        plot_name_item.setText(plot_name)
+
+        is_complete = "N/A" not in [study, system, x_ax, y_ax]
+        color = Qt.GlobalColor.black if is_complete else Qt.GlobalColor.gray
+        plot_name_item.setForeground(color)
+
+        self.update_plots()
+
+    def add_new_plot_row(self):
+        insert_row = 0
+        self.plot_table.insertRow(insert_row)
+
+        # Gather existing colors to generate a new, distinct color
+        existing_colors = []
+        for row in range(self.plot_table.rowCount()):
+            if row == insert_row: continue
+            color_widget = self.plot_table.cellWidget(row, 1)
+            if color_widget:
+                existing_colors.append(color_widget.color())
+        
+        color = self._get_distinct_color(existing_colors)
+        plot_name = "N/A | N/A | N/A | N/A"
+        style = "Solid"
+
+        if self.plot_table.rowCount() > 1:
+            try:
+                old_plot_name = self.plot_table.item(1, 0).text()
+                parts = old_plot_name.split(' | ')
+                study, system, x_ax, _ = (parts + ['N/A'] * 4)[:4]
+                plot_name = f"{study} | {system} | {x_ax} | N/A"
+                style = self.plot_table.cellWidget(1, 2).currentText()
+            except (AttributeError, ValueError):
+                pass
+
+        name_item = QTableWidgetItem(plot_name)
+        name_item.setForeground(Qt.GlobalColor.gray)
+        self.plot_table.setItem(insert_row, 0, name_item)
+
+        color_btn = ColorButton(color)
         color_btn.colorChanged.connect(self.update_plots)
-        self.plot_table.setCellWidget(1, 1, color_btn)
+        self.plot_table.setCellWidget(insert_row, 1, color_btn)
 
-        # Style Combo
         style_combo = self._create_style_combo()
-        style_combo.setCurrentText(staging_style)
+        style_combo.setCurrentText(style)
         style_combo.currentTextChanged.connect(self.update_plots)
-        self.plot_table.setCellWidget(1, 2, style_combo)
+        self.plot_table.setCellWidget(insert_row, 2, style_combo)
 
-        # Show Checkbox
         show_check = QCheckBox()
         show_check.setChecked(True)
         show_check.stateChanged.connect(self.update_plots)
-        self.plot_table.setCellWidget(1, 3, self._create_centered_widget(show_check))
+        self.plot_table.setCellWidget(insert_row, 3, self._create_centered_widget(show_check))
 
-        # Delete Button
         del_btn = QPushButton("X")
         del_btn.setStyleSheet("color: red; font-weight: bold;")
-        del_btn.clicked.connect(lambda checked, name=staging_name: self.delete_plot_row(name))
-        self.plot_table.setCellWidget(1, 4, self._create_centered_widget(del_btn))
+        del_btn.clicked.connect(self.delete_plot_row)
+        self.plot_table.setCellWidget(insert_row, 4, self._create_centered_widget(del_btn))
 
-        # Reset dropdowns, which clears the staging row via update_plots
-        self.system_combo.setCurrentIndex(0)
-        self.xaxis_combo.setCurrentIndex(0)
-        self.yaxis_combo.setCurrentIndex(0)
+        self.plot_table.selectRow(insert_row)
 
     def update_plots(self):
         self.plot_controller.clear_all_plots()
 
-        # --- Update Staging Row and Draw Temporary Plot ---
-        staging_item = self.plot_table.item(0, 0)
-        self.add_btn.setEnabled(self.is_selection_valid())
-
-        if self.is_selection_valid():
-            study = self.study_combo.currentText()
-            system = self.system_combo.currentText()
-            x_ax = self.xaxis_combo.currentText()
-            y_ax = self.yaxis_combo.currentText()
-            plot_name = f"{study}_{system}_{x_ax}_{y_ax}"
-            staging_item.setText(plot_name)
-
-            data = self.data_manager.get_plot_data(study, system, x_ax, y_ax, self.std_checkbox.isChecked())
-            if data:
-                color = self.plot_table.cellWidget(0, 1).color()
-                style_text = self.plot_table.cellWidget(0, 2).currentText()
-                style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
-                data['y_col'] = y_ax
-                self.plot_controller.add_or_update_plot("_temp_", data, color, style)
-        else:
-            staging_item.setText("-(Staging)-")
-
-        # --- Draw Permanent Plots ---
-        for row in range(1, self.plot_table.rowCount()): # Skip staging row
-            item = self.plot_table.item(row, 0)
+        # Step 1: Gather all information for visible plots in a single loop
+        visible_plots_info = []
+        for row in range(self.plot_table.rowCount()):
             show_widget = self.plot_table.cellWidget(row, 3)
-            if not (item and show_widget): continue
-            
             show_checkbox = show_widget.findChild(QCheckBox)
-            if item.data(Qt.ItemDataRole.UserRole) == 'permanent' and show_checkbox and show_checkbox.isChecked():
-                plot_name = item.text()
-                study, system, x_ax, y_ax = plot_name.split('_')
-                
-                user_choices = None
-                if system == 'average':
-                    consistency = self.data_manager.check_data_consistency(study)
-                    if consistency:
-                        dialog = InconsistentDataDialog(consistency, self)
-                        if dialog.exec():
-                            user_choices = dialog.get_choices()
-                        else:
-                            continue
-                
-                data = self.data_manager.get_plot_data(study, system, x_ax, y_ax, self.std_checkbox.isChecked(), user_choices)
-                
-                if data:
-                    color = self.plot_table.cellWidget(row, 1).color()
-                    style_text = self.plot_table.cellWidget(row, 2).currentText()
-                    style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
-                    data['y_col'] = y_ax
-                    self.plot_controller.add_or_update_plot(plot_name, data, color, style)
+            if not (show_checkbox and show_checkbox.isChecked()):
+                continue
 
-        self._update_axis_labels()
+            item = self.plot_table.item(row, 0)
+            if not item: continue
 
-    def _update_axis_labels(self):
+            plot_name = item.text()
+            try:
+                study, system, x_ax, y_ax = plot_name.split(' | ')
+                if "N/A" in [study, system, x_ax, y_ax]:
+                    continue
+                
+                color = self.plot_table.cellWidget(row, 1).color()
+                style_text = self.plot_table.cellWidget(row, 2).currentText()
+                style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
+
+                visible_plots_info.append({
+                    'plot_name': plot_name, 'study': study, 'system': system,
+                    'x_ax': x_ax, 'y_ax': y_ax, 'color': color, 'style': style
+                })
+            except ValueError:
+                continue
+
+        # Step 2: Create all plots and their axes
+        for plot_info in visible_plots_info:
+            user_choices = None
+            if plot_info['system'] == 'average':
+                consistency = self.data_manager.check_data_consistency(plot_info['study'])
+                if consistency:
+                    dialog = InconsistentDataDialog(consistency, self)
+                    if dialog.exec():
+                        user_choices = dialog.get_choices()
+                    else:
+                        continue # Skip this plot if user cancels
+            
+            data = self.data_manager.get_plot_data(
+                plot_info['study'], plot_info['system'], plot_info['x_ax'], plot_info['y_ax'], 
+                self.std_checkbox.isChecked(), user_choices
+            )
+            
+            if data:
+                data['y_col'] = plot_info['y_ax']
+                self.plot_controller.add_or_update_plot(plot_info['plot_name'], data, plot_info['color'], plot_info['style'])
+
+        # Step 3: Update axis labels and apply conditional coloring
+        self._update_axis_properties(visible_plots_info)
+
+    def _update_axis_properties(self, visible_plots_info):
         x_label = ""
         y_labels = {}
-
-        # Get labels from visible permanent plots
-        for row in range(1, self.plot_table.rowCount()): # Skip staging row
-            item = self.plot_table.item(row, 0)
-            show_widget = self.plot_table.cellWidget(row, 3)
-            if not (item and show_widget): continue
-
-            show_checkbox = show_widget.findChild(QCheckBox)
-            if item.data(Qt.ItemDataRole.UserRole) == 'permanent' and show_checkbox and show_checkbox.isChecked():
-                plot_name = item.text()
-                _, _, x_ax, y_ax = plot_name.split('_')
-                if not x_label: x_label = x_ax
-                if y_ax not in y_labels: y_labels[y_ax] = y_ax
-        
-        # If no permanent plots are showing, use the temp plot for labels
-        if not y_labels and self.is_selection_valid():
-            x_label = self.xaxis_combo.currentText()
-            y_labels[self.yaxis_combo.currentText()] = self.yaxis_combo.currentText()
+        for info in visible_plots_info:
+            if not x_label: x_label = info['x_ax']
+            if info['y_ax'] not in y_labels: y_labels[info['y_ax']] = info['y_ax']
 
         self.plot_controller.set_axis_labels(x_label, y_labels)
 
-    def delete_plot_row(self, plot_name_to_delete: str):
-        for row in range(1, self.plot_table.rowCount()): # Skip staging row
-            item = self.plot_table.item(row, 0)
-            if item and item.text() == plot_name_to_delete:
-                self.plot_table.removeRow(row)
-                self.update_plots()
-                return
+        # --- Axis Coloring Logic ---
+        black_color = QColor("black")
+        # Only color axes if there are multiple different y-axes being shown
+        if len(y_labels) > 1:
+            for info in visible_plots_info:
+                self.plot_controller.set_axis_color(info['y_ax'], info['color'])
+        else:
+            # Reset all axes to black if one or zero plots are visible
+            for y_ax in self.plot_controller.y_axes.keys():
+                self.plot_controller.set_axis_color(y_ax, black_color)
+
+    def delete_plot_row(self):
+        if not self.plot_table.selectedItems():
+            return
+            
+        selected_row = self.plot_table.currentRow()
+
+        if self.plot_table.rowCount() > 1:
+            self.plot_table.removeRow(selected_row)
+            self.update_plots()
+        elif self.plot_table.rowCount() == 1:
+            self.yaxis_combo.setCurrentIndex(0)
 
     def _create_centered_widget(self, widget: QWidget) -> QWidget:
-        """Helper to place a widget in a centered layout."""
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.addWidget(widget)
@@ -475,8 +470,36 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0,0,0,0)
         return container
 
-    def _get_random_color(self) -> QColor:
-        return QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+    def _get_distinct_color(self, existing_colors: list[QColor]) -> QColor:
+        """Generates a new, visually distinct color by finding the candidate furthest from existing colors."""
+        # Generate a list of vibrant, random candidate colors
+        candidates = []
+        for _ in range(20): # Generate 20 candidates
+            hue = random.random()
+            candidates.append(QColor.fromHsvF(hue, 1.0, 1.0, 1.0))
+
+        if not existing_colors:
+            return candidates[0]
+
+        best_candidate = None
+        max_min_dist = -1
+
+        for candidate in candidates:
+            # Calculate the minimum distance to any existing color
+            r1, g1, b1, _ = candidate.getRgb()
+            min_dist_sq = float('inf')
+            for existing in existing_colors:
+                r2, g2, b2, _ = existing.getRgb()
+                dist_sq = (r1 - r2)**2 + (g1 - g2)**2 + (b1 - b2)**2
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+            
+            # If this candidate is further from its nearest neighbor than any other candidate, it's our new best
+            if min_dist_sq > max_min_dist:
+                max_min_dist = min_dist_sq
+                best_candidate = candidate
+
+        return best_candidate
 
     def _create_style_combo(self) -> QComboBox:
         combo = QComboBox()
@@ -491,12 +514,12 @@ class MainWindow(QMainWindow):
         config = {'path': self.path_edit.text(), 'plots': []}
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 0)
-            if item and item.data(Qt.ItemDataRole.UserRole) == 'permanent':
+            if item:
                 plot_info = {
                     'name': item.text(),
                     'color': self.plot_table.cellWidget(row, 1).color().name(),
                     'style': self.plot_table.cellWidget(row, 2).currentText(),
-                    'show': self.plot_table.cellWidget(row, 3).isChecked()
+                    'show': self.plot_table.cellWidget(row, 3).findChild(QCheckBox).isChecked()
                 }
                 config['plots'].append(plot_info)
         
@@ -522,36 +545,40 @@ class MainWindow(QMainWindow):
                 root_path = LammpsParser.find_project_root(project_path)
                 self.load_project(root_path)
 
-                # Now load plots
                 self.plot_table.setRowCount(0)
                 for plot_info in config.get('plots', []):
                     row = self.plot_table.rowCount()
                     self.plot_table.insertRow(row)
                     
-                    item = QTableWidgetItem(plot_info['name'])
-                    item.setData(Qt.ItemDataRole.UserRole, 'permanent')
+                    name = plot_info['name']
+                    is_complete = "N/A" not in name
+                    color = Qt.GlobalColor.black if is_complete else Qt.GlobalColor.gray
+                    
+                    item = QTableWidgetItem(name)
+                    item.setForeground(color)
                     self.plot_table.setItem(row, 0, item)
                     
-                    self.plot_table.setCellWidget(row, 1, ColorButton(QColor(plot_info['color'])))
+                    color_btn = ColorButton(QColor(plot_info['color']))
+                    color_btn.colorChanged.connect(self.update_plots)
+                    self.plot_table.setCellWidget(row, 1, color_btn)
+
                     style_combo = self._create_style_combo()
                     style_combo.setCurrentText(plot_info['style'])
+                    style_combo.currentTextChanged.connect(self.update_plots)
                     self.plot_table.setCellWidget(row, 2, style_combo)
                     
                     show_check = QCheckBox()
                     show_check.setChecked(plot_info['show'])
+                    show_check.stateChanged.connect(self.update_plots)
                     self.plot_table.setCellWidget(row, 3, self._create_centered_widget(show_check))
                     
-                    # Wire up signals
-                    color_btn = self.plot_table.cellWidget(row, 1)
                     del_btn = QPushButton("X")
                     del_btn.setStyleSheet("color: red; font-weight: bold;")
-                    del_btn.clicked.connect(lambda checked, name=plot_info['name']: self.delete_plot_row(name))
+                    del_btn.clicked.connect(self.delete_plot_row)
                     self.plot_table.setCellWidget(row, 4, self._create_centered_widget(del_btn))
-
-                    color_btn.colorChanged.connect(self.update_plots)
-                    style_combo.currentTextChanged.connect(self.update_plots)
-                    show_check.stateChanged.connect(self.update_plots)
                 
+                if self.plot_table.rowCount() > 0:
+                    self.plot_table.selectRow(0)
                 self.update_plots()
 
             except FileNotFoundError as e:

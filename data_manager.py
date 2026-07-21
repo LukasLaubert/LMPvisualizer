@@ -50,6 +50,18 @@ class DataManager:
             return sorted(list(self.data[study].keys()))
         return []
 
+    def get_all_system_names(self) -> List[str]:
+        """Returns a sorted list of all unique system names across all studies."""
+        all_systems = set()
+        for study_name in self.data:
+            for system_name in self.data[study_name]:
+                all_systems.add(system_name)
+        return sorted(list(all_systems))
+
+    def get_all_column_names(self) -> List[str]:
+        """Returns a list of all available data columns from the project."""
+        return self.available_columns
+
     def check_data_consistency(self, study: str) -> Dict[str, int]:
         """
         Checks if dataframes for a study have the same length.

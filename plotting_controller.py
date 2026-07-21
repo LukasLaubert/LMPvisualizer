@@ -122,6 +122,13 @@ class PlottingController:
             if y_col in self.y_axes:
                 self.y_axes[y_col]['axis'].setLabel(text=label)
 
+    def set_axis_color(self, y_col: str, color: QColor):
+        """Sets the color of a specific y-axis, including its label and pen."""
+        if y_col in self.y_axes:
+            axis = self.y_axes[y_col]['axis']
+            axis.setPen(color)
+            axis.setTextPen(color)
+
     def export_plot(self, filename: str):
         """Exports the current plot view using Matplotlib for high quality output."""
         try:
