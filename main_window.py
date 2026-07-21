@@ -32,7 +32,7 @@ class MainWindow(QMainWindow):
         self.data_manager = DataManager()
         self.plot_controller = None
         self.sync_mean_enabled = False
-        self.running_mean_setting = "valid_window" # Default setting for running mean
+        self.running_mean_setting = "symmetric_window" # Default setting for running mean
         self.synchronized_columns = set()
         self.average_user_choices = {}
         self.current_x_axis = None
@@ -804,8 +804,8 @@ class MainWindow(QMainWindow):
         if self.path_edit.text():
             self.on_path_entered()
 
-    def load_project(self, root_path):
-        self.running_mean_setting = "valid_window" # Reset to default on new project load
+    def load_project(self, root_path, show_discovery_warnings: bool = True):
+        self.running_mean_setting = "symmetric_window" # Reset to default on new project load
         self.average_user_choices.clear() # Clear cache on new project load
         keywords = self.chip_input.get_chips()
         if not keywords:
@@ -823,7 +823,7 @@ class MainWindow(QMainWindow):
         self.system_label_widget.setVisible(not is_flat_structure)
         self.system_combo.setVisible(not is_flat_structure)
 
-        if warnings:
+        if warnings and show_discovery_warnings:
             # Filter out the non-standard structure warning if it was successful
             if not (is_flat_structure and "No standard project structure found" in warnings[0]):
                 QMessageBox.warning(self, "Project Discovery Warning", "\n".join(warnings))
@@ -991,18 +991,22 @@ class MainWindow(QMainWindow):
         self._update_plot_labels()
 
     def add_new_plot_row(self):
+        source_row_index = self.plot_table.currentRow()
+
         insert_row = 0
         self.plot_table.insertRow(insert_row)
 
         # Gather existing colors to generate a new, distinct color
         existing_colors = []
-        for row in range(1, self.plot_table.rowCount()): # Skip the new row
-            color_widget = self.plot_table.cellWidget(row, 5) # Color is at column 5
+        for row in range(self.plot_table.rowCount()):
+            if row == insert_row: continue
+            color_widget = self.plot_table.cellWidget(row, 5)
             if color_widget:
                 existing_colors.append(color_widget.color())
         
         new_color = self._get_distinct_color(existing_colors)
         
+        # Start with default data for the new row
         plot_data = {
             'plot_name': "N/A | N/A | N/A | N/A",
             'show': True,
@@ -1013,32 +1017,38 @@ class MainWindow(QMainWindow):
             'thickness': "1"
         }
         
-        # Smart defaults for new rows
-        is_single_file_mode = len(self.data_manager.get_study_names()) == 1 and self.data_manager.get_study_names()[0] == '.'
-        
-        if is_single_file_mode:
-            study = '.'
-            system = self.data_manager.get_system_names(study)[0]
-            x_ax = "N/A"
-            if "Step" in self.data_manager.available_columns:
-                x_ax = "Step"
-            elif self.data_manager.available_columns:
-                x_ax = self.data_manager.available_columns[0]
-            plot_data['plot_name'] = f"{study} | {system} | {x_ax} | N/A"
-
-        elif self.plot_table.rowCount() > 1:
+        copied_from_selection = False
+        # If a row was selected, copy its Study, System, X-Axis, and Y-Axis
+        if source_row_index != -1:
             try:
-                # Get data from the row that was previously at the top
-                old_row_data = self._extract_row_data(1)
-                parts = old_row_data['plot_name'].split(' | ')
-                study, system, x_ax, _ = (parts + ['N/A'] * 4)[:4]
+                # The row we want to copy from is now at a new index
+                row_to_copy_from = source_row_index + 1
                 
-                plot_data['plot_name'] = f"{study} | {system} | {x_ax} | N/A"
-                plot_data['style'] = old_row_data['style']
+                source_plot_data = self._extract_row_data(row_to_copy_from)
+                parts = source_plot_data['plot_name'].split(' | ')
+                
+                if len(parts) == 4:
+                    study, system, x_ax, y_ax = parts
+                    # Construct the new plot name, copying all four parts
+                    plot_data['plot_name'] = f"{study} | {system} | {x_ax} | {y_ax}"
+                    copied_from_selection = True
 
             except (AttributeError, ValueError, IndexError):
-                pass
-        
+                pass # Fallback to defaults if something goes wrong
+
+        # Fallback for special cases if we didn't copy from a selection
+        if not copied_from_selection:
+            is_single_file_mode = len(self.data_manager.get_study_names()) == 1 and self.data_manager.get_study_names()[0] == '.'
+            if is_single_file_mode:
+                study = '.'
+                system = self.data_manager.get_system_names(study)[0]
+                x_ax = "N/A"
+                if "Step" in self.data_manager.available_columns:
+                    x_ax = "Step"
+                elif self.data_manager.available_columns:
+                    x_ax = self.data_manager.available_columns[0]
+                plot_data['plot_name'] = f"{study} | {system} | {x_ax} | N/A"
+
         self._populate_row_data(insert_row, plot_data)
 
         self.plot_table.selectRow(insert_row)
@@ -1103,21 +1113,26 @@ class MainWindow(QMainWindow):
             user_choices = None
             if plot_info['system'] == 'average':
                 study_name = plot_info['study']
-                consistency = self.data_manager.check_data_consistency(study_name)
-                if consistency:
+                current_consistency = self.data_manager.check_data_consistency(study_name)
+
+                # If current_consistency is empty, the data is consistent.
+                if current_consistency:
+                    # Data is inconsistent, decide whether to show the dialog.
                     cached_data = self.average_user_choices.get(study_name)
-                    # Check if cache is valid for the current data lengths
-                    if cached_data and cached_data.get('lengths') == consistency:
+                    
+                    if cached_data and cached_data.get('lengths') == current_consistency:
+                        # The inconsistency is the same as when the choice was saved. Reuse it.
                         user_choices = cached_data['choice']
                     else:
-                        dialog = InconsistentDataDialog(consistency, self)
+                        # The inconsistency has changed or there's no cached choice. Show dialog.
+                        dialog = InconsistentDataDialog(current_consistency, self)
                         if dialog.exec():
                             user_choices = dialog.get_choices()
-                            # Cache the choice with the current lengths
-                            self.average_user_choices[study_name] = {'choice': user_choices, 'lengths': consistency}
+                            # Cache the new choice and the current inconsistency fingerprint.
+                            self.average_user_choices[study_name] = {'choice': user_choices, 'lengths': current_consistency}
                         else:
                             continue # Skip this plot if user cancels dialog
-
+            
             compute_raw_std = (
                 plot_info['system'] == 'average' and 
                 plot_info['show_std'] and 
@@ -1293,18 +1308,28 @@ class MainWindow(QMainWindow):
         self.lock_axes_btn.setVisible(len(y_labels) > 1)
 
     def delete_plot_row(self):
-        if not self.plot_table.selectedItems():
+        button = self.sender()
+        if not button:
             return
-            
-        selected_row = self.plot_table.currentRow()
 
-        if self.plot_table.rowCount() > 1:
-            self.plot_table.removeRow(selected_row)
+        # Find the row of the button that was clicked
+        parent_widget = button.parentWidget()
+        pos = parent_widget.mapTo(self.plot_table.viewport(), QPoint(0, 0))
+        row_to_delete = self.plot_table.indexAt(pos).row()
+
+        if row_to_delete < 0:
+            return
+
+        self.plot_table.removeRow(row_to_delete)
+
+        # After removing, if the table is now empty, add a new default row.
+        if self.plot_table.rowCount() == 0:
+            self.add_new_plot_row()
+        else:
+            # Otherwise, update everything.
             self._update_move_buttons_visibility()
             self._update_plot_labels()
             self.update_plots()
-        elif self.plot_table.rowCount() == 1:
-            self.yaxis_combo.setCurrentIndex(0)
 
     def _create_centered_widget(self, widget: QWidget) -> QWidget:
         container = QWidget()
@@ -1321,9 +1346,16 @@ class MainWindow(QMainWindow):
             return
         
         # Check for activity
-        show_orig = self.plot_table.cellWidget(row, 2).findChild(QCheckBox).isChecked()
-        mean_text = self.plot_table.cellWidget(row, 3).findChild(QLineEdit).text()
-        show_std = self.plot_table.cellWidget(row, 4).findChild(QCheckBox).isChecked()
+        show_widget = self.plot_table.cellWidget(row, 2)
+        mean_widget = self.plot_table.cellWidget(row, 3)
+        std_widget = self.plot_table.cellWidget(row, 4)
+
+        if not all([show_widget, mean_widget, std_widget]):
+            return # One of the widgets is missing, cannot update state.
+
+        show_orig = show_widget.findChild(QCheckBox).isChecked()
+        mean_text = mean_widget.findChild(QLineEdit).text()
+        show_std = std_widget.findChild(QCheckBox).isChecked()
         is_mean_active = mean_text.isdigit() and int(mean_text) > 0
         is_active = show_orig or is_mean_active or show_std
         
@@ -1466,7 +1498,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", "Failed to load session file.")
             return
 
-        self.running_mean_setting = config.get('running_mean_setting', 'valid_window')
         self.average_user_choices = config.get('average_choices', {})
 
         project_path = config.get('path')
@@ -1477,7 +1508,10 @@ class MainWindow(QMainWindow):
                 if not root_path.exists():
                     raise FileNotFoundError(f"Path from session file does not exist: {root_path}")
                 
-                self.load_project(root_path)
+                self.load_project(root_path, show_discovery_warnings=False)
+                
+                # Load settings after project load to prevent them from being reset
+                self.running_mean_setting = config.get('running_mean_setting', 'symmetric_window')
 
                 self.plot_table.setRowCount(0)
                 for plot_info in config.get('plots', []):
