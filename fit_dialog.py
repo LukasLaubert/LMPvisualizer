@@ -1,10 +1,11 @@
 import re
 import math
+import random
 import numpy as np
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QLabel, QComboBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QCheckBox, QFrame, QMessageBox, QApplication
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLineEdit, QPushButton,
+    QLabel, QComboBox, QDoubleSpinBox, QSpinBox, QTableWidget, QTableWidgetItem,
+    QHeaderView, QCheckBox, QFrame, QMessageBox, QApplication, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThreadPool
 from PyQt6.QtGui import QIcon, QValidator
@@ -96,6 +97,10 @@ class FitFunctionDialog(QWidget):
         self.current_worker = None
         self.thread_pool = QThreadPool()
         
+        # Internal state for fit repetitions
+        self.target_reps = 1
+        self.current_rep_count = 0
+        
         # Map friendly names to SciPy method codes
         self.methods_map = {
             "Nelder-Mead (Simplex)": "Nelder-Mead",
@@ -139,7 +144,20 @@ class FitFunctionDialog(QWidget):
         layout.addLayout(func_box)
 
         # --- Zone 2: Parameters (The "Smart" part) ---
-        layout.addWidget(QLabel("Parameters (Initial Guess):"))
+        # Modified header layout to include Shuffle button
+        param_header_layout = QHBoxLayout()
+        param_header_layout.addWidget(QLabel("Parameters (Initial Guess):"))
+        param_header_layout.addStretch()
+        
+        self.shuffle_btn = QPushButton("Shuffle")
+        self.shuffle_btn.setToolTip("Multiply unlocked parameters by a random factor (0.01 - 100)")
+        self.shuffle_btn.setFixedWidth(60)
+        self.shuffle_btn.setStyleSheet("padding: 2px; font-size: 10pt;")
+        self.shuffle_btn.clicked.connect(self._shuffle_params)
+        param_header_layout.addWidget(self.shuffle_btn)
+        
+        layout.addLayout(param_header_layout)
+        
         self.param_table = QTableWidget()
         self.param_table.setColumnCount(3)
         self.param_table.setHorizontalHeaderLabels(["Name", "Value", "Lock"])
@@ -177,40 +195,69 @@ class FitFunctionDialog(QWidget):
         range_layout.addWidget(self.max_spin, 1)
         layout.addWidget(range_group)
 
-        # --- Zone 4: Advanced (Collapsible-ish) ---
-        adv_grid = QHBoxLayout()
+        # --- Zone 4: Advanced (Grid Layout) ---
+        adv_grid = QGridLayout()
+        adv_grid.setContentsMargins(0, 0, 0, 0)
+        adv_grid.setHorizontalSpacing(10)
         
-        # Method
-        meth_layout = QVBoxLayout()
-        meth_layout.addWidget(QLabel("Optimization Method:"))
+        # 1. Optimization Method
+        adv_grid.addWidget(QLabel("Optimization Method:"), 0, 0)
         self.method_combo = QComboBox()
         self.method_combo.addItems(list(self.methods_map.keys()))
-        meth_layout.addWidget(self.method_combo)
+        self.method_combo.setMaximumWidth(150)
+        self.method_combo.view().setMinimumWidth(240) 
+        adv_grid.addWidget(self.method_combo, 1, 0)
         
-        # Error Metric
-        err_layout = QVBoxLayout()
-        err_layout.addWidget(QLabel("Minimize Error:"))
+        # 2. Minimize Error
+        adv_grid.addWidget(QLabel("Minimize Error:"), 0, 1)
         self.error_combo = QComboBox()
         self.error_combo.addItems(["Mean Squared Error", "Mean Absolute Error", "Mean Bias", "Mean Cubed Error"])
-        err_layout.addWidget(self.error_combo)
+        self.error_combo.setMaximumWidth(140)
+        adv_grid.addWidget(self.error_combo, 1, 1)
 
-        # Time
-        time_layout = QVBoxLayout()
-        time_layout.addWidget(QLabel("Max Time (s):"))
-        self.time_spin = QDoubleSpinBox()
-        self.time_spin.setRange(0.1, 60.0)
-        self.time_spin.setValue(5.0)
-        time_layout.addWidget(self.time_spin)
+        # 3. Fit Reps
+        reps_lbl = QLabel("Fit reps:")
+        adv_grid.addWidget(reps_lbl, 0, 2)
+        
+        self.reps_spin = QSpinBox()
+        self.reps_spin.setRange(1, 99)
+        self.reps_spin.setValue(3)
+        self.reps_spin.setToolTip("Repeat the fit this many times, refining results.")
+        # Fixed width ~20% smaller than standard
+        self.reps_spin.setFixedWidth(60)
+        adv_grid.addWidget(self.reps_spin, 1, 2)
+        
+        # 4. Rep Perturb
+        perturb_lbl = QLabel("Rep perturb:")
+        adv_grid.addWidget(perturb_lbl, 0, 3)
+        
+        self.perturb_spin = QDoubleSpinBox()
+        self.perturb_spin.setRange(0.0, 100.0)
+        self.perturb_spin.setValue(10.0)
+        self.perturb_spin.setSuffix("%")
+        self.perturb_spin.setToolTip("Randomly perturb parameters by ±X% before each repetition.")
+        # Increased width to fit label and percentage
+        self.perturb_spin.setFixedWidth(90)
+        adv_grid.addWidget(self.perturb_spin, 1, 3)
 
-        adv_grid.addLayout(meth_layout, 2)
-        adv_grid.addLayout(err_layout, 2)
-        adv_grid.addLayout(time_layout, 1)
+        # Column Stretches: 
+        # Method: 0 (Fit to max width)
+        # Error: 1 (Take all remaining space)
+        # Reps/Perturb: 0 (Fit to fixed width)
+        adv_grid.setColumnStretch(0, 0)
+        adv_grid.setColumnStretch(1, 1)
+        adv_grid.setColumnStretch(2, 0)
+        adv_grid.setColumnStretch(3, 0)
+        
+        # Align labels to match field start
+        adv_grid.setAlignment(reps_lbl, Qt.AlignmentFlag.AlignLeft)
+        adv_grid.setAlignment(perturb_lbl, Qt.AlignmentFlag.AlignLeft)
+
         layout.addLayout(adv_grid)
 
         # --- Zone 5: Action & Results ---
         self.calc_btn = QPushButton("Calculate Fit")
         self.calc_btn.setStyleSheet("font-weight: bold; padding: 6px; font-size: 11pt;")
-        # FIXED: Removed () and connected to _trigger_fit
         self.calc_btn.clicked.connect(self._trigger_fit) 
         layout.addWidget(self.calc_btn)
         
@@ -332,15 +379,66 @@ class FitFunctionDialog(QWidget):
                     self.min_spin.setValue(float(np.min(x_data)))
                     self.max_spin.setValue(float(np.max(x_data)))
 
+    def _shuffle_params(self):
+        """Randomize all unlocked parameters by a factor of 0.01 to 100."""
+        for row in range(self.param_table.rowCount()):
+            # Check lock state
+            container = self.param_table.cellWidget(row, 2)
+            locked = False
+            if container:
+                children = container.findChildren(QCheckBox)
+                if children:
+                    locked = children[0].isChecked()
+            
+            if not locked:
+                spin = self.param_table.cellWidget(row, 1)
+                current_val = spin.value()
+                # Multiply by random factor
+                factor = random.uniform(0.01, 100.0)
+                spin.setValue(current_val * factor)
+
+    def _apply_perturbation(self):
+        """Apply random perturbation to unlocked parameters before next rep."""
+        percent = self.perturb_spin.value()
+        if percent <= 0: return
+
+        # Convert percent to fraction (e.g., 10% -> 0.1)
+        p = percent / 100.0
+        
+        for row in range(self.param_table.rowCount()):
+            container = self.param_table.cellWidget(row, 2)
+            locked = False
+            if container:
+                children = container.findChildren(QCheckBox)
+                if children and children[0].isChecked():
+                    locked = True
+            
+            if not locked:
+                spin = self.param_table.cellWidget(row, 1)
+                current_val = spin.value()
+                
+                # Random factor between (1-p) and (1+p)
+                factor = random.uniform(1.0 - p, 1.0 + p)
+                
+                # Handle edge case where value is 0
+                if current_val == 0:
+                    spin.setValue(random.uniform(-p, p)) # Small nudge from 0
+                else:
+                    spin.setValue(current_val * factor)
+
     def _trigger_fit(self):
+        """Initialize repetition logic and start the first fit."""
+        if self.current_worker:
+            return
+
+        # Initialize loop variables
+        self.target_reps = self.reps_spin.value()
+        self.current_rep_count = 0
+        
         self.calculate_fit()
 
     def calculate_fit(self):
-        """Triggers the fitting process. Can be called internally (button) or externally."""
-        if self.current_worker:
-             # Prevent double clicking while running
-            return
-
+        """Triggers the fitting process. Can be called internally (button loop) or externally."""
         if self.x_data is None or len(self.x_data) == 0:
             self.result_lbl.setText("Status: No Data Source linked.")
             return
@@ -373,21 +471,23 @@ class FitFunctionDialog(QWidget):
 
         bounds = (self.min_spin.value(), self.max_spin.value())
             
-        self.result_lbl.setText("Status: Fitting...")
+        status_msg = f"Status: Fitting..."
+        if self.target_reps > 1:
+            status_msg = f"Status: Fitting (Rep {self.current_rep_count + 1}/{self.target_reps})..."
+        self.result_lbl.setText(status_msg)
         
-        # NOTE: We do NOT disable the button here, because disabling it 
-        # forces Qt to move focus to the next field (the Parameter Table),
-        # which annoys the user.
+        # NOTE: We do NOT disable the button here to preserve focus logic
         self.calc_btn.setText("Fitting...") 
 
         friendly_method = self.method_combo.currentText()
         tech_method = self.methods_map.get(friendly_method, "Nelder-Mead")
 
+        # Pass None/Default for time limit since UI control was removed
         self.current_worker = FitWorker(
             self.x_data, self.y_data, func_str, params_config, bounds,
             tech_method,
             self.error_combo.currentText(),
-            self.time_spin.value()
+            10.0 # Default fallback time limit, logic now relies on repetitions
         )
         self.current_worker.signals.finished.connect(self._on_fit_finished)
         self.current_worker.signals.error.connect(self._on_fit_error)
@@ -396,17 +496,8 @@ class FitFunctionDialog(QWidget):
 
     def _on_fit_finished(self, result):
         self.current_worker = None
-        self.calc_btn.setText("Calculate Fit")
         
-        # Update Status Label
-        err_name = self.error_combo.currentText()
-        err_val = result['final_error']
-        
-        p_str = "\n".join([f"{k} = {v:.4g}" for k, v in result['best_params'].items()])
-        
-        self.result_lbl.setText(f"<b>Fit Successful!</b><br>Error ({err_name}): {err_val:.4g}<br>Parameters:<br>{p_str}")
-        
-        # Update the Table with new calculated values
+        # Update table with results of THIS run
         for row in range(self.param_table.rowCount()):
             name_item = self.param_table.item(row, 0)
             if not name_item: continue
@@ -415,7 +506,26 @@ class FitFunctionDialog(QWidget):
             if name in result['best_params']:
                 self.param_table.cellWidget(row, 1).setValue(result['best_params'][name])
 
-        self.fitUpdated.emit(result)
+        # Repetition Logic
+        self.current_rep_count += 1
+        
+        if self.current_rep_count < self.target_reps:
+            # Prepare for next rep
+            self._apply_perturbation()
+            # Trigger next run immediately
+            self.calculate_fit()
+        else:
+            # All reps finished
+            self.calc_btn.setText("Calculate Fit")
+            
+            # Final Status Update
+            err_name = self.error_combo.currentText()
+            err_val = result['final_error']
+            p_str = "\n".join([f"{k} = {v:.4g}" for k, v in result['best_params'].items()])
+            
+            self.result_lbl.setText(f"<b>Fit Successful!</b> (Reps: {self.target_reps})<br>Error ({err_name}): {err_val:.4g}<br>Parameters:<br>{p_str}")
+            
+            self.fitUpdated.emit(result)
 
     def _on_fit_error(self, msg):
         self.current_worker = None
@@ -446,7 +556,8 @@ class FitFunctionDialog(QWidget):
             'max': self.max_spin.value(),
             'method': self.method_combo.currentText(),
             'error': self.error_combo.currentText(),
-            'time': self.time_spin.value()
+            'reps': self.reps_spin.value(),
+            'perturb': self.perturb_spin.value()
         }
 
     def set_state(self, state):
@@ -456,7 +567,10 @@ class FitFunctionDialog(QWidget):
         self.max_spin.setValue(state.get('max', 100))
         self.method_combo.setCurrentText(state.get('method', list(self.methods_map.keys())[0]))
         self.error_combo.setCurrentText(state.get('error', 'Mean Squared Error'))
-        self.time_spin.setValue(state.get('time', 5.0))
+        
+        # Load new state fields if present
+        if 'reps' in state: self.reps_spin.setValue(state['reps'])
+        if 'perturb' in state: self.perturb_spin.setValue(state['perturb'])
         
         self._on_func_changed()
         saved_params = state.get('params', {})

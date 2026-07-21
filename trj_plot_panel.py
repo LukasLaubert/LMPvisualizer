@@ -195,7 +195,7 @@ class TrjPlotPanel(QWidget):
         
         self.plot_table = QTableWidget()
         self.plot_table.setColumnCount(6)
-        self.plot_table.setHorizontalHeaderLabels(["↨", "Plot", "Color", "Style", "Size", "Del"])
+        self.plot_table.setHorizontalHeaderLabels(["↕", "Plot", "Color", "Style", "Size", "Del"])
         
         header = self.plot_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)

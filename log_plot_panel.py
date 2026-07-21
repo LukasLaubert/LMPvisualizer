@@ -149,7 +149,7 @@ class LogPlotPanel(QWidget):
         
         self.plot_table = QTableWidget()
         self.plot_table.setColumnCount(9)
-        self.plot_table.setHorizontalHeaderLabels(["↨", "Plot", "Orig", "Mean", "Std", "", "Style", "thk", "Del"])
+        self.plot_table.setHorizontalHeaderLabels(["↕", "Plot", "Orig", "Mean", "Std", "", "Style", "thk", "Del"])
         header = self.plot_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -219,7 +219,7 @@ class LogPlotPanel(QWidget):
         
         self.fit_table = QTableWidget()
         self.fit_table.setColumnCount(9)
-        self.fit_table.setHorizontalHeaderLabels(["↨", "Plot", "Type", "Fit Fun", "Err", "", "Style", "thk", "Del"])
+        self.fit_table.setHorizontalHeaderLabels(["↕", "Plot", "Type", "Fit Fun", "Err", "", "Style", "thk", "Del"])
         f_header = self.fit_table.horizontalHeader()
         f_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         f_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch) # Plot name
