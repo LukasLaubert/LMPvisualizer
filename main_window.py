@@ -34,7 +34,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, startup_mode=None, startup_autoload=True):
         super().__init__()
-        self.setWindowTitle("LAMMPS Visualizer")
+        self.setWindowTitle("LMPvisualizer")
         self.setGeometry(100, 100, 1400, 800)
         self.setStyleSheet("QMainWindow { background-color: #f0f0f0; }")
 

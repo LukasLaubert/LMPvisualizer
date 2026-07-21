@@ -179,7 +179,16 @@ class LogPlotPanel(QWidget):
         left_layout.addWidget(self.plot_widget)
 
         self.popout_btn = QPushButton("Pop Out")
-        self.export_btn = QPushButton("Quick Export")
+        self.export_btn = QPushButton("Quick Export ▾")
+        
+        # Configure Dropdown Menu for Quick Export
+        self.export_menu = QMenu(self)
+        self.export_image_action = self.export_menu.addAction("Image...")
+        self.export_data_action = self.export_menu.addAction("Raw Data...")
+        self.export_image_action.triggered.connect(self.export_image)
+        self.export_data_action.triggered.connect(self.export_raw_data)
+        self.export_btn.setMenu(self.export_menu)
+        
         plot_buttons_layout = QHBoxLayout()
         plot_buttons_layout.addWidget(self.popout_btn)
         plot_buttons_layout.addWidget(self.export_btn)
@@ -307,9 +316,8 @@ class LogPlotPanel(QWidget):
 
     def _connect_signals(self):
         self.add_btn.clicked.connect(self.add_new_plot_row)
-        self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
-        self.export_btn.clicked.connect(self.export_plot)
+        # self.export_btn click is handled by its dropdown menu
         
         # Exit closes the whole application window
         self.exit_btn.clicked.connect(self.main_window.close)
@@ -1517,7 +1525,7 @@ class LogPlotPanel(QWidget):
         self.add_btn.clicked.connect(self.add_new_plot_row)
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
-        self.export_btn.clicked.connect(self.export_plot)
+        # self.export_btn click is handled by its dropdown menu
         
         # Exit closes the whole application window
         self.exit_btn.clicked.connect(self.main_window.close)
@@ -3385,7 +3393,7 @@ class LogPlotPanel(QWidget):
             self.main_window.path_edit.blockSignals(False)
             self.main_window.chip_input.blockSignals(False)
 
-    def export_plot(self):
+    def export_image(self):
         filters = (
             "PNG Image (*.png);;"
             "JPEG Image (*.jpg *.jpeg);;"
@@ -3396,12 +3404,21 @@ class LogPlotPanel(QWidget):
             "Encapsulated PostScript (*.eps);;"
             "PostScript (*.ps);;"
             "PGF Code (*.pgf);;"
-            "Raw Pixel Data (*.raw *.rgba);;"
+            "Raw Pixel Data (*.raw *.rgba)"
+        )
+        path, _ = QFileDialog.getSaveFileName(self, "Export Image", "", filters)
+        if path:
+            dpi = self.logicalDpiX()
+            width_in = self.plot_widget.width() / dpi
+            height_in = self.plot_widget.height() / dpi
+            self.plot_controller.export_plot(path, figsize=(width_in, height_in))
+
+    def export_raw_data(self):
+        filters = (
             "CSV Data (*.csv);;"
             "TSV Data (*.tsv)"
         )
-        path, filter_used = QFileDialog.getSaveFileName(self, "Export Plot", "", filters)
-        
+        path, _ = QFileDialog.getSaveFileName(self, "Export Raw Data", "", filters)
         if path:
             dpi = self.logicalDpiX()
             width_in = self.plot_widget.width() / dpi

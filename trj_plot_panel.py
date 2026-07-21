@@ -238,7 +238,19 @@ class TrjPlotPanel(QWidget):
         
         # Bottom Buttons
         self.popout_btn = QPushButton("Pop Out")
-        self.export_btn = QPushButton("Quick Export")
+        self.export_btn = QPushButton("Quick Export ▾")
+        
+        # Configure Dropdown Menu for Quick Export
+        self.export_menu = QMenu(self)
+        self.export_image_action = self.export_menu.addAction("Image...")
+        self.export_data_action = self.export_menu.addAction("Raw Data...")
+        self.export_video_action = self.export_menu.addAction("Video / GIF...")
+        
+        self.export_image_action.triggered.connect(self.export_image)
+        self.export_data_action.triggered.connect(self.export_raw_data)
+        self.export_video_action.triggered.connect(self.export_video)
+        self.export_btn.setMenu(self.export_menu)
+        
         self.save_btn = QPushButton("Save")
         self.load_btn = QPushButton("Load")
         self.exit_btn = QPushButton("Exit")
@@ -306,7 +318,7 @@ class TrjPlotPanel(QWidget):
         self.filter_bar.rangesChanged.connect(self._on_filter_bar_changed)
         
         self.popout_btn.clicked.connect(self.launch_popout)
-        self.export_btn.clicked.connect(self.quick_export)
+        # self.export_btn click is handled by its dropdown menu
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
         self.exit_btn.clicked.connect(self.main_window.close)
@@ -1158,7 +1170,7 @@ class TrjPlotPanel(QWidget):
         self.pop_win = PopOutWindow(state, figsize=(w_in, h_in))
         self.pop_win.show()
 
-    def quick_export(self):
+    def export_image(self):
         filters = (
             "PNG Image (*.png);;"
             "JPEG Image (*.jpg *.jpeg);;"
@@ -1169,17 +1181,33 @@ class TrjPlotPanel(QWidget):
             "Encapsulated PostScript (*.eps);;"
             "PostScript (*.ps);;"
             "PGF Code (*.pgf);;"
-            "Raw Pixel Data (*.raw *.rgba);;"
-            "CSV Data (*.csv);;"
-            "TSV Data (*.tsv)"
+            "Raw Pixel Data (*.raw *.rgba)"
         )
-        path, _ = QFileDialog.getSaveFileName(self, "Export Plot", "", filters)
+        path, _ = QFileDialog.getSaveFileName(self, "Export Image", "", filters)
         
         if path:
             dpi = self.logicalDpiX()
             width_in = self.plot_widget.width() / dpi
             height_in = self.plot_widget.height() / dpi
             self.controller.export_plot(path, figsize=(width_in, height_in))
+
+    def export_raw_data(self):
+        filters = (
+            "CSV Data (*.csv);;"
+            "TSV Data (*.tsv)"
+        )
+        path, _ = QFileDialog.getSaveFileName(self, "Export Raw Data", "", filters)
+        
+        if path:
+            dpi = self.logicalDpiX()
+            width_in = self.plot_widget.width() / dpi
+            height_in = self.plot_widget.height() / dpi
+            self.controller.export_plot(path, figsize=(width_in, height_in))
+
+    def export_video(self):
+        from video_export_dialog import VideoExportDialog
+        dlg = VideoExportDialog(self)
+        dlg.exec()
 
     def _on_auto_index_clicked(self):
         if not self.data_manager.parsers:

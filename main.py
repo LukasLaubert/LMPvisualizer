@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import QApplication
 from main_window import MainWindow
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="LAMMPS Visualizer")
+    parser = argparse.ArgumentParser(description="LMPvisualizer")
     parser.add_argument("-mode", type=str, choices=['log', 'trj', 'dsd'], help="Start in 'log', 'trj' or 'dsd' mode")
     parser.add_argument("-autoload", type=str, choices=['on', 'off'], default='on', help="Enable or disable autosave loading (default: on)")
     return parser.parse_args()
