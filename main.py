@@ -7,7 +7,7 @@ from main_window import MainWindow
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="LAMMPS Visualizer")
-    parser.add_argument("-mode", type=str, choices=['log', 'trj'], help="Start in 'log' or 'trj' mode")
+    parser.add_argument("-mode", type=str, choices=['log', 'trj', 'dsd'], help="Start in 'log', 'trj' or 'dsd' mode")
     parser.add_argument("-autoload", type=str, choices=['on', 'off'], default='on', help="Enable or disable autosave loading (default: on)")
     return parser.parse_args()
 

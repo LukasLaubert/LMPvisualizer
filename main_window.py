@@ -16,6 +16,7 @@ from ui_components import ChipInputWidget, NoNewLineDelegate, ColorButton, Neutr
 from log_parser import LogParser
 from log_plot_panel import LogPlotPanel
 from trj_plot_panel import TrjPlotPanel
+from dsd_plot_panel import DSDPlotPanel
 from settings_manager import SettingsManager
 
 class MainWindow(QMainWindow):
@@ -23,10 +24,12 @@ class MainWindow(QMainWindow):
     MODE_NEUTRAL = -1
     MODE_LOG = 0
     MODE_TRJ = 1
+    MODE_DSD = 2
     
     AUTOSAVE_FILES = {
         MODE_LOG: 'autosave_log.json',
-        MODE_TRJ: 'autosave_trj.json'
+        MODE_TRJ: 'autosave_trj.json',
+        MODE_DSD: 'autosave_dsd.json'
     }
 
     def __init__(self, startup_mode=None, startup_autoload=True):
@@ -40,10 +43,11 @@ class MainWindow(QMainWindow):
         self._skip_next_orchestration = False
         
         # Keyword Storage for Modes
-        # 0: Log Plot, 1: Trj Plot
+        # 0: Log Plot, 1: Trj Plot, 2: DSD Mode
         self.mode_keywords = {
             self.MODE_LOG: ['.log', '.out'],
-            self.MODE_TRJ: ['.lammpstrj', '.dump']
+            self.MODE_TRJ: ['.lammpstrj', '.dump'],
+            self.MODE_DSD: ['.lammpstrj', '.dump']
         }
         self.current_mode_index = self.MODE_NEUTRAL
 
@@ -54,6 +58,8 @@ class MainWindow(QMainWindow):
             self.switch_to_mode(self.MODE_LOG)
         elif startup_mode == 'trj':
             self.switch_to_mode(self.MODE_TRJ)
+        elif startup_mode == 'dsd':
+            self.switch_to_mode(self.MODE_DSD)
         else:
             self.switch_to_neutral()
 
@@ -126,6 +132,7 @@ class MainWindow(QMainWindow):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Log\nPlot")
         self.mode_combo.addItem("Trj\nPlot")
+        self.mode_combo.addItem("DSD\nMode")
         self.mode_combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.mode_combo.setFixedWidth(75)
         
@@ -147,7 +154,11 @@ class MainWindow(QMainWindow):
         self.trj_plot_panel = TrjPlotPanel(self)
         self.stacked_widget.addWidget(self.trj_plot_panel)
         
-        # Index 2: Neutral Panel
+        # Index 2: DSD Panel
+        self.dsd_plot_panel = DSDPlotPanel(self)
+        self.stacked_widget.addWidget(self.dsd_plot_panel)
+        
+        # Index 3: Neutral Panel
         self.neutral_panel = NeutralPanel(self)
         self.neutral_panel.modeSelected.connect(self.on_neutral_mode_selected)
         self.neutral_panel.autoloadToggled.connect(self.on_autoload_toggled)
@@ -237,6 +248,8 @@ class MainWindow(QMainWindow):
             self.switch_to_mode(self.MODE_LOG)
         elif mode_str == 'trj':
             self.switch_to_mode(self.MODE_TRJ)
+        elif mode_str == 'dsd':
+            self.switch_to_mode(self.MODE_DSD)
 
     def on_autoload_toggled(self, enabled):
         self.autoload_enabled = enabled
@@ -256,18 +269,21 @@ class MainWindow(QMainWindow):
 
     def orchestrate_load(self, new_mode_index, previous_mode_index):
         """Handles loading the session based on autoload settings."""
-        # Check if we should skip orchestration (e.g., manual file load in progress)
         if self._skip_next_orchestration:
             self._skip_next_orchestration = False
             return
 
-        mode_name = "Log Plot" if new_mode_index == self.MODE_LOG else "Trajectory Plot"
+        mode_names = {
+            self.MODE_LOG: "Log Plot",
+            self.MODE_TRJ: "Trajectory Plot",
+            self.MODE_DSD: "DSD Mode"
+        }
+        mode_name = mode_names.get(new_mode_index, "Unknown")
         
         should_load = False
         if self.autoload_enabled:
             should_load = True
         elif previous_mode_index != self.MODE_NEUTRAL:
-            # Runtime switch: Ask user
             reply = QMessageBox.question(
                 self, 
                 "Load Session?", 
@@ -292,6 +308,8 @@ class MainWindow(QMainWindow):
             panel = self.log_plot_panel
         elif mode_index == self.MODE_TRJ:
             panel = self.trj_plot_panel
+        elif mode_index == self.MODE_DSD:
+            panel = self.dsd_plot_panel
             
         filename = self.AUTOSAVE_FILES.get(mode_index)
         
@@ -300,13 +318,17 @@ class MainWindow(QMainWindow):
              os.makedirs(config_dir, exist_ok=True)
              path = os.path.join(config_dir, filename)
              
-             # Actual save call using the methods added to panels
              if hasattr(panel, 'save_session_to_file'):
                  panel.save_session_to_file(path)
 
     def load_session_for_mode(self, mode_index):
         """Loads the session state for the given mode index."""
-        mode_str = "Log Plot" if mode_index == self.MODE_LOG else "Trajectory Plot"
+        mode_names = {
+            self.MODE_LOG: "Log Plot",
+            self.MODE_TRJ: "Trajectory Plot",
+            self.MODE_DSD: "DSD Mode"
+        }
+        mode_str = mode_names.get(mode_index, "Unknown")
         filename = self.AUTOSAVE_FILES.get(mode_index)
         if not filename: return
 
@@ -319,8 +341,9 @@ class MainWindow(QMainWindow):
                 panel = self.log_plot_panel
             elif mode_index == self.MODE_TRJ:
                 panel = self.trj_plot_panel
+            elif mode_index == self.MODE_DSD:
+                panel = self.dsd_plot_panel
             
-            # Actual load call
             if panel and hasattr(panel, 'load_session_from_file'):
                 panel.load_session_from_file(path)
         else:
