@@ -21,6 +21,7 @@ from ui_components import ColorButton, NoNewLineDelegate, RightClickButton, Miss
 from settings_manager import SettingsManager
 from log_parser import LogParser
 from global_label_editor_dialog import GlobalLabelEditorDialog
+from auto_index_dialog import AutoIndexDialog
 
 class TrjPlotPanel(QWidget):
     def __init__(self, main_window_ref):
@@ -135,7 +136,14 @@ class TrjPlotPanel(QWidget):
         self.add_btn = QPushButton("Add")
         self.add_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         self.add_btn.setMinimumWidth(60)
+        self.add_btn.clicked.connect(self.add_new_row)
         top_layout.addWidget(self.add_btn)
+
+        self.idx_btn = QPushButton("Auto\nPreload")
+        self.idx_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self.idx_btn.setMinimumWidth(60)
+        self.idx_btn.clicked.connect(self._on_auto_index_clicked)
+        top_layout.addWidget(self.idx_btn)
 
         main_layout.addWidget(top_container)
 
@@ -1173,6 +1181,14 @@ class TrjPlotPanel(QWidget):
             height_in = self.plot_widget.height() / dpi
             self.controller.export_plot(path, figsize=(width_in, height_in))
 
+    def _on_auto_index_clicked(self):
+        if not self.data_manager.parsers:
+            QMessageBox.warning(self, "No project loaded", "Please load a project path first.")
+            return
+            
+        dlg = AutoIndexDialog(self, self.data_manager.parsers)
+        dlg.exec()
+
     def _is_session_valid(self):
         """Checks if the current session contains meaningful data to save."""
         if not self.main_window.path_edit.text():
@@ -1210,6 +1226,8 @@ class TrjPlotPanel(QWidget):
             'type': 'trj', 
             'project_path': self.main_window.path_edit.text(),
             'keywords': self.main_window.chip_input.get_chips(),
+            'initial_step': self.controller.timesteps[0] if self.controller.timesteps else None,
+            'final_step': self.controller.timesteps[-1] if self.controller.timesteps else None,
             'rows': [],
             'global_label_map': self.global_label_map
         }
@@ -1335,6 +1353,14 @@ class TrjPlotPanel(QWidget):
                 
                 # Load project data (Force reload to ensure consistency)
                 self.load_project(Path(project_path), keywords, force_reload=True, keep_table=False)
+
+                # Restore Range
+                init_s = data.get('initial_step')
+                final_s = data.get('final_step')
+                if init_s is not None and final_s is not None:
+                    new_steps = self.controller.set_timestep_range(init_s, final_s)
+                    if new_steps:
+                        self.player_controls.set_timesteps(new_steps)
 
                 # If relocated and project was found, auto-update the session file
                 if relocated and self.data_manager.parsers:

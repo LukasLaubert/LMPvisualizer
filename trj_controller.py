@@ -70,6 +70,8 @@ class TrjController(QObject):
             
             # Capture current state before switch
             old_ts = self.current_timestep
+            old_range = (self.timesteps[0], self.timesteps[-1]) if self.timesteps else (None, None)
+            
             old_idx = 0
             if self.timesteps and old_ts in self.timesteps:
                 old_idx = self.timesteps.index(old_ts)
@@ -77,7 +79,16 @@ class TrjController(QObject):
             self.current_study = study
             self.current_system = system
             self.full_timesteps = self.data_manager.get_timesteps(study, system)
-            self.timesteps = list(self.full_timesteps)
+            
+            # Conserve Range
+            if self.full_timesteps and old_range[0] is not None:
+                full_arr = np.array(self.full_timesteps)
+                idx_min = (np.abs(full_arr - old_range[0])).argmin()
+                idx_max = (np.abs(full_arr - old_range[1])).argmin()
+                if idx_min > idx_max: idx_min, idx_max = idx_max, idx_min
+                self.timesteps = self.full_timesteps[idx_min : idx_max + 1]
+            else:
+                self.timesteps = list(self.full_timesteps)
             
             # Reset Cache
             self._ref_cache = {}

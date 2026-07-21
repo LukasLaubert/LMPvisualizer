@@ -20,6 +20,7 @@ from ui_components import ColorButton, NoNewLineDelegate, RightClickButton, Miss
 from settings_manager import SettingsManager
 from log_parser import LogParser
 from popout_window import PopOutWindow
+from auto_index_dialog import AutoIndexDialog
 
 class DSDPlotPanel(QWidget):
     def __init__(self, main_window_ref):
@@ -126,6 +127,12 @@ class DSDPlotPanel(QWidget):
         self.add_btn.setMinimumWidth(60)
         self.add_btn.clicked.connect(self.add_new_domain)
         top_layout.addWidget(self.add_btn)
+
+        self.idx_btn = QPushButton("Auto\nPreload")
+        self.idx_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self.idx_btn.setMinimumWidth(60)
+        self.idx_btn.clicked.connect(self._on_auto_index_clicked)
+        top_layout.addWidget(self.idx_btn)
 
         main_layout.addWidget(top_container)
 
@@ -236,6 +243,9 @@ class DSDPlotPanel(QWidget):
     def _on_plot_type_changed(self, text):
         self._update_options_menu()
         
+        # Repopulate systems to show/hide "Strain average" based on plot type
+        self._repopulate_systems()
+        
         context = 'displacement' if text == "Displacement plot" else 'strain'
         if hasattr(self, 'plot_table'):
             self.plot_table.set_context(context)
@@ -248,6 +258,41 @@ class DSDPlotPanel(QWidget):
             if stored_limits:
                 self.plot_widget.setXRange(stored_limits[0][0], stored_limits[0][1], padding=0)
                 self.plot_widget.setYRange(stored_limits[1][0], stored_limits[1][1], padding=0)
+
+    def _repopulate_systems(self):
+        """Helper to populate the system combo based on study and plot type."""
+        study = self.study_combo.currentText()
+        plot_type = self.plot_type_combo.currentText()
+        current_selection = self.system_combo.currentText()
+        
+        if study != "Select Study" and study in self.data_manager.parsers:
+            systems = sorted(list(self.data_manager.parsers[study].keys()))
+        else:
+            systems = []
+            
+        self.system_combo.blockSignals(True)
+        self.system_combo.clear()
+        self.system_combo.addItem("Select System")
+        
+        # Add systems first
+        if systems:
+            self.system_combo.addItems(systems)
+            
+        # Add "Strain average" LAST, only for strain plots and if > 1 system
+        if len(systems) > 1 and "Strain Over" in plot_type:
+            self.system_combo.addItem("Strain average")
+            
+        # Restore selection if it still exists
+        index = self.system_combo.findText(current_selection)
+        if index != -1:
+            self.system_combo.setCurrentIndex(index)
+        elif len(systems) == 1:
+            self.system_combo.setCurrentIndex(1)
+        else:
+            self.system_combo.setCurrentIndex(0)
+            
+        self.system_combo.blockSignals(False)
+        self.on_system_changed(self.system_combo.currentText())
 
     def _init_options_menu(self):
         self.opt_actions = {}
@@ -549,17 +594,23 @@ class DSDPlotPanel(QWidget):
         combo.blockSignals(False)
             
     def on_study_changed(self, text):
-        current_system = self.system_combo.currentText()
-        if text != "Select Study" and text in self.data_manager.parsers:
-            systems = sorted(list(self.data_manager.parsers[text].keys()))
-        else:
-            systems = []
-        self._populate_combo(self.system_combo, "Select System", systems, current_system)
-        self.on_system_changed(self.system_combo.currentText())
+        self._repopulate_systems()
 
     def on_system_changed(self, text):
+        # Update label of Strain standard deviation if average is selected
+        if text == "Strain average":
+            self.opt_actions['strain_std'].setText("Mean strain avg standard deviation")
+        else:
+            self.opt_actions['strain_std'].setText("Strain standard deviation")
+
         if text != "Select System":
             study = self.study_combo.currentText()
+            
+            # For "Strain average", we use the first system as reference for axes
+            ref_system = text
+            if text == "Strain average":
+                ref_system = next(iter(self.data_manager.parsers[study].keys()))
+
             self.controller.set_active_system(study, text)
             self.player_controls.set_timesteps(self.controller.get_available_timesteps())
             
@@ -568,7 +619,7 @@ class DSDPlotPanel(QWidget):
             current_obs = self.observe_axis_combo.currentText()
             current_z = self.zfilter_combo.currentText()
 
-            df, _ = self.data_manager.load_frame(study, text, self.controller.timesteps[0])
+            df, _ = self.data_manager.load_frame(study, ref_system, self.controller.timesteps[0])
             if df is not None:
                 cols = [c for c in df.columns if c not in ['id', 'type']]
                 
@@ -608,6 +659,31 @@ class DSDPlotPanel(QWidget):
             self._sync_lock_visibility()
             self.update_plot()
             self.controller.auto_scale()
+
+    def _on_auto_index_clicked(self):
+        if not self.data_manager.parsers:
+            QMessageBox.warning(self, "No project loaded", "Please load a project path first.")
+            return
+        
+        # Pack the current environment for the Preload Tool
+        config = {
+            'hashes': [],
+            'domains': [d for d in self.plot_table.get_domains() if not d.get('is_optimal_line')],
+            'timesteps': self.controller.timesteps,
+            'slice_axis': self.slice_axis_combo.currentText(),
+            'observe_axis': self.observe_axis_combo.currentText(),
+            'options': self.get_options()
+        }
+        
+        # Calculate hashes using helper
+        if config['timesteps'] and "Select" not in config['slice_axis'] and "Select" not in config['observe_axis']:
+            config['hashes'] = self.data_manager.get_required_hashes(
+                config['domains'], config['timesteps'], 
+                config['slice_axis'], config['observe_axis'], config['options']
+            )
+
+        dlg = AutoIndexDialog(self, self.data_manager.parsers, dsd_config=config)
+        dlg.exec()
 
     def get_options(self):
         opts = self.current_options.copy()
@@ -877,6 +953,8 @@ class DSDPlotPanel(QWidget):
                 'z_filter_ref': self.zfilter_ref_combo.currentText(),
                 'z_ranges': self.filter_bar.current_ranges if self.filter_bar.isVisible() else None,
                 'options': self.get_options(),
+                'initial_step': self.controller.timesteps[0] if self.controller.timesteps else None,
+                'final_step': self.controller.timesteps[-1] if self.controller.timesteps else None,
                 'current_step_index': self.player_controls.slider.value(),
                 'last_target_strain': getattr(self.controller, 'last_target_strain', None)
             }
@@ -993,6 +1071,19 @@ class DSDPlotPanel(QWidget):
             self.study_combo.blockSignals(False)
             self.system_combo.blockSignals(False)
             
+            # --- Restore Range AFTER system is selected to prevent clamping ---
+            init_s = g_opts.get('initial_step')
+            final_s = g_opts.get('final_step')
+            if init_s is not None and final_s is not None:
+                new_steps = self.controller.set_timestep_range(init_s, final_s)
+                if new_steps:
+                    self.player_controls.set_timesteps(new_steps)
+
+            # --- Restore Time Step AFTER range is set ---
+            step_idx = g_opts.get('current_step_index', 0)
+            self.controller.set_timestep_index(step_idx)
+            self.player_controls.set_step_index(step_idx)
+            
             # 3. Establish Axis Selections
             self.slice_axis_combo.setCurrentText(g_opts.get('slice_axis', 'Select Axis'))
             self.observe_axis_combo.setCurrentText(g_opts.get('observe_axis', 'Select Axis'))
@@ -1030,9 +1121,6 @@ class DSDPlotPanel(QWidget):
                 self.filter_bar.set_current_ranges(saved_ranges)
 
             # 5. Restore Rest of the State
-            step_idx = g_opts.get('current_step_index', 0)
-            self.player_controls.set_step_index(step_idx)
-            
             if 'options' in g_opts:
                 self.set_options(g_opts['options'])
             

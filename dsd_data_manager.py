@@ -19,7 +19,7 @@ class DSDDataManager:
         self.strain_evolution_cache = {} # Key: (Study, System, DomainIdentity) -> {strains, stds}
 
     def get_domain_hash(self, v_domain, timesteps, slice_axis, observe_axis, options):
-        """Generates a unique persistent hash for a domain definition and its context."""
+        """Generates a unique persistent hash for a domain definition and its reference context."""
         import json
         
         identity = {
@@ -36,7 +36,7 @@ class DSDDataManager:
             'z_col': options.get('z_filter_col'),
             'z_ref': options.get('z_filter_ref'),
             'z_ranges': sorted(options.get('z_ranges', [])) if options.get('z_ranges') else None,
-            'timesteps': timesteps 
+            'initial_step': timesteps[0] if timesteps else None 
         }
         
         id_json = json.dumps(identity, sort_keys=True)
@@ -343,9 +343,39 @@ class DSDDataManager:
         self.slicing_results[cache_key] = final_df
         return final_df
 
-    def calculate_strain_evolution_cached(self, domains, timesteps, study, system, slice_axis, observe_axis, options):
+    def get_required_hashes(self, domains, timesteps, slice_axis, observe_axis, options) -> List[str]:
+        """Returns the list of all persistent hashes required for a full DSD preload."""
+        if not timesteps: return []
+        
+        hashes = []
+        for d_idx, domain in enumerate(domains):
+            if domain.get('is_optimal_line'): continue
+            
+            # Replicate Virtual Domain Expansion logic
+            splits = domain.get('splits', [])
+            active_segments = domain.get('active_segments', [])
+            
+            if not splits:
+                hashes.append(self.get_domain_hash(domain, timesteps, slice_axis, observe_axis, options))
+            else:
+                sorted_splits = sorted(splits)
+                segments = [(None, sorted_splits[0])] + [(sorted_splits[i], sorted_splits[i+1]) for i in range(len(sorted_splits)-1)] + [(sorted_splits[-1], None)]
+                
+                # Ensure active_segments list is long enough
+                act = list(active_segments)
+                if len(act) < len(segments):
+                    act.extend([True] * (len(segments) - len(act)))
+                
+                for i, (seg_min, seg_max) in enumerate(segments):
+                    if act[i]:
+                        d_seg = domain.copy()
+                        d_seg['box_edges'] = (seg_min, seg_max)
+                        hashes.append(self.get_domain_hash(d_seg, timesteps, slice_axis, observe_axis, options))
+        return hashes
+
+    def calculate_strain_evolution_cached(self, domains, timesteps, study, system, slice_axis, observe_axis, options, parser_override=None):
         """Pre-computes strain using a 3-tier cache: RAM -> Persistent .idx Library -> Combined Calculation."""
-        parser = self.get_parser(study, system)
+        parser = parser_override if parser_override else self.get_parser(study, system)
         if not parser or not timesteps: return None
 
         virtual_domains = []
@@ -379,46 +409,59 @@ class DSDDataManager:
         for i, (v_domain, name) in enumerate(virtual_domains):
             mem_id, p_hash = (get_mem_id(v_domain), initial_step), self.get_domain_hash(v_domain, timesteps, slice_axis, observe_axis, options)
             d_res = {
-                'name': name, 'strains': [], 'stds': [],
-                'min_x': [], 'max_x': [], 'y_at_min_x': [], 'y_at_max_x': [],
-                'min_y': [], 'max_y': [],
+                'name': name, 'strains': [np.nan]*len(timesteps), 'stds': [0.0]*len(timesteps),
+                'min_x': [np.nan]*len(timesteps), 'max_x': [np.nan]*len(timesteps), 
+                'y_at_min_x': [np.nan]*len(timesteps), 'y_at_max_x': [np.nan]*len(timesteps),
+                'min_y': [np.nan]*len(timesteps), 'max_y': [np.nan]*len(timesteps),
                 'color': v_domain.get('color', 'blue'), 'style': v_domain.get('style', '-'),
                 'source_index': v_domain.get('_source_index'),
                 'parent_identity': v_domain.get('_parent_identity')
             }
             
-            
+            # 1. Try RAM Cache
             cached_mem = self.strain_evolution_cache.get(mem_id)
-            if cached_mem and len(cached_mem['strains']) == len(timesteps): d_res.update(cached_mem)
+            # 2. Try Persistent Library
+            lib_entry = parser.results_library.get(p_hash) if not cached_mem else None
+            
+            # Reference data source (Lib prioritized over fresh d_res)
+            ref_data = cached_mem if cached_mem else (lib_entry['data'] if lib_entry else None)
+            
+            needs_calc = False
+            if ref_data:
+                # Map existing results to current timesteps
+                for ts_idx, ts in enumerate(timesteps):
+                    if 'ts_map' in ref_data and str(ts) in ref_data['ts_map']:
+                        r_idx = ref_data['ts_map'][str(ts)]
+                        for k in ['strains', 'stds', 'min_x', 'max_x', 'y_at_min_x', 'y_at_max_x', 'min_y', 'max_y']:
+                            d_res[k][ts_idx] = ref_data[k][r_idx]
+                    else:
+                        needs_calc = True
             else:
-                lib_entry = parser.results_library.get(p_hash)
-                if lib_entry and len(lib_entry['data']['strains']) == len(timesteps):
-                    d_res.update(lib_entry['data'])
-                    self.strain_evolution_cache[mem_id] = lib_entry['data']
-                else: domain_tasks.append((i, v_domain, mem_id, p_hash))
+                needs_calc = True
+
+            if needs_calc:
+                domain_tasks.append((i, v_domain, mem_id, p_hash))
+            
             final_domains_data.append(d_res)
 
         if domain_tasks:
+            # We only calculate the specific timesteps that are missing Nans
             for ts_idx, ts in enumerate(timesteps):
+                # Optimization: check if ANY task actually needs this frame
+                tasks_needing_ts = [t for t in domain_tasks if np.isnan(final_domains_data[t[0]]['strains'][ts_idx])]
+                if not tasks_needing_ts: continue
+
                 df_curr, box_curr = self.load_frame(study, system, ts)
-                if df_curr is None:
-                    for res_idx, _, _, _ in domain_tasks:
-                        for key in ['strains', 'min_x', 'max_x', 'y_at_min_x', 'y_at_max_x', 'min_y', 'max_y']: 
-                            final_domains_data[res_idx][key].append(np.nan)
-                        final_domains_data[res_idx]['stds'].append(0.0)
-                    continue
-                for res_idx, v_domain, _, _ in domain_tasks:
+                if df_curr is None: continue
+                
+                for res_idx, v_domain, _, _ in tasks_needing_ts:
                     res = self._slice_disp_single_domain(df_init, df_curr, v_domain, slice_axis, observe_axis, box_curr, z_col=options.get('z_filter_col'), z_ref=options.get('z_filter_ref'), z_ranges=options.get('z_ranges'), box_init=box_init)
                     mean_strain, std_strain, bx_min, bx_max, by_min, by_max = np.nan, 0.0, np.nan, np.nan, np.nan, np.nan
                     frame_min_y, frame_max_y = np.nan, np.nan
 
                     if res is not None and not res.empty:
                         centers, disps = res['center'].values, res['mean_disp'].values
-                        
-                        # Capture absolute frame bounds for later fast auto-scaling
-                        frame_min_y = np.min(disps)
-                        frame_max_y = np.max(disps)
-                        # Also include standard deviation in the bounds if available
+                        frame_min_y, frame_max_y = np.min(disps), np.max(disps)
                         if 'std_dev' in res.columns:
                             stds = res['std_dev'].values
                             frame_min_y = min(frame_min_y, np.min(disps - stds))
@@ -436,19 +479,38 @@ class DSDDataManager:
                                 std_strain = np.std(valid_slopes, ddof=1) if len(valid_slopes) > 1 else 0.0
                             else: mean_strain, std_strain = 0.0, 0.0
                         else: mean_strain, std_strain = 0.0, 0.0
-                    final_domains_data[res_idx]['strains'].append(mean_strain)
-                    final_domains_data[res_idx]['stds'].append(std_strain)
-                    final_domains_data[res_idx]['min_x'].append(bx_min)
-                    final_domains_data[res_idx]['max_x'].append(bx_max)
-                    final_domains_data[res_idx]['y_at_min_x'].append(by_min)
-                    final_domains_data[res_idx]['y_at_max_x'].append(by_max)
-                    final_domains_data[res_idx]['min_y'].append(frame_min_y)
-                    final_domains_data[res_idx]['max_y'].append(frame_max_y)
+                    
+                    final_domains_data[res_idx]['strains'][ts_idx] = mean_strain
+                    final_domains_data[res_idx]['stds'][ts_idx] = std_strain
+                    final_domains_data[res_idx]['min_x'][ts_idx] = bx_min
+                    final_domains_data[res_idx]['max_x'][ts_idx] = bx_max
+                    final_domains_data[res_idx]['y_at_min_x'][ts_idx] = by_min
+                    final_domains_data[res_idx]['y_at_max_x'][ts_idx] = by_max
+                    final_domains_data[res_idx]['min_y'][ts_idx] = frame_min_y
+                    final_domains_data[res_idx]['max_y'][ts_idx] = frame_max_y
 
+            # Update Caches
             for res_idx, _, mem_id, p_hash in domain_tasks:
-                res_data = {k: final_domains_data[res_idx][k] for k in ['strains', 'stds', 'min_x', 'max_x', 'y_at_min_x', 'y_at_max_x', 'min_y', 'max_y']}
+                d_res = final_domains_data[res_idx]
+                # Build ts_map for storage
+                ts_map = {str(ts): i for i, ts in enumerate(timesteps)}
+                res_data = {k: d_res[k] for k in ['strains', 'stds', 'min_x', 'max_x', 'y_at_min_x', 'y_at_max_x', 'min_y', 'max_y']}
+                res_data['ts_map'] = ts_map
+                
+                # Merge with existing library data if available
+                lib_entry = parser.results_library.get(p_hash)
+                if lib_entry:
+                    old_data = lib_entry['data']
+                    old_map = old_data.get('ts_map', {})
+                    # Add new points to old arrays
+                    for ts_str, old_idx in old_map.items():
+                        if ts_str not in ts_map:
+                            for k in ['strains', 'stds', 'min_x', 'max_x', 'y_at_min_x', 'y_at_max_x', 'min_y', 'max_y']:
+                                res_data[k].append(old_data[k][old_idx])
+                            res_data['ts_map'][ts_str] = len(res_data['strains']) - 1
+                
                 self.strain_evolution_cache[mem_id] = res_data
-                parser.store_library_entry(p_hash, res_data, label=final_domains_data[res_idx]['name'])
+                parser.store_library_entry(p_hash, res_data, label=d_res['name'])
 
         target_strains = []
         s_idx, o_idx = {'x':0,'y':1,'z':2}.get(slice_axis.lower()), {'x':0,'y':1,'z':2}.get(observe_axis.lower())
@@ -527,4 +589,108 @@ class DSDDataManager:
         diff = actual_strain - target_strain
         mae = np.mean(np.abs(diff))
         return mae
+
+    def calculate_strain_average_evolution(self, domains, timesteps, study, slice_axis, observe_axis, options):
+        """
+        Calculates the average strain and standard deviation across all systems in a study,
+        respecting the provided timestep range.
+        """
+        if study not in self.parsers:
+            return None
+            
+        systems = list(self.parsers[study].keys())
+        if len(systems) < 2:
+            return None
+            
+        all_results = []
+        
+        # 1. Collect results for each system relative to the requested range
+        for system in systems:
+            full_tsteps = self.get_timesteps(study, system)
+            if not full_tsteps:
+                continue
+            
+            # Find the closest subset in this simulation that matches the requested range
+            if timesteps:
+                full_arr = np.array(full_tsteps)
+                idx_min = (np.abs(full_arr - timesteps[0])).argmin()
+                idx_max = (np.abs(full_arr - timesteps[-1])).argmin()
+                if idx_min > idx_max: idx_min, idx_max = idx_max, idx_min
+                target_range = full_tsteps[idx_min : idx_max + 1]
+            else:
+                target_range = full_tsteps
+                
+            res = self.calculate_strain_evolution_cached(domains, target_range, study, system, slice_axis, observe_axis, options)
+            if res:
+                all_results.append(res)
+                
+        if not all_results:
+            return None
+            
+        # 2. Find common timesteps across all result sets
+        common_timesteps_set = set(all_results[0]['timesteps'])
+        for res in all_results[1:]:
+            common_timesteps_set &= set(res['timesteps'])
+            
+        if not common_timesteps_set:
+            return None
+            
+        sorted_tsteps = sorted(list(common_timesteps_set))
+        
+        # 3. Aggregate
+        # We assume domain names and count are consistent across systems for the same study/setup
+        # Find index mapping for each result set to the common timesteps
+        final_domains = []
+        
+        # Initialize final structures based on first result set
+        ref_res = all_results[0]
+        for ref_dom in ref_res['domains']:
+            final_domains.append({
+                'name': ref_dom['name'],
+                'strains': [],
+                'stds': [], # This will be the std dev ACROSS systems
+                'source_index': ref_dom.get('source_index'),
+                'parent_identity': ref_dom.get('parent_identity'),
+                'color': ref_dom.get('color'),
+                'style': ref_dom.get('style')
+            })
+            
+        # For each common timestep, calculate mean and std across all systems
+        target_strains_agg = []
+        
+        for ts in sorted_tsteps:
+            # Aggregate target strains
+            ts_target_strains = []
+            for res in all_results:
+                try:
+                    idx = res['timesteps'].index(ts)
+                    ts_target_strains.append(res['target_strains'][idx])
+                except (ValueError, IndexError):
+                    pass
+            target_strains_agg.append(np.mean(ts_target_strains) if ts_target_strains else np.nan)
+            
+            # Aggregate domain strains
+            for d_idx, f_dom in enumerate(final_domains):
+                ts_dom_strains = []
+                for res in all_results:
+                    try:
+                        idx = res['timesteps'].index(ts)
+                        # We match by domain index/name
+                        ts_dom_strains.append(res['domains'][d_idx]['strains'][idx])
+                    except (ValueError, IndexError):
+                        pass
+                
+                valid_strains = [s for s in ts_dom_strains if not np.isnan(s)]
+                if valid_strains:
+                    f_dom['strains'].append(np.mean(valid_strains))
+                    f_dom['stds'].append(np.std(valid_strains, ddof=1) if len(valid_strains) > 1 else 0.0)
+                else:
+                    f_dom['strains'].append(np.nan)
+                    f_dom['stds'].append(0.0)
+                    
+        return {
+            'timesteps': sorted_tsteps,
+            'target_strains': target_strains_agg,
+            'domains': final_domains
+        }
         

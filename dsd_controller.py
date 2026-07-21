@@ -72,6 +72,10 @@ class DSDController(QObject):
         
     def set_active_system(self, study, system):
         if self.current_study != study or self.current_system != system:
+            # 1. Capture current range and position before switching
+            old_ts = self.current_timestep
+            old_range = (self.timesteps[0], self.timesteps[-1]) if self.timesteps else (None, None)
+            
             try:
                 old_idx = self.timesteps.index(self.current_timestep) if self.timesteps else 0
             except ValueError:
@@ -79,14 +83,40 @@ class DSDController(QObject):
 
             self.current_study = study
             self.current_system = system
-            self.full_timesteps = self.data_manager.get_timesteps(study, system)
-            # Default to full range
-            self.timesteps = list(self.full_timesteps)
+            
+            if system == "Strain average":
+                # Aggregate timesteps from all systems in the study
+                all_ts = []
+                parsers = self.data_manager.parsers.get(study, {})
+                for sys_name in parsers:
+                    all_ts.append(set(self.data_manager.get_timesteps(study, sys_name)))
+                
+                if all_ts:
+                    common_ts = set.intersection(*all_ts)
+                    self.full_timesteps = sorted(list(common_ts))
+                else:
+                    self.full_timesteps = []
+            else:
+                self.full_timesteps = self.data_manager.get_timesteps(study, system)
+
+            # 2. Conserve the Range
+            if self.full_timesteps and old_range[0] is not None:
+                full_arr = np.array(self.full_timesteps)
+                # Find closest matches for the old start and end
+                idx_min = (np.abs(full_arr - old_range[0])).argmin()
+                idx_max = (np.abs(full_arr - old_range[1])).argmin()
+                if idx_min > idx_max: idx_min, idx_max = idx_max, idx_min
+                self.timesteps = self.full_timesteps[idx_min : idx_max + 1]
+            else:
+                self.timesteps = list(self.full_timesteps)
             
             self.data_manager.clear_cache()
             
+            # 3. Match Timestep by Value first, then Index
             if self.timesteps:
-                if old_idx < len(self.timesteps):
+                if old_ts in self.timesteps:
+                    self.current_timestep = old_ts
+                elif old_idx < len(self.timesteps):
                     self.current_timestep = self.timesteps[old_idx]
                 else:
                     self.current_timestep = self.timesteps[-1]
@@ -164,7 +194,7 @@ class DSDController(QObject):
             current_type = self.plot_config.get('plot_type', 'Displacement plot')
             self.view_limits[current_type] = self.plot_item.getViewBox().viewRange()
 
-    def auto_scale(self, mode='final'):
+    def auto_scale(self, mode='final', save_limits=True):
         if not self.timesteps: return
         
         # Temporarily disconnect the range change signal during auto_scale
@@ -196,21 +226,29 @@ class DSDController(QObject):
         plot_type = self.plot_config.get('plot_type', 'Displacement plot')
         
         # Load Initial and Final Frames (if needed for filtering)
-        df_init, box_init = self.data_manager.load_frame(study, system, self.timesteps[0])
+        df_init, box_init = None, None
         df_final = None
-        if options.get('z_filter_ref') == 'Final' and len(self.timesteps) > 0:
-            df_final, _ = self.data_manager.load_frame(study, system, self.timesteps[-1])
+        
+        if system != "Strain average":
+            df_init, box_init = self.data_manager.load_frame(study, system, self.timesteps[0])
+            if options.get('z_filter_ref') == 'Final' and len(self.timesteps) > 0:
+                df_final, _ = self.data_manager.load_frame(study, system, self.timesteps[-1])
             
-        if df_init is None:
-            if was_connected: self.plot_item.vb.sigRangeChanged.connect(self._on_vb_range_changed)
-            return
+            if df_init is None:
+                if was_connected: self.plot_item.vb.sigRangeChanged.connect(self._on_vb_range_changed)
+                return
 
         if 'Strain' in plot_type:
             # ... (keep existing strain logic) ...
             if self._strain_cache is None:
-                self._strain_cache = self.data_manager.calculate_strain_evolution_cached(
-                    self.domains, self.timesteps, study, system, slice_axis, observe_axis, options
-                )
+                if system == "Strain average":
+                    self._strain_cache = self.data_manager.calculate_strain_average_evolution(
+                        self.domains, self.timesteps, study, slice_axis, observe_axis, options
+                    )
+                else:
+                    self._strain_cache = self.data_manager.calculate_strain_evolution_cached(
+                        self.domains, self.timesteps, study, system, slice_axis, observe_axis, options
+                    )
             if self._strain_cache:
                 current_ts_idx = self.timesteps.index(self.current_timestep) if self.current_timestep in self.timesteps else 0
                 slice_idx = len(self.timesteps) if mode in ['final', 'max'] else current_ts_idx + 1
@@ -312,8 +350,8 @@ class DSDController(QObject):
             pad_y = (g_max_y - g_min_y) * 0.05 if g_max_y != g_min_y else 1.0
             self.plot_item.setYRange(g_min_y - pad_y, g_max_y + pad_y, padding=0)
             
-        # ALWAYS save the new limits if locked
-        if self.view_locked:
+        # ALWAYS save the new limits if locked AND save_limits is True
+        if self.view_locked and save_limits:
             plot_type = self.plot_config.get('plot_type', 'Displacement plot')
             self.view_limits[plot_type] = self.plot_item.getViewBox().viewRange()
 
@@ -431,7 +469,8 @@ class DSDController(QObject):
         # for Displacement (e.g. 0.1) don't bleed into Strain (e.g. 0.001).
         if old_type != plot_type:
             # 1. Force an auto-scale to the new data range
-            self.auto_scale(mode='max')
+            # Pass save_limits=False to avoid overwriting stored zoom levels during the transition
+            self.auto_scale(mode='max', save_limits=False)
             
             # 2. If view was locked, immediately re-apply the SPECIFIC zoom for this new type
             if self.view_locked:
@@ -519,31 +558,43 @@ class DSDController(QObject):
         study, system = self.current_study, self.current_system
         ts = self.current_timestep
         
-        # Load Data
-        df_init, box_init = self.data_manager.load_frame(study, system, self.timesteps[0])
-        df_curr, box_curr = self.data_manager.load_frame(study, system, ts)
-        
         # Prepare options for drawing (inject z_ranges into global_options)
         options = self.plot_config.get('global_options', {}).copy()
         options['z_ranges'] = self.plot_config.get('z_ranges')
         
-        df_final = None
-        if options.get('z_filter_ref') == 'Final' and len(self.timesteps) > 0:
-             df_final, _ = self.data_manager.load_frame(study, system, self.timesteps[-1])
-        elif options.get('z_filter_ref', '').startswith("Step "):
-            try:
-                custom_ts = int(options.get('z_filter_ref').split(" ")[1])
-                df_final, _ = self.data_manager.load_frame(study, system, custom_ts)
-            except:
-                pass
+        if system == "Strain average" and plot_type == "Displacement plot":
+            self.errorUpdated.emit("Displacement plot not available for Strain average.")
+            return
+
+        # Load Data
+        df_init, box_init = None, None
+        df_curr, box_curr = None, None
         
-        if df_init is None or df_curr is None: return
+        if system != "Strain average":
+            df_init, box_init = self.data_manager.load_frame(study, system, self.timesteps[0])
+            df_curr, box_curr = self.data_manager.load_frame(study, system, ts)
             
-        # Dispatch to appropriate draw method
-        if plot_type == 'Displacement plot':
-            self._draw_displacement_plot(df_init, df_curr, df_final, box_init, box_curr, slice_axis, observe_axis, options)
-        elif 'Strain' in plot_type:
-            self._draw_strain_plots(study, system, slice_axis, observe_axis, ts, options, plot_type)
+            df_final = None
+            if options.get('z_filter_ref') == 'Final' and len(self.timesteps) > 0:
+                 df_final, _ = self.data_manager.load_frame(study, system, self.timesteps[-1])
+            elif options.get('z_filter_ref', '').startswith("Step "):
+                try:
+                    custom_ts = int(options.get('z_filter_ref').split(" ")[1])
+                    df_final, _ = self.data_manager.load_frame(study, system, custom_ts)
+                except:
+                    pass
+            
+            if df_init is None or df_curr is None: return
+                
+            # Dispatch to appropriate draw method
+            if plot_type == 'Displacement plot':
+                self._draw_displacement_plot(df_init, df_curr, df_final, box_init, box_curr, slice_axis, observe_axis, options)
+            elif 'Strain' in plot_type:
+                self._draw_strain_plots(study, system, slice_axis, observe_axis, ts, options, plot_type)
+        else:
+            # Strain average case
+            if 'Strain' in plot_type:
+                self._draw_strain_plots(study, system, slice_axis, observe_axis, ts, options, plot_type)
 
         # Apply View Limits AFTER drawing (critical for locked view stability)
         if self.view_locked:
@@ -794,10 +845,16 @@ class DSDController(QObject):
             return
 
         # 1. Ensure Cache is Populated
-        if self._strain_cache is None:
-            self._strain_cache = self.data_manager.calculate_strain_evolution_cached(
-                self.domains, self.timesteps, study, system, slice_axis, observe_axis, options
-            )
+        if system == "Strain average":
+            if self._strain_cache is None:
+                self._strain_cache = self.data_manager.calculate_strain_average_evolution(
+                    self.domains, self.timesteps, study, slice_axis, observe_axis, options
+                )
+        else:
+            if self._strain_cache is None:
+                self._strain_cache = self.data_manager.calculate_strain_evolution_cached(
+                    self.domains, self.timesteps, study, system, slice_axis, observe_axis, options
+                )
         
         if not self._strain_cache:
             self.errorUpdated.emit("Failed to calculate strain evolution.")
