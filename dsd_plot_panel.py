@@ -463,7 +463,7 @@ class DSDPlotPanel(QWidget):
             self.filter_bar.set_data_range(zmin, zmax)
             self.filter_bar.blockSignals(False)
 
-    def load_project(self, root_path, keywords, force_reload=False, keep_table=False):
+    def load_project(self, root_path, keywords, force_reload=False, keep_table=False, target_system=None):
         if not force_reload and self.loaded_path == root_path:
             return
 
@@ -474,6 +474,18 @@ class DSDPlotPanel(QWidget):
         
         self.loaded_path = root_path
         self._update_ui_state(project_loaded=True, keep_table=keep_table)
+        
+        # Handle Auto-Selection if target_system provided
+        if target_system:
+            # We assume target_system is in the "." study (Current Directory)
+            # because the user selected a file in the 'root_path' passed to us.
+            if "." in studies:
+                self.study_combo.setCurrentText(".")
+                # Trigger update to populate systems
+                # Then select system
+                index = self.system_combo.findText(target_system)
+                if index != -1:
+                    self.system_combo.setCurrentIndex(index)
 
     def _update_ui_state(self, project_loaded, keep_table=False):
         if not keep_table:

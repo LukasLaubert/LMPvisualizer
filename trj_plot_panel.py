@@ -296,7 +296,7 @@ class TrjPlotPanel(QWidget):
         self.lock_axes_btn.toggled.connect(self._on_view_lock_toggled)
         self.lock_axes_btn.rightClicked.connect(self._on_view_sync_toggled)
 
-    def load_project(self, root_path, keywords, force_reload=False, keep_table=False):
+    def load_project(self, root_path, keywords, force_reload=False, keep_table=False, target_system=None):
         if not force_reload and self.loaded_path == root_path:
             return
 
@@ -306,6 +306,14 @@ class TrjPlotPanel(QWidget):
         
         self.loaded_path = root_path
         self._update_ui_state(project_loaded=True, keep_table=keep_table)
+        
+        if target_system:
+            if "." in studies:
+                self.study_combo.setCurrentText(".")
+                # on_study_changed triggers system populating
+                index = self.system_combo.findText(target_system)
+                if index != -1:
+                    self.system_combo.setCurrentIndex(index)
 
     def _update_ui_state(self, project_loaded, keep_table=False):
         if not keep_table:

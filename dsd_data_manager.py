@@ -28,7 +28,13 @@ class DSDDataManager:
             self.parsers[study_name] = {}
             for system_name in system_list:
                 target_files = []
-                if study_name == '.' and system_name in file_map:
+                
+                # Check for "study|system" key first (Flat/Parent mode)
+                flat_key = f"{study_name}|{system_name}"
+                
+                if flat_key in file_map:
+                    target_files = [file_map[flat_key]]
+                elif system_name in file_map: # Fallback for backward compatibility/direct mapping
                     target_files = [file_map[system_name]]
                 else:
                     system_path = root_path / study_name / system_name

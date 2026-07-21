@@ -118,9 +118,14 @@ class LogDataManager:
             self.data[study_name] = {}
             for system_name in system_list:
                 log_files = []
-                if study_name == '.': # Flat directory or single file mode
-                    if system_name in file_map:
-                        log_files = [file_map[system_name]]
+                
+                # Check for "study|system" key first (Flat/Parent mode)
+                flat_key = f"{study_name}|{system_name}"
+                
+                if flat_key in file_map:
+                    log_files = [file_map[flat_key]]
+                elif system_name in file_map:
+                    log_files = [file_map[system_name]]
                 else: # Standard project structure
                     log_path = root_path / study_name / system_name
                     if not log_keywords:

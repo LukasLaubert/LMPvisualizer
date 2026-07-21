@@ -114,8 +114,9 @@ class TrjController(QObject):
                     self.playback_start_index = curr_idx
                     self.playback_start_time = time.time()
 
-            # Reset view limits to auto only on system change
-            self.plot_item.autoRange()
+            # Reset view limits to auto only on system change if view is not locked
+            if not self.view_config.get('view_lock', True):
+                self.plot_item.autoRange()
 
     def get_available_timesteps(self):
         return self.timesteps

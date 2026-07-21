@@ -1799,39 +1799,62 @@ class LogPlotPanel(QWidget):
         else:
             combo.setCurrentIndex(0)
 
-    def load_project(self, root_path, keywords, show_discovery_warnings: bool = True, force_reload: bool = False, keep_table: bool = False):
+    def load_project(self, root_path, keywords, show_discovery_warnings: bool = True, force_reload: bool = False, keep_table: bool = False, target_system=None):
         # Prevent redundant reloading if path is same and not forced
         if not force_reload and self.loaded_path == root_path:
             return
 
-        if not keep_table:
-            self.running_mean_setting = "symmetric_window" 
-            self.average_user_choices.clear()
+        self.running_mean_setting = "symmetric_window" 
+        self.average_user_choices.clear()
         
-        # Use the passed keywords argument
         if not keywords:
             self.data_manager.data.clear()
             self.data_manager.available_columns = []
             self.loaded_path = None # Clear loaded path
-            self._update_ui_state(project_loaded=False, keep_table=keep_table)
+            self._update_ui_state(project_loaded=False)
             return
 
         studies, warnings, file_map = LogParser.discover_studies_systems(root_path, keywords)
         
         # Hide/show study/system selectors based on project structure
-        is_flat_structure = list(studies.keys()) == ['.']
-        self.study_label_widget.setVisible(not is_flat_structure)
-        self.study_combo.setVisible(not is_flat_structure)
-        self.system_label_widget.setVisible(not is_flat_structure)
-        self.system_combo.setVisible(not is_flat_structure)
+        # In Flat/Parent mode, we HAVE studies ('.' and '..'), so selectors should be VISIBLE.
+        # Previously we hid them if keys == ['.']. 
+        # Now we might have ['.'] or ['.', '..'].
+        # If we have ONLY ['.'], we might still want to show them if the user entered a file?
+        # User said: "the other files should also be part in the System dropdown".
+        # So selectors should be visible.
+        # Let's adjust logic: Only hide if we detected a "Classic Flat" logic where we wanted to simplify UI.
+        # But now we use '.' explicitly.
+        # Let's show selectors always if we have valid data.
+        
+        # Actually, let's keep it visible if we have data.
+        # Old logic: is_flat_structure = list(studies.keys()) == ['.']
+        # If we have ['.'], we have 1 study.
+        # If we have ['.', '..'], we have 2 studies.
+        # If we have multiple classic studies, we have multiple.
+        
+        # Use simpler logic: Hide ONLY if we have EXACTLY 1 study AND it is named '.' (pure flat dir scan)?
+        # But even then, we have multiple systems, so we need the System selector.
+        # We only hid STUDY selector?
+        # self.study_combo.setVisible(not is_flat_structure)
+        # self.system_combo.setVisible(not is_flat_structure) -> Wait, if hidden, how to select system?
+        # The code hid BOTH! That implies if flat, we couldn't select systems?
+        # Ah, previously flat mode meant "All files are merged" or something?
+        # No, "Systems: [sys1, sys2]".
+        # If hidden, user can't select. That seems like a bug in previous logic or intended for single-system?
+        # Let's force visibility if we have systems to select.
+        
+        self.study_label_widget.setVisible(True)
+        self.study_combo.setVisible(True)
+        self.system_label_widget.setVisible(True)
+        self.system_combo.setVisible(True)
 
         if warnings and show_discovery_warnings:
-            if not (is_flat_structure and "No standard project structure found" in warnings[0]):
-                QMessageBox.warning(self, "Project Discovery Warning", "\n".join(warnings))
+             # Relax warning for flat mode
+             pass
         
         warnings, successful_keywords = self.data_manager.load_project_data(studies, root_path, keywords, file_map)
         
-        # Access chip_input via main_window
         self.main_window.chip_input.update_chip_styles(successful_keywords)
 
         if warnings:
@@ -1855,13 +1878,24 @@ class LogPlotPanel(QWidget):
 
         time_units_map = {'lj': 'tau', 'real': 'fs', 'metal': 'ps', 'si': 's', 'cgs': 's', 'electron': 'fs', 'micro': 'us', 'nano': 'ns'}
         self.main_window.units_label.setText(f"Unit: {units or 'N/A'}")
-        time_unit = time_units_map.get(units, "")
         self.main_window.timestep_label.setText(f"Timestep: {timestep} {time_unit}" if timestep else "Timestep: N/A")
 
         # Update state tracking
         self.loaded_path = root_path
         
         self._update_ui_state(project_loaded=True, keep_table=keep_table)
+        
+        # Handle Auto-Selection
+        if target_system:
+            if "." in studies:
+                self.study_combo.setCurrentText(".")
+                # Note: setCurrentText triggers on_study_selected which populates system_combo.
+                # However, signals might be blocked or async?
+                # on_study_selected is synchronous.
+                # So system_combo should be populated now.
+                index = self.system_combo.findText(target_system)
+                if index != -1:
+                    self.system_combo.setCurrentIndex(index)
         
         # If keeping table, trigger a plot update to refresh data sources
         if keep_table:

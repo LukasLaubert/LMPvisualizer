@@ -409,21 +409,40 @@ class MainWindow(QMainWindow):
              self.path_edit.setText(self.current_project_path)
              return
              
-        if path.is_dir():
-            try:
-                 # Attempt to find root if inside a subdirectory
-                 root = LogParser.find_project_root(path_str)
-                 self.path_edit.setText(str(root))
-                 path = root
-            except FileNotFoundError:
-                 pass
-        
-        self.current_project_path = self.path_edit.text()
-        self.propagate_load(path)
+        if path.is_file():
+             # If a specific file is entered, load its parent directory 
+             # and request auto-selection of this file as the target system.
+             self.propagate_load(path.parent, target_system=path.stem)
+             # Update the text box to show the file path still? 
+             # Or show the parent? 
+             # User said: "when a file... is entered... it shall also parse the path but autoselect the file"
+             # Usually keeping the full path in the box is confusing if we loaded the DIR.
+             # But let's keep it if the user typed it, or update to Dir?
+             # Standard behavior: Update to Dir, but here we want to remember the file.
+             # propagate_load calls panel.load_project.
+             # Let's update text to parent dir for consistency, or keep file path?
+             # If we keep file path, on_refresh_clicked might re-trigger file logic.
+             # Let's update path_edit to the directory we are actually "loading" (the root).
+             self.path_edit.setText(str(path.parent))
+             self.current_project_path = str(path.parent)
+        else:
+             if path.is_dir():
+                try:
+                     # Attempt to find root if inside a subdirectory
+                     root = LogParser.find_project_root(path_str)
+                     self.path_edit.setText(str(root))
+                     path = root
+                except FileNotFoundError:
+                     pass
+            
+             self.current_project_path = self.path_edit.text()
+             self.propagate_load(path)
 
     def on_refresh_clicked(self):
         path_str = self.path_edit.text()
         if path_str and os.path.exists(path_str):
+            # No target system on refresh, unless we tracked it? 
+            # For now, just reload the path.
             self.propagate_load(Path(path_str), force_reload=True)
 
     def on_keywords_changed(self, keywords):
@@ -432,19 +451,24 @@ class MainWindow(QMainWindow):
             # Pass keep_table=True so we don't wipe the user's work when adding a keyword
             self.propagate_load(Path(path_str), force_reload=True, keep_table=True)
 
-    def propagate_load(self, path, force_reload=False, keep_table=False):
+    def propagate_load(self, path, force_reload=False, keep_table=False, target_system=None):
         # Send load command to CURRENT panel
         current_panel = self.stacked_widget.currentWidget()
         keywords = self.chip_input.get_chips()
         
-        # Check if the panel accepts 'keep_table'
+        # Check if the panel accepts 'keep_table' and 'target_system'
         if hasattr(current_panel, 'load_project'):
             import inspect
             sig = inspect.signature(current_panel.load_project)
+            kwargs = {}
+            if 'force_reload' in sig.parameters:
+                kwargs['force_reload'] = force_reload
             if 'keep_table' in sig.parameters:
-                current_panel.load_project(path, keywords, force_reload=force_reload, keep_table=keep_table)
-            else:
-                current_panel.load_project(path, keywords, force_reload=force_reload)
+                kwargs['keep_table'] = keep_table
+            if 'target_system' in sig.parameters:
+                kwargs['target_system'] = target_system
+                
+            current_panel.load_project(path, keywords, **kwargs)
 
     def closeEvent(self, event):
         """Handle application exit: Save state for current mode."""

@@ -93,7 +93,8 @@ class DSDController(QObject):
                 self.pause()
                 self.playbackStopped.emit()
             
-            self.plot_item.autoRange()
+            if not self.view_locked:
+                self.plot_item.autoRange()
 
     def set_view_lock(self, locked):
         self.view_locked = locked
@@ -919,11 +920,21 @@ class DSDController(QObject):
         # We need to collect what's currently in the plot
         fig, ax1 = plt.subplots(figsize=figsize if figsize else (10, 6))
         
+        # Apply limits from current view
+        view_range = self.plot_item.getViewBox().viewRange()
+        ax1.set_xlim(view_range[0])
+        ax1.set_ylim(view_range[1])
+        
         # Determine if we have a right axis (Counts/Weights)
         show_right = self.plot_item.getAxis('right').isVisible()
         ax2 = ax1.twinx() if show_right else None
         if ax2:
             ax2.set_ylabel(self.plot_item.getAxis('right').labelText, fontsize=12)
+            # Try to match secondary view range if possible
+            if self.vb2:
+                 vr2 = self.vb2.viewRange()
+                 if vr2 and len(vr2) > 1:
+                     ax2.set_ylim(vr2[1])
 
         # Labels
         ax1.set_xlabel(self.plot_item.getAxis('bottom').labelText, fontsize=12)
@@ -940,14 +951,26 @@ class DSDController(QObject):
                 
                 name = item.name()
                 pen = item.opts.get('pen')
-                color = pen.color().getRgbF()[:3] if pen else (0,0,1)
+                
+                # Robust Color Extraction
+                color = QColor('blue')
+                if pen and pen.style() != Qt.PenStyle.NoPen:
+                    color = pen.color()
+                else:
+                    sb = item.opts.get('symbolBrush')
+                    if sb:
+                        if isinstance(sb, QColor): color = sb
+                        elif hasattr(sb, 'color'): color = sb.color()
+                
+                c_rgb = (color.redF(), color.greenF(), color.blueF())
+
                 width = pen.width() if pen else 1
                 linestyle = self._get_mpl_linestyle(pen.style()) if (pen and pen.style() != Qt.PenStyle.NoPen) else 'None'
                 # Fix: Handle both scatter (dot) and line cases
                 symbol = item.opts.get('symbol')
                 symbol_size = item.opts.get('symbolSize', 5)
                 
-                h, = ax1.plot(x, y, label=name, color=color, linewidth=width, linestyle=linestyle,
+                h, = ax1.plot(x, y, label=name, color=c_rgb, linewidth=width, linestyle=linestyle,
                                marker=self._get_trj_mpl_marker(symbol) if symbol else None,
                                markersize=symbol_size)
                 if name:

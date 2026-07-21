@@ -75,23 +75,41 @@ class LogParser:
                         return consistent_studies, warnings, {}
 
         # Fallback: Path is a directory with no valid study structure, or a single file was provided
-        log_files = []
+        # We check the CURRENT directory (study='.') AND the PARENT directory (study='..')
+        
+        # 1. Determine directories to scan
+        scan_targets = []
         if path.is_dir():
+            scan_targets.append(('.', path))
+            if path.parent and path.parent != path: # Ensure parent exists and is not same (root)
+                 scan_targets.append(('..', path.parent))
+        
+        studies = {}
+        file_map = {}
+        found_any = False
+
+        for study_label, dir_path in scan_targets:
+            current_log_files = []
             if not log_keywords:
-                log_files = list(path.glob("log.lammps"))
+                current_log_files = list(dir_path.glob("log.lammps"))
             else:
                 for keyword in log_keywords:
-                    log_files.extend(path.glob(f"*{keyword}*"))
-                log_files = sorted(list(set(log_files)))
+                    current_log_files.extend(dir_path.glob(f"*{keyword}*"))
+                current_log_files = sorted(list(set(current_log_files)))
 
-        if log_files:
-            systems = [f.stem for f in log_files]
-            studies = {'.': systems}
-            file_map = {f.stem: f for f in log_files}
+            if current_log_files:
+                systems = [f.stem for f in current_log_files]
+                studies[study_label] = systems
+                for f in current_log_files:
+                    # Key by "study|system" to avoid collision if same system name exists in both levels
+                    file_map[f"{study_label}|{f.stem}"] = f
+                found_any = True
+
+        if found_any:
             return studies, warnings, file_map
 
         # If we reach here, nothing was found
-        return {}, ["No study directories or log files found in the given path."], {}
+        return {}, ["No study directories or log files found in the given path (checked current and parent)."], {}
     
     @staticmethod
     def extract_thermo_data(logfile_path: Path) -> Optional[pd.DataFrame]:
