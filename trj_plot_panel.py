@@ -367,7 +367,6 @@ class TrjPlotPanel(QWidget):
                 self.controller.set_active_system(study, text)
                 self.player_controls.set_timesteps(self.controller.get_available_timesteps())
                 
-                # Explicitly reset UI slider if study changed
                 if is_study_change:
                     self.player_controls.set_step_index(0)
                 
@@ -386,7 +385,9 @@ class TrjPlotPanel(QWidget):
             self._populate_combo(combo, placeholder, cols, target)
             combo.setEnabled(enable_props)
             
-        self.sync_dropdowns_to_row()
+        # Only sync if we are NOT in the middle of a programmatic update
+        if not self._updating_from_code:
+            self.sync_dropdowns_to_row()
 
     def on_axis_changed(self, text):
         self.sync_dropdowns_to_row()
@@ -744,23 +745,30 @@ class TrjPlotPanel(QWidget):
         return state
 
     def _apply_state_to_dropdowns(self, state):
+        # Set flag to tell sync_dropdowns_to_row to ignore signals
         self._updating_from_code = True
         try:
+            # 1. Set Study
             self.study_combo.blockSignals(True)
             self.study_combo.setCurrentText(state.get('study', 'Select Study'))
             self.study_combo.blockSignals(False)
             
+            # Manually trigger change logic, but flag remains True
             self.on_study_changed(self.study_combo.currentText())
             
+            # 2. Set System
             self.system_combo.blockSignals(True)
             self.system_combo.setCurrentText(state.get('system', 'Select System'))
             self.system_combo.blockSignals(False)
             
+            # Manually trigger change logic
             self.on_system_changed(self.system_combo.currentText())
             
+            # 3. Set Dependent Combos (X, Y, Z, Heatmap)
+            # We use a helper to find the text or default to index 0
             def safe_set(combo, val):
                 combo.blockSignals(True)
-                if combo.findText(val) >= 0:
+                if val and combo.findText(val) >= 0:
                     combo.setCurrentText(val)
                 else:
                     combo.setCurrentIndex(0)
@@ -772,10 +780,13 @@ class TrjPlotPanel(QWidget):
             safe_set(self.zfilter_ref_combo, state.get('z_ref'))
             safe_set(self.heatmap_combo, state.get('h_col'))
             safe_set(self.heatmap_ref_combo, state.get('h_ref'))
+            
         finally:
+            # Always ensure flag is lowered
             self._updating_from_code = False
 
     def on_table_selection_changed(self):
+        # 1. Save state of the PREVIOUS row before switching
         self._save_current_row_state()
         
         row = self.plot_table.currentRow()
@@ -788,8 +799,12 @@ class TrjPlotPanel(QWidget):
         state = item.data(Qt.ItemDataRole.UserRole)
         
         if state:
+            # 2. Apply dropdown state (Study, System, Axes)
+            # This function handles its own flag (_updating_from_code) to prevent
+            # dropdown signals from triggering saves.
             self._apply_state_to_dropdowns(state)
             
+            # 3. Handle Visual Widgets (Color/Heatmap) in the table
             is_heatmap = state.get('h_col') != "No Heatmap"
             curr_widget = self.plot_table.cellWidget(row, 2)
             is_combo = isinstance(curr_widget, QComboBox)
@@ -799,6 +814,7 @@ class TrjPlotPanel(QWidget):
                 data['is_heatmap'] = is_heatmap
                 self._populate_row_data(row, data)
 
+            # 4. Handle Visibility
             has_filter = state.get('z_col') != "No Z-Filter"
             self.filter_bar.setVisible(has_filter)
             self.zfilter_ref_combo.setEnabled(has_filter)
@@ -806,32 +822,40 @@ class TrjPlotPanel(QWidget):
             self.heatmap_bar.setVisible(is_heatmap)
             self.heatmap_ref_combo.setEnabled(is_heatmap)
 
+            # 5. Restore Filter Bar State
+            # CRITICAL: Block signals here to prevent the bar from telling the table to "save" while we are just trying to "load".
             if has_filter:
-                dmin, dmax = self.controller.get_scope_min_max(
-                    state['study'], state['system'], state['z_col'], state.get('z_ref', 'Current')
-                )
-                self.filter_bar.set_data_range(dmin, dmax)
-                
-                if 'z_ranges' in state:
-                    self.filter_bar.set_current_ranges(state['z_ranges'])
-                elif 'z_range' in state: # Legacy
-                    self.filter_bar.set_current_ranges([state['z_range']])
+                self.filter_bar.blockSignals(True)
+                try:
+                    dmin, dmax = self.controller.get_scope_min_max(state['study'], state['system'], state['z_col'], state.get('z_ref', 'Current'))
+                    self.filter_bar.set_data_range(dmin, dmax)
+                    
+                    if 'z_ranges' in state:
+                        self.filter_bar.set_current_ranges(state['z_ranges'])
+                    elif 'z_range' in state: # Legacy support
+                        self.filter_bar.set_current_ranges([state['z_range']])
+                finally:
+                    self.filter_bar.blockSignals(False)
             
+            # 6. Restore Time Step
             step_idx = state.get('current_step_index', 0)
             self.controller.set_timestep_index(step_idx)
             self.player_controls.set_step_index(step_idx)
 
+            # 7. Restore View Locks
             is_locked = state.get('view_lock', True)
             is_synced = state.get('view_sync', True)
             
             self.lock_axes_btn.setVisible(True)
-            self.lock_axes_btn.blockSignals(True)
+            self.lock_axes_btn.blockSignals(True) # Block to prevent toggle signal
             self.lock_axes_btn.setChecked(is_locked)
             self.lock_axes_btn.blockSignals(False)
             self._update_lock_button_visuals(is_locked, is_synced)
             
+            # 8. Finally, update the plot
             self.update_plot_from_selection()
             
+            # Restore specific view range if locked
             vb = self.plot_widget.getPlotItem().getViewBox()
             if is_locked and state.get('view_range'):
                 vr = state['view_range']
