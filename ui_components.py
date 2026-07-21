@@ -18,10 +18,7 @@ class ColorButton(QPushButton):
 
     def set_color(self, color: QColor):
         self._color = color
-        palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Button, self._color)
-        self.setPalette(palette)
-        self.update()
+        self.setStyleSheet(f"background-color: {self._color.name()};")
         self.colorChanged.emit(self._color)
 
     def color(self) -> QColor:

@@ -18,22 +18,31 @@ class PlottingController:
         self.plot_item.getAxis('bottom').setTextPen('k')
         
         self.plots: Dict[str, Dict[str, Any]] = {}  # {plot_name: {item, error_item, ...}}
-        self.y_axes: Dict[str, pg.ViewBox] = {}     # {y_col_name: ViewBox}
+        # {y_col_name: {'axis': AxisItem, 'viewbox': ViewBox}}
+        self.y_axes: Dict[str, Dict[str, Any]] = {}
+        self.temporary_plot: pg.PlotDataItem = None
         
-    def add_or_update_plot(self, name: str, data: dict, color: QColor, style):
-        """Adds a new plot or updates an existing one."""
+    def add_or_update_plot(self, name: str, data: dict, color: QColor, style, is_temp=False):
+        """Adds a new plot or updates an existing one. Handles a temporary plot for live previews."""
         x, y = data['x'], data['y']
         std = data.get('std')
         y_col = name.split('_')[-1]
 
-        # Remove existing plot if it exists
-        if name in self.plots:
+        # If it's a temporary plot, remove the old one first
+        if is_temp and self.temporary_plot:
+            self.plot_item.removeItem(self.temporary_plot)
+            self.temporary_plot = None
+        # For permanent plots, remove existing plot if it exists
+        elif not is_temp and name in self.plots:
             self.remove_plot(name)
 
         # Handle multiple Y-axes
         if y_col not in self.y_axes:
             if not self.y_axes: # First axis is the default one
-                self.y_axes[y_col] = self.plot_item.getViewBox()
+                self.y_axes[y_col] = {
+                    'axis': self.plot_item.getAxis('left'),
+                    'viewbox': self.plot_item.getViewBox()
+                }
             else: # Create a new ViewBox for the new axis
                 vb = pg.ViewBox()
                 ax = pg.AxisItem('right')
@@ -41,9 +50,9 @@ class PlottingController:
                 self.plot_item.scene().addItem(vb)
                 ax.linkToView(vb)
                 vb.setXLink(self.plot_item.getViewBox())
-                self.y_axes[y_col] = vb
+                self.y_axes[y_col] = {'axis': ax, 'viewbox': vb}
         
-        view_box = self.y_axes[y_col]
+        view_box = self.y_axes[y_col]['viewbox']
 
         # Create plot items
         pen = pg.mkPen(color=color, style=style)
@@ -60,7 +69,11 @@ class PlottingController:
             view_box.addItem(error_item)
 
         view_box.addItem(plot_item)
-        self.plots[name] = {'item': plot_item, 'error_item': error_item, 'view_box': view_box}
+
+        if is_temp:
+            self.temporary_plot = plot_item
+        else:
+            self.plots[name] = {'item': plot_item, 'error_item': error_item, 'view_box': view_box}
 
         self.update_views()
         
@@ -77,7 +90,8 @@ class PlottingController:
         main_vb = self.plot_item.getViewBox()
         main_vb.setGeometry(self.plot_item.vb.sceneBoundingRect())
         
-        for vb in self.y_axes.values():
+        for axis_info in self.y_axes.values():
+            vb = axis_info['viewbox']
             if vb is not main_vb:
                 vb.setGeometry(main_vb.sceneBoundingRect())
                 vb.linkedViewChanged(main_vb, vb.XAxis)
@@ -91,17 +105,14 @@ class PlottingController:
     def set_axis_labels(self, x_label: str, y_labels: Dict[str, str]):
         self.plot_item.setLabel('bottom', text=x_label)
         
-        # Set primary y-axis label
-        if y_labels:
-            first_label = list(y_labels.values())[0]
-            self.plot_item.setLabel('left', text=first_label)
-        
-        # Find the axis item associated with each viewbox
-        for i, item in enumerate(self.plot_item.layout.items()):
-            if isinstance(item, pg.AxisItem) and item.orientation == 'right':
-                # This is a bit of a hack, assumes order. A better way would be to store the axis item.
-                # For now this is a simple implementation.
-                pass
+        # Reset all y-axis labels
+        for y_col, axis_info in self.y_axes.items():
+            axis_info['axis'].setLabel(text="")
+
+        # Set new labels
+        for y_col, label in y_labels.items():
+            if y_col in self.y_axes:
+                self.y_axes[y_col]['axis'].setLabel(text=label)
 
 
     def export_plot(self, filename: str):

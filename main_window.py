@@ -22,7 +22,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("LAMMPS Log Visualizer")
         self.setGeometry(100, 100, 1400, 800)
-        self.setStyleSheet("QWidget { background-color: #f0f0f0; }") # Light gray background
+        self.setStyleSheet("QMainWindow { background-color: #f0f0f0; }") # Light gray background
 
         # Backend components
         self.data_manager = DataManager()
@@ -131,15 +131,16 @@ class MainWindow(QMainWindow):
         # Set column resize modes
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch) # 'Plot' column
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents) # 'Color'
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # 'Style'
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive) # 'Style'
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # 'Show'
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # 'Del'
+        self.plot_table.setColumnWidth(2, 80) # Give style dropdown more space
         self.plot_table.verticalHeader().hide()
 
         main_splitter.addWidget(left_panel)
         main_splitter.addWidget(self.plot_table)
         main_splitter.setSizes([900, 500]) # Adjust initial splitter sizes
-        main_layout.addWidget(main_splitter)
+        main_layout.addWidget(main_splitter, 1) # Add with stretch factor
 
         self._connect_signals()
         self._update_ui_state()
@@ -153,13 +154,16 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self.browse_btn.clicked.connect(self.browse_for_directory)
+        self.path_edit.returnPressed.connect(self.on_path_entered)
         
+        # Connections that trigger updates
         self.study_combo.currentTextChanged.connect(self.on_study_selected)
-        self.system_combo.currentTextChanged.connect(self.on_selection_changed)
-        self.xaxis_combo.currentTextChanged.connect(self.on_selection_changed)
-        self.yaxis_combo.currentTextChanged.connect(self.on_selection_changed)
-        self.std_checkbox.stateChanged.connect(self.on_selection_changed)
+        self.system_combo.currentTextChanged.connect(self.on_system_combo_changed)
+        self.xaxis_combo.currentTextChanged.connect(self.update_plots)
+        self.yaxis_combo.currentTextChanged.connect(self.update_plots)
+        self.std_checkbox.stateChanged.connect(self.update_plots)
 
+        # Connections for table actions and session management
         self.add_btn.clicked.connect(self.add_plot_from_selection)
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
@@ -169,12 +173,18 @@ class MainWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(self, "Select Project Root")
         if directory:
             self.path_edit.setText(directory)
-            try:
-                root_path = LammpsParser.find_project_root(directory)
-                self.path_edit.setText(str(root_path))
-                self.load_project(root_path)
-            except FileNotFoundError as e:
-                QMessageBox.critical(self, "Error", str(e))
+            self.on_path_entered() # Use same logic as pressing enter
+    
+    def on_path_entered(self):
+        path = self.path_edit.text()
+        if not path:
+            return
+        try:
+            root_path = LammpsParser.find_project_root(path)
+            self.path_edit.setText(str(root_path))
+            self.load_project(root_path)
+        except FileNotFoundError as e:
+            QMessageBox.critical(self, "Error", str(e))
 
     def load_project(self, root_path):
         studies, warnings = LammpsParser.discover_studies_systems(root_path)
@@ -187,7 +197,6 @@ class MainWindow(QMainWindow):
             
         self.studies_label.setText(f"Studies: {len(self.data_manager.get_study_names())}")
         
-        # --- FIX for System Count and Timestep Unit ---
         # Get system count from the first available study after loading
         studies_dict = self.data_manager.data
         if studies_dict:
@@ -197,21 +206,34 @@ class MainWindow(QMainWindow):
         else:
             self.systems_label.setText("Systems: 0")
 
+        # Map units to their time unit according to LAMMPS docs
+        time_units_map = {
+            'lj': 'tau',
+            'real': 'fs',
+            'metal': 'ps',
+            'si': 's',
+            'cgs': 's',
+            'electron': 'fs',
+            'micro': 'us',
+            'nano': 'ns'
+        }
+
         # Update metadata including units for timestep
         units = LammpsParser.get_units(root_path)
         self.units_label.setText(f"Unit: {units or 'N/A'}")
         timestep = LammpsParser.get_timestep(root_path)
-        if timestep and units:
-            self.timestep_label.setText(f"Timestep: {timestep} {units}")
+        time_unit = time_units_map.get(units, "")
+        if timestep:
+            self.timestep_label.setText(f"Timestep: {timestep} {time_unit}")
         else:
-            self.timestep_label.setText(f"Timestep: {timestep or 'N/A'}")
-        # --- End of Fix ---
+            self.timestep_label.setText(f"Timestep: N/A")
 
         self._update_ui_state()
 
     def _update_ui_state(self, clear_plots=True):
         if clear_plots:
             self.plot_table.setRowCount(0)
+            self.plot_controller.remove_plot("_temp_")
             for name in list(self.plot_controller.plots.keys()):
                 self.plot_controller.remove_plot(name)
 
@@ -225,9 +247,7 @@ class MainWindow(QMainWindow):
             combo.blockSignals(False)
 
         reset_combo(self.study_combo, "Select Study", self.data_manager.get_study_names())
-        
         self.on_study_selected() # Trigger update for other combos
-        self.on_selection_changed() # Update temp plot
 
     def on_study_selected(self):
         study = self.study_combo.currentText()
@@ -244,7 +264,6 @@ class MainWindow(QMainWindow):
 
         systems = self.data_manager.get_system_names(study)
         reset_combo_with_systems(self.system_combo, "Select System", systems)
-        # Note: The main systems label is now set once in load_project
 
         def reset_combo(combo, placeholder, items):
             combo.blockSignals(True)
@@ -257,93 +276,90 @@ class MainWindow(QMainWindow):
         reset_combo(self.xaxis_combo, "Select X-Axis", self.data_manager.available_columns)
         reset_combo(self.yaxis_combo, "Select Y-Axis", self.data_manager.available_columns)
         
-        self.on_selection_changed()
+        self.update_plots()
 
     def is_selection_valid(self):
         """Check if dropdowns have a valid selection (not placeholder)."""
         return all(combo.currentIndex() > 0 for combo in [self.study_combo, self.system_combo, self.xaxis_combo, self.yaxis_combo])
 
-    def on_selection_changed(self):
-        self._update_temp_plot_entry()
+    def on_system_combo_changed(self):
+        """Handles visibility of the std checkbox and updates plots."""
         is_average = self.system_combo.currentText() == "average"
         self.std_checkbox.setVisible(is_average)
+        self.update_plots()
         
-    def _update_temp_plot_entry(self):
-        # Check if a temporary row exists, if not, create one
-        has_temp = False
-        if self.plot_table.rowCount() > 0:
-            item = self.plot_table.item(self.plot_table.rowCount() - 1, 0)
-            if item and item.data(Qt.ItemDataRole.UserRole) == 'temp':
-                has_temp = True
-        
-        if not self.is_selection_valid():
-             if has_temp: # remove if selection incomplete
-                 self.plot_table.removeRow(self.plot_table.rowCount() - 1)
-             self.add_btn.setEnabled(False)
-             return
-
-        self.add_btn.setEnabled(True)
-        study = self.study_combo.currentText()
-        system = self.system_combo.currentText()
-        x_ax = self.xaxis_combo.currentText()
-        y_ax = self.yaxis_combo.currentText()
-        plot_name = f"{study}_{system}_{x_ax}_{y_ax}"
-
-        if not has_temp:
-            self.plot_table.insertRow(self.plot_table.rowCount())
-        
-        row = self.plot_table.rowCount() - 1
-        # Item for name
-        name_item = QTableWidgetItem(plot_name)
-        name_item.setData(Qt.ItemDataRole.UserRole, 'temp')
-        name_item.setForeground(Qt.GlobalColor.gray)
-        self.plot_table.setItem(row, 0, name_item)
-
-        # Other widgets for the temp row
-        if self.plot_table.cellWidget(row, 1) is None:
-            self.plot_table.setCellWidget(row, 1, ColorButton(self._get_random_color()))
-            self.plot_table.setCellWidget(row, 2, self._create_style_combo())
-            self.plot_table.setCellWidget(row, 3, QCheckBox())
-            self.plot_table.setCellWidget(row, 4, QLabel(" ")) # Placeholder
-
     def add_plot_from_selection(self):
-        row = self.plot_table.rowCount() - 1
-        if row < 0: return
-        
-        item = self.plot_table.item(row, 0)
-        if not item or item.data(Qt.ItemDataRole.UserRole) != 'temp':
-            return
-            
-        plot_name = item.text()
-        
-        # Solidify the row
-        item.setData(Qt.ItemDataRole.UserRole, 'permanent')
-        item.setForeground(Qt.GlobalColor.black)
-        
-        # Make connections for the permanent row
-        color_btn = self.plot_table.cellWidget(row, 1)
-        style_combo = self.plot_table.cellWidget(row, 2)
-        show_check = self.plot_table.cellWidget(row, 3)
-        
-        color_btn.colorChanged.connect(self.update_all_plots)
-        style_combo.currentTextChanged.connect(self.update_all_plots)
-        show_check.stateChanged.connect(self.update_all_plots)
-        show_check.setChecked(True) # Show by default
-
-        del_btn = QPushButton("X")
-        del_btn.clicked.connect(lambda checked, name=plot_name: self.delete_plot_row(name))
-        self.plot_table.setCellWidget(row, 4, del_btn)
-
-        self.on_selection_changed() # Create a new temp row
-        self.update_all_plots()
-
-    def update_all_plots(self):
-        for name in list(self.plot_controller.plots.keys()):
-            self.plot_controller.remove_plot(name)
-            
+        # Find the temporary row
+        temp_row = -1
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 0)
-            if item and item.data(Qt.ItemDataRole.UserRole) == 'permanent' and self.plot_table.cellWidget(row, 3).isChecked():
+            if item and item.data(Qt.ItemDataRole.UserRole) == 'temp':
+                temp_row = row
+                break
+        
+        if temp_row == -1:
+            return # No temp row to add
+
+        item = self.plot_table.item(temp_row, 0)
+        plot_name = item.text()
+
+        # Prevent adding duplicate plots (check against permanent rows)
+        for row in range(self.plot_table.rowCount()):
+            if row == temp_row: continue
+            perm_item = self.plot_table.item(row, 0)
+            if perm_item and perm_item.text() == plot_name:
+                QMessageBox.warning(self, "Duplicate Plot", "This plot has already been added.")
+                return
+
+        # Promote the temp row to a permanent one
+        item.setData(Qt.ItemDataRole.UserRole, 'permanent')
+        item.setForeground(Qt.GlobalColor.black)
+
+        # Get the widgets that were disabled
+        color_btn = self.plot_table.cellWidget(temp_row, 1)
+        style_combo = self.plot_table.cellWidget(temp_row, 2)
+        show_check_widget = self.plot_table.cellWidget(temp_row, 3)
+        show_check = show_check_widget.findChild(QCheckBox)
+
+        # Enable and connect them
+        color_btn.setEnabled(True)
+        color_btn.colorChanged.connect(self.update_plots)
+        style_combo.setEnabled(True)
+        style_combo.currentTextChanged.connect(self.update_plots)
+        show_check_widget.setEnabled(True)
+        show_check.setChecked(True)
+        show_check.stateChanged.connect(self.update_plots)
+
+        # Replace placeholder with a real delete button
+        del_btn = QPushButton("X")
+        del_btn.setStyleSheet("color: red; font-weight: bold;")
+        del_btn.clicked.connect(lambda checked, name=plot_name: self.delete_plot_row(name))
+        self.plot_table.setCellWidget(temp_row, 4, self._create_centered_widget(del_btn))
+
+        self.update_plots()
+
+    def update_plots(self):
+        # Clear all plots from the controller
+        self.plot_controller.remove_plot("_temp_")
+        for name in list(self.plot_controller.plots.keys()):
+            self.plot_controller.remove_plot(name)
+
+        # Remove any existing temporary row from the table
+        for row in reversed(range(self.plot_table.rowCount())):
+            item = self.plot_table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == 'temp':
+                self.plot_table.removeRow(row)
+                break
+
+        # --- Draw permanent plots ---
+        for row in range(self.plot_table.rowCount()):
+            item = self.plot_table.item(row, 0)
+            show_widget = self.plot_table.cellWidget(row, 3)
+            if not (item and show_widget):
+                continue
+            
+            show_checkbox = show_widget.findChild(QCheckBox)
+            if item.data(Qt.ItemDataRole.UserRole) == 'permanent' and show_checkbox and show_checkbox.isChecked():
                 plot_name = item.text()
                 study, system, x_ax, y_ax = plot_name.split('_')
                 
@@ -364,24 +380,63 @@ class MainWindow(QMainWindow):
                     style_text = self.plot_table.cellWidget(row, 2).currentText()
                     style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
                     self.plot_controller.add_or_update_plot(plot_name, data, color, style)
-                    
+
+        # --- Draw temporary plot and add temporary table row ---
+        self.add_btn.setEnabled(self.is_selection_valid())
+        if self.is_selection_valid():
+            study = self.study_combo.currentText()
+            system = self.system_combo.currentText()
+            x_ax = self.xaxis_combo.currentText()
+            y_ax = self.yaxis_combo.currentText()
+            plot_name = f"{study}_{system}_{x_ax}_{y_ax}"
+
+            # Add temporary row to table
+            row = self.plot_table.rowCount()
+            self.plot_table.insertRow(row)
+            
+            name_item = QTableWidgetItem(plot_name)
+            name_item.setData(Qt.ItemDataRole.UserRole, 'temp')
+            name_item.setForeground(Qt.GlobalColor.gray)
+            self.plot_table.setItem(row, 0, name_item)
+
+            # Add disabled widgets for the temp row
+            self.plot_table.setCellWidget(row, 1, ColorButton(QColor('gray')))
+            self.plot_table.cellWidget(row, 1).setEnabled(False)
+            self.plot_table.setCellWidget(row, 2, self._create_style_combo())
+            self.plot_table.cellWidget(row, 2).setEnabled(False)
+            self.plot_table.setCellWidget(row, 3, self._create_centered_widget(QCheckBox()))
+            self.plot_table.cellWidget(row, 3).setEnabled(False)
+            self.plot_table.setCellWidget(row, 4, self._create_centered_widget(QLabel("-")))
+
+            # Draw temporary plot line
+            data = self.data_manager.get_plot_data(study, system, x_ax, y_ax, self.std_checkbox.isChecked())
+            if data:
+                self.plot_controller.add_or_update_plot("_temp_", data, QColor('gray'), Qt.PenStyle.DashLine, is_temp=True)
+
         self._update_axis_labels()
 
     def _update_axis_labels(self):
-        # For simplicity, use the x-axis from the first shown plot
-        # and create labels for each unique y-axis
         x_label = ""
         y_labels = {}
+
+        # Get labels from permanent plots
         for row in range(self.plot_table.rowCount()):
-             item = self.plot_table.item(row, 0)
-             if item and item.data(Qt.ItemDataRole.UserRole) == 'permanent' and self.plot_table.cellWidget(row, 3).isChecked():
+            item = self.plot_table.item(row, 0)
+            show_widget = self.plot_table.cellWidget(row, 3)
+            if not (item and show_widget): continue
+
+            show_checkbox = show_widget.findChild(QCheckBox)
+            if item.data(Qt.ItemDataRole.UserRole) == 'permanent' and show_checkbox and show_checkbox.isChecked():
                 plot_name = item.text()
                 _, _, x_ax, y_ax = plot_name.split('_')
-                if not x_label:
-                    x_label = x_ax
-                if y_ax not in y_labels:
-                    y_labels[y_ax] = y_ax
+                if not x_label: x_label = x_ax
+                if y_ax not in y_labels: y_labels[y_ax] = y_ax
         
+        # If no permanent plots, use temp plot for labels
+        if not y_labels and self.is_selection_valid():
+            x_label = self.xaxis_combo.currentText()
+            y_labels[self.yaxis_combo.currentText()] = self.yaxis_combo.currentText()
+
         self.plot_controller.set_axis_labels(x_label, y_labels)
 
     def delete_plot_row(self, plot_name_to_delete: str):
@@ -389,9 +444,17 @@ class MainWindow(QMainWindow):
             item = self.plot_table.item(row, 0)
             if item and item.text() == plot_name_to_delete:
                 self.plot_table.removeRow(row)
-                self.plot_controller.remove_plot(plot_name_to_delete)
-                self.update_all_plots() # Refresh plot view
+                self.update_plots() # Refresh plot view
                 break
+
+    def _create_centered_widget(self, widget: QWidget) -> QWidget:
+        """Helper to place a widget in a centered layout."""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.addWidget(widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setContentsMargins(0,0,0,0)
+        return container
 
     def _get_random_color(self) -> QColor:
         return QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
@@ -457,20 +520,20 @@ class MainWindow(QMainWindow):
                     
                     show_check = QCheckBox()
                     show_check.setChecked(plot_info['show'])
-                    self.plot_table.setCellWidget(row, 3, show_check)
+                    self.plot_table.setCellWidget(row, 3, self._create_centered_widget(show_check))
                     
                     # Wire up signals
                     color_btn = self.plot_table.cellWidget(row, 1)
                     del_btn = QPushButton("X")
+                    del_btn.setStyleSheet("color: red; font-weight: bold;")
                     del_btn.clicked.connect(lambda checked, name=plot_info['name']: self.delete_plot_row(name))
-                    self.plot_table.setCellWidget(row, 4, del_btn)
+                    self.plot_table.setCellWidget(row, 4, self._create_centered_widget(del_btn))
 
-                    color_btn.colorChanged.connect(self.update_all_plots)
-                    style_combo.currentTextChanged.connect(self.update_all_plots)
-                    show_check.stateChanged.connect(self.update_all_plots)
+                    color_btn.colorChanged.connect(self.update_plots)
+                    style_combo.currentTextChanged.connect(self.update_plots)
+                    show_check.stateChanged.connect(self.update_plots)
                 
-                self.update_all_plots()
-                self.on_selection_changed() # Add temp row
+                self.update_plots()
 
             except FileNotFoundError as e:
                 QMessageBox.critical(self, "Error", f"Could not find project path from session file:\n{e}")

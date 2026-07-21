@@ -17,7 +17,9 @@ class DataManager:
         self.data.clear()
         self.warnings = []
         
-        all_cols = set()
+        all_cols = []
+        # Use a set for quick lookups of columns already added
+        seen_cols = set()
         for study_name, system_list in studies.items():
             self.data[study_name] = {}
             for system_name in system_list:
@@ -31,11 +33,14 @@ class DataManager:
                 df = LammpsParser.extract_thermo_data(log_files[0])
                 if df is not None and not df.empty:
                     self.data[study_name][system_name] = df
-                    all_cols.update(df.columns)
+                    for col in df.columns:
+                        if col not in seen_cols:
+                            all_cols.append(col)
+                            seen_cols.add(col)
                 else:
                     self.warnings.append(f"Could not parse thermo data for: {study_name}/{system_name}")
         
-        self.available_columns = sorted(list(all_cols))
+        self.available_columns = all_cols
 
     def get_study_names(self) -> List[str]:
         return sorted(list(self.data.keys()))
