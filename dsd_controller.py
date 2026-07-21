@@ -72,14 +72,34 @@ class DSDController(QObject):
         
     def set_active_system(self, study, system):
         if self.current_study != study or self.current_system != system:
-            # 1. Capture current range and position before switching
-            old_ts = self.current_timestep
-            old_range = (self.timesteps[0], self.timesteps[-1]) if self.timesteps else (None, None)
+            # 1. Capture current state for Hybrid Conservation
+            old_start_val = self.timesteps[0] if self.timesteps else 0
             
-            try:
-                old_idx = self.timesteps.index(self.current_timestep) if self.timesteps else 0
-            except ValueError:
-                old_idx = 0
+            pct_window = 1.0 # Default to showing 100% of remaining
+            pct_current = 0.0 # Default to start of window
+            
+            if self.timesteps and self.full_timesteps:
+                # A. Calculate "Percentage of Remaining" for the Final Step
+                # How much of the available future did we see?
+                try:
+                    # We use values to find indices in the full list to be robust
+                    old_full_start_idx = self.full_timesteps.index(self.timesteps[0])
+                    old_full_end_idx = self.full_timesteps.index(self.timesteps[-1])
+                    old_total_remaining = len(self.full_timesteps) - 1 - old_full_start_idx
+                    
+                    if old_total_remaining > 0:
+                        current_window_len = old_full_end_idx - old_full_start_idx
+                        pct_window = current_window_len / old_total_remaining
+                except ValueError:
+                    pass
+
+                # B. Calculate "Percentage of Window" for the Current Step
+                if len(self.timesteps) > 1:
+                    try:
+                        curr_in_window_idx = self.timesteps.index(self.current_timestep)
+                        pct_current = curr_in_window_idx / (len(self.timesteps) - 1)
+                    except ValueError:
+                        pass
 
             self.current_study = study
             self.current_system = system
@@ -98,29 +118,38 @@ class DSDController(QObject):
                     self.full_timesteps = []
             else:
                 self.full_timesteps = self.data_manager.get_timesteps(study, system)
-
-            # 2. Conserve the Range
-            if self.full_timesteps and old_range[0] is not None:
-                full_arr = np.array(self.full_timesteps)
-                # Find closest matches for the old start and end
-                idx_min = (np.abs(full_arr - old_range[0])).argmin()
-                idx_max = (np.abs(full_arr - old_range[1])).argmin()
-                if idx_min > idx_max: idx_min, idx_max = idx_max, idx_min
-                self.timesteps = self.full_timesteps[idx_min : idx_max + 1]
-            else:
-                self.timesteps = list(self.full_timesteps)
             
             self.data_manager.clear_cache()
             
-            # 3. Match Timestep by Value first, then Index
-            if self.timesteps:
-                if old_ts in self.timesteps:
-                    self.current_timestep = old_ts
-                elif old_idx < len(self.timesteps):
-                    self.current_timestep = self.timesteps[old_idx]
+            # 2. Apply Hybrid Range Conservation
+            if self.full_timesteps:
+                full_arr = np.array(self.full_timesteps)
+                
+                # A. New Initial (Absolute)
+                # Find closest match to old absolute start value
+                new_start_idx = (np.abs(full_arr - old_start_val)).argmin()
+                
+                # B. New Final (Percentage of Remaining)
+                new_total_remaining = len(self.full_timesteps) - 1 - new_start_idx
+                if new_total_remaining > 0:
+                    new_window_len = int(new_total_remaining * pct_window)
+                    new_end_idx = new_start_idx + new_window_len
                 else:
-                    self.current_timestep = self.timesteps[-1]
+                    new_end_idx = new_start_idx
+                
+                # Clamp
+                new_end_idx = min(new_end_idx, len(self.full_timesteps) - 1)
+                
+                self.timesteps = self.full_timesteps[new_start_idx : new_end_idx + 1]
+                
+                # C. New Current (Percentage of Window)
+                if len(self.timesteps) > 1:
+                    new_curr_idx = int(pct_current * (len(self.timesteps) - 1))
+                    self.current_timestep = self.timesteps[new_curr_idx]
+                else:
+                    self.current_timestep = self.timesteps[0]
             else:
+                self.timesteps = []
                 self.current_timestep = 0
 
             if self.is_playing:

@@ -935,6 +935,29 @@ class DSDPlotPanel(QWidget):
         p_path = self.main_window.path_edit.text()
         if not p_path: return False
         
+        # Calculate percentages for robust restoration (Hybrid Mode)
+        final_pct = 1.0
+        current_pct = 0.0
+        
+        if self.controller and self.controller.full_timesteps and self.controller.timesteps:
+            try:
+                # Percentage of remaining trajectory used
+                full_arr = np.array(self.controller.full_timesteps)
+                start_val = self.controller.timesteps[0]
+                end_val = self.controller.timesteps[-1]
+                
+                start_idx = (np.abs(full_arr - start_val)).argmin()
+                end_idx = (np.abs(full_arr - end_val)).argmin()
+                
+                total_remaining = len(self.controller.full_timesteps) - 1 - start_idx
+                if total_remaining > 0:
+                    final_pct = (end_idx - start_idx) / total_remaining
+            except: pass
+            
+        if self.controller and len(self.controller.timesteps) > 1:
+             curr_idx = self.player_controls.slider.value()
+             current_pct = curr_idx / (len(self.controller.timesteps) - 1)
+
         session_data = {
             'type': 'dsd',
             'project_path': self.main_window.path_edit.text(),
@@ -955,17 +978,14 @@ class DSDPlotPanel(QWidget):
                 'options': self.get_options(),
                 'initial_step': self.controller.timesteps[0] if self.controller.timesteps else None,
                 'final_step': self.controller.timesteps[-1] if self.controller.timesteps else None,
+                'final_step_pct': final_pct,
                 'current_step_index': self.player_controls.slider.value(),
+                'current_step_pct': current_pct,
                 'last_target_strain': getattr(self.controller, 'last_target_strain', None)
             }
         }
         
         return SettingsManager.save_state(path, session_data)
-        if success:
-            print(f"[System] Saved session: {path} for mode DSD Mode")
-        else:
-            print(f"[System] Failed to save session: {path}")
-        return success
 
     def load_session_from_file(self, path):
         if not path or not os.path.exists(path): return
@@ -1053,41 +1073,63 @@ class DSDPlotPanel(QWidget):
                 if self.save_session_to_file(path):
                     print(f"[System] Relocation successful. Session file updated: {path}")
             
-            # 2. Establish System Selection
+            # 2. Establish Base Configuration
             g_opts = data.get('global_options', {})
             
-            # Force controller to refresh timesteps even if study/system names match previous state
-            self.controller.current_study = None
-            self.controller.current_system = None
+            # Restore Plot Type FIRST to unlock "Strain average" in the systems dropdown
+            self.plot_type_combo.setCurrentText(g_opts.get('plot_type', 'Displacement plot'))
             
             self.study_combo.blockSignals(True)
             self.system_combo.blockSignals(True)
             
             self.study_combo.setCurrentText(g_opts.get('study', 'Select Study'))
             self.on_study_changed(self.study_combo.currentText())
+            
+            # Now "Strain average" is guaranteed to be in the list if the study has > 1 system
             self.system_combo.setCurrentText(g_opts.get('system', 'Select System'))
             self.on_system_changed(self.system_combo.currentText())
             
             self.study_combo.blockSignals(False)
             self.system_combo.blockSignals(False)
             
-            # --- Restore Range AFTER system is selected to prevent clamping ---
+            # --- Restore Range (Hybrid Logic) ---
             init_s = g_opts.get('initial_step')
             final_s = g_opts.get('final_step')
-            if init_s is not None and final_s is not None:
-                new_steps = self.controller.set_timestep_range(init_s, final_s)
-                if new_steps:
-                    self.player_controls.set_timesteps(new_steps)
+            final_pct = g_opts.get('final_step_pct')
 
-            # --- Restore Time Step AFTER range is set ---
+            if init_s is not None:
+                # If we have a percentage and full timesteps, use the Hybrid calculation
+                if final_pct is not None and self.controller.full_timesteps:
+                     try:
+                         full_arr = np.array(self.controller.full_timesteps)
+                         start_idx = (np.abs(full_arr - init_s)).argmin()
+                         total_remaining = len(self.controller.full_timesteps) - 1 - start_idx
+                         
+                         if total_remaining > 0:
+                             window_len = int(total_remaining * final_pct)
+                             end_idx = min(start_idx + window_len, len(self.controller.full_timesteps) - 1)
+                             final_s = self.controller.full_timesteps[end_idx]
+                     except: pass
+                
+                # Apply range (using either the calculated final_s or the absolute fallback)
+                if final_s is not None:
+                    new_steps = self.controller.set_timestep_range(init_s, final_s)
+                    if new_steps:
+                        self.player_controls.set_timesteps(new_steps)
+
+            # --- Restore Time Step (Percentage of Window) ---
             step_idx = g_opts.get('current_step_index', 0)
+            curr_pct = g_opts.get('current_step_pct')
+            
+            if curr_pct is not None and self.controller.timesteps:
+                step_idx = int(curr_pct * (len(self.controller.timesteps) - 1))
+            
             self.controller.set_timestep_index(step_idx)
             self.player_controls.set_step_index(step_idx)
             
             # 3. Establish Axis Selections
             self.slice_axis_combo.setCurrentText(g_opts.get('slice_axis', 'Select Axis'))
             self.observe_axis_combo.setCurrentText(g_opts.get('observe_axis', 'Select Axis'))
-            self.plot_type_combo.setCurrentText(g_opts.get('plot_type', 'Displacement plot'))
 
             # 4. Configure Filter (Now that axes are ready)
             z_col = g_opts.get('z_filter_col', 'No Z-Filter')

@@ -200,49 +200,55 @@ class AutoIndexDialog(QDialog):
         
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            path_str = item.data(Qt.ItemDataRole.UserRole)
-            if not path_str: continue
-            
-            fpath = Path(path_str)
-            idx_path = fpath.with_suffix(fpath.suffix + ".idx")
-            bg_color = "#ef9a9a" # Unloaded
-            
-            if idx_path.exists():
-                bg_color = "#fff59d" # Trj Indexed
-                try:
-                    if os.path.getmtime(fpath) <= os.path.getmtime(idx_path):
-                        with open(idx_path, 'r') as f:
-                            idx_data = json.load(f)
-                        
-                        lib = idx_data.get('results_library', {})
-                        
-                        if self.dsd_config and self.dsd_config.get('domains'):
-                            # Use UI initial step but simulation's available frames
-                            idx_map = idx_data.get('index', {})
-                            if idx_map:
-                                sim_steps = sorted([int(k) for k in idx_map.keys()])
-                                
-                                # Construct a virtual timestep list starting at user's initial step
-                                # but using the simulation's available steps
-                                ui_start = self.dsd_config['timesteps'][0] if self.dsd_config.get('timesteps') else sim_steps[0]
-                                
-                                # Find index of closest step in simulation to UI start
-                                full_arr = np.array(sim_steps)
-                                start_idx = (np.abs(full_arr - ui_start)).argmin()
-                                
-                                # The hashes depend on the Initial Step.
-                                # Check if results starting at THIS specific initial step are ready.
-                                check_steps = sim_steps[start_idx:]
-                                
-                                req_hashes = dm.get_required_hashes(
-                                    self.dsd_config['domains'], check_steps,
-                                    self.dsd_config['slice_axis'], self.dsd_config['observe_axis'], 
-                                    self.dsd_config['options']
-                                )
-                                if req_hashes and all(h in lib for h in req_hashes):
-                                    bg_color = "#a5d6a7" # Full DSD Ready
-                except: pass
-            item.setBackground(QColor(bg_color))
+            self._update_single_item_status(item, dm)
+
+    def _update_single_item_status(self, item, dm=None):
+        from dsd_data_manager import DSDDataManager
+        if dm is None: dm = DSDDataManager()
+
+        path_str = item.data(Qt.ItemDataRole.UserRole)
+        if not path_str: return
+        
+        fpath = Path(path_str)
+        idx_path = fpath.with_suffix(fpath.suffix + ".idx")
+        bg_color = "#ef9a9a" # Unloaded
+        
+        if idx_path.exists():
+            bg_color = "#fff59d" # Trj Indexed
+            try:
+                if os.path.getmtime(fpath) <= os.path.getmtime(idx_path):
+                    with open(idx_path, 'r') as f:
+                        idx_data = json.load(f)
+                    
+                    lib = idx_data.get('results_library', {})
+                    
+                    if self.dsd_config and self.dsd_config.get('domains'):
+                        # Use UI initial step but simulation's available frames
+                        idx_map = idx_data.get('index', {})
+                        if idx_map:
+                            sim_steps = sorted([int(k) for k in idx_map.keys()])
+                            
+                            # Construct a virtual timestep list starting at user's initial step
+                            # but using the simulation's available steps
+                            ui_start = self.dsd_config['timesteps'][0] if self.dsd_config.get('timesteps') else sim_steps[0]
+                            
+                            # Find index of closest step in simulation to UI start
+                            full_arr = np.array(sim_steps)
+                            start_idx = (np.abs(full_arr - ui_start)).argmin()
+                            
+                            # The hashes depend on the Initial Step.
+                            # Check if results starting at THIS specific initial step are ready.
+                            check_steps = sim_steps[start_idx:]
+                            
+                            req_hashes = dm.get_required_hashes(
+                                self.dsd_config['domains'], check_steps,
+                                self.dsd_config['slice_axis'], self.dsd_config['observe_axis'], 
+                                self.dsd_config['options']
+                            )
+                            if req_hashes and all(h in lib for h in req_hashes):
+                                bg_color = "#a5d6a7" # Full DSD Ready
+            except: pass
+        item.setBackground(QColor(bg_color))
 
     def _set_all_checks(self, state):
         for i in range(self.list_widget.count()): self.list_widget.item(i).setCheckState(state)
@@ -283,6 +289,8 @@ class AutoIndexDialog(QDialog):
                 item_path = Path(item.data(Qt.ItemDataRole.UserRole))
                 if item_path.samefile(done_path):
                     item.setCheckState(Qt.CheckState.Unchecked)
+                    item.setSelected(False)
+                    self._update_single_item_status(item)
                     break
         except: pass
 
