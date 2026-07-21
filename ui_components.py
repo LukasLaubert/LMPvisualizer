@@ -3,7 +3,7 @@
 from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget,
                              QDialogButtonBox, QHeaderView, QTableWidgetItem,
                              QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog,
-                             QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication)
+                             QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication, QStyledItemDelegate)
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtCore import pyqtSignal, Qt, QEvent
 
@@ -224,6 +224,17 @@ class ChipInputWidget(QWidget):
             if isinstance(widget, Chip):
                 widget.set_bold(widget.text in successful_keywords)
 
+    def set_chips(self, chips: list):
+        """Replaces all current chips with the provided list."""
+        # Remove all existing chips
+        while self._chips:
+            # Remove the first chip repeatedly until empty
+            self.remove_chip(self._chips[0])
+        
+        # Add new chips
+        for chip in chips:
+            self.add_chip(chip)
+
 class DraggableTableWidget(QTableWidget):
     """A QTableWidget that supports drag and drop reordering of rows."""
     rowsReordered = pyqtSignal()
@@ -318,3 +329,19 @@ class DraggableTableWidget(QTableWidget):
 
         # Call parent dropEvent if we didn't handle it
         super().dropEvent(event)
+
+class RightClickButton(QPushButton):
+    rightClicked = pyqtSignal()
+
+    def mousePressEvent(self, event: QEvent):
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.RightButton:
+                self.rightClicked.emit()
+            else:
+                super().mousePressEvent(event)
+
+class NoNewLineDelegate(QStyledItemDelegate):
+    """Helper to replace newlines with spaces in the dropdown list view."""
+    def displayText(self, value, locale):
+        text = super().displayText(value, locale)
+        return text.replace('\n', ' ')
