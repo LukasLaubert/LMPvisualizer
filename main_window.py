@@ -86,14 +86,14 @@ class MainWindow(QMainWindow):
         self.studies_label = QLabel("Studies: 0")
         self.systems_label = QLabel("Systems: 0")
         self.units_label = QLabel("Unit: N/A")
-        self.timestep_label = QLabel("Timestep: 1.0")
+        self.timestep_label = QLabel("Timestep: N/A")
         
         for lbl in [self.studies_label, self.systems_label, self.units_label, self.timestep_label]:
             lbl.setStyleSheet("color: #444;")
             info_layout.addWidget(lbl)
         
         row1_container.addLayout(info_layout)
-        top_controls_layout.addLayout(row1_container, 1, 1, 1, 2)
+        top_controls_layout.addLayout(row1_container, 1, 1, 1, 3)
 
         main_layout.addWidget(top_controls_group)
 

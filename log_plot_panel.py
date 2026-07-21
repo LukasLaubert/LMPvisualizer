@@ -19,10 +19,11 @@ from log_parser import LogParser
 from log_data_manager import LogDataManager
 from log_controller import LogController
 from settings_manager import SettingsManager
-from ui_components import ColorButton, InconsistentDataDialog, RightClickButton
+from ui_components import ColorButton, InconsistentDataDialog, RightClickButton, NoNewLineDelegate
 from global_label_editor_dialog import GlobalLabelEditorDialog
 from custom_property_dialog import CustomPropertyDialog
 from popout_window import PopOutWindow
+from fit_dialog import FitFunctionDialog
 
 class LogPlotPanel(QWidget):
     def __init__(self, main_window_ref):
@@ -41,6 +42,12 @@ class LogPlotPanel(QWidget):
         self.custom_properties = {} # Name -> Formula
         self.scale_lock_enabled = False
         
+        # Fit Feature Properties
+        self.fit_dialogs = {} # row_id -> FitFunctionDialog instance
+        self.fit_results = {} # row_id -> result dict (x, y, error, params)
+        self.fit_table_visible = False
+        self.next_fit_id = 0 # Unique ID for fit rows to track dialogs reliably
+
         # Track loaded path to prevent clearing data on mode switch
         self.loaded_path = None 
 
@@ -132,6 +139,14 @@ class LogPlotPanel(QWidget):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0,0,0,0)
         
+        # We need a vertical splitter for Plot Table (top) and Fit Table (bottom)
+        self.right_splitter = QSplitter(Qt.Orientation.Vertical)
+        
+        # --- Top Table Container ---
+        top_table_container = QWidget()
+        top_table_layout = QVBoxLayout(top_table_container)
+        top_table_layout.setContentsMargins(0,0,0,0)
+        
         self.plot_table = QTableWidget()
         self.plot_table.setColumnCount(9)
         self.plot_table.setHorizontalHeaderLabels(["↨", "Plot", "Orig", "Mean", "Std", "", "Style", "thk", "Del"])
@@ -160,8 +175,32 @@ class LogPlotPanel(QWidget):
         header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         header.customContextMenuRequested.connect(self._show_mean_header_context_menu)
         header.sectionClicked.connect(self._on_header_clicked)
-        right_layout.addWidget(self.plot_table)
+        
+        top_table_layout.addWidget(self.plot_table)
 
+        # --- Fit Control Bar (Middle) - Defined BEFORE adding to layout ---
+        self.fit_control_widget = QWidget()
+        fit_control_layout = QHBoxLayout(self.fit_control_widget)
+        fit_control_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.show_fit_btn = QPushButton("Start Curve Fitting")
+        self.show_fit_btn.clicked.connect(self._toggle_fit_ui)
+        
+        self.add_fit_btn = QPushButton("Add Fit")
+        self.add_fit_btn.clicked.connect(self.add_fit_row)
+        self.hide_fit_btn = QPushButton("Hide Fitting")
+        self.hide_fit_btn.clicked.connect(self._toggle_fit_ui)
+        
+        self.add_fit_btn.hide()
+        self.hide_fit_btn.hide()
+        
+        fit_control_layout.addWidget(self.show_fit_btn)
+        fit_control_layout.addWidget(self.add_fit_btn)
+        fit_control_layout.addWidget(self.hide_fit_btn)
+        
+        top_table_layout.addWidget(self.fit_control_widget)
+
+        # --- Table Buttons (Save/Load/Exit) ---
         self.save_btn = QPushButton("Save")
         self.load_btn = QPushButton("Load")
         self.exit_btn = QPushButton("Exit")
@@ -169,7 +208,47 @@ class LogPlotPanel(QWidget):
         table_buttons_layout.addWidget(self.save_btn)
         table_buttons_layout.addWidget(self.load_btn)
         table_buttons_layout.addWidget(self.exit_btn)
-        right_layout.addLayout(table_buttons_layout)
+        # Note: Added to right_layout later to ensure it's at the bottom
+        
+        self.right_splitter.addWidget(top_table_container)
+
+        # --- Fit Table (Bottom) ---
+        self.fit_table_container = QWidget()
+        fit_table_layout = QVBoxLayout(self.fit_table_container)
+        fit_table_layout.setContentsMargins(0,0,0,0)
+        
+        self.fit_table = QTableWidget()
+        self.fit_table.setColumnCount(9)
+        self.fit_table.setHorizontalHeaderLabels(["↨", "Plot", "Type", "Fit Fun", "Err", "", "Style", "thk", "Del"])
+        f_header = self.fit_table.horizontalHeader()
+        f_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        f_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch) # Plot name
+        f_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed) # Type (Previously 3)
+        f_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch) # Fit Fun (Previously 2)
+        f_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        f_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        f_header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+        f_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
+        f_header.setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)
+        
+        self.fit_table.setColumnWidth(0, 10)
+        self.fit_table.setColumnWidth(2, 55) # Width for Type
+        # Col 3 is now stretch (Function)
+        self.fit_table.setColumnWidth(4, 50)
+        self.fit_table.setColumnWidth(5, 10)
+        self.fit_table.setColumnWidth(6, 35)
+        self.fit_table.setColumnWidth(7, 25)
+        self.fit_table.setColumnWidth(8, 25)
+        self.fit_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.fit_table.verticalHeader().hide()
+        
+        fit_table_layout.addWidget(self.fit_table)
+        
+        self.fit_table_container.hide() # Hidden by default
+        self.right_splitter.addWidget(self.fit_table_container)
+        
+        right_layout.addWidget(self.right_splitter)
+        right_layout.addLayout(table_buttons_layout) # Buttons always at bottom
 
         main_splitter.addWidget(left_panel)
         main_splitter.addWidget(right_panel)
@@ -198,6 +277,318 @@ class LogPlotPanel(QWidget):
         self.plot_table.cellDoubleClicked.connect(self._on_table_double_click)
         
         self.popout_btn.clicked.connect(self.launch_popout_window)
+
+    def _toggle_fit_ui(self):
+        self.fit_table_visible = not self.fit_table_visible
+        
+        if self.fit_table_visible:
+            self.show_fit_btn.hide()
+            self.add_fit_btn.show()
+            self.hide_fit_btn.show()
+            self.fit_table_container.show()
+            
+            if self.fit_table.rowCount() == 0:
+                self.add_fit_row()
+        else:
+            self.show_fit_btn.show()
+            self.add_fit_btn.hide()
+            self.hide_fit_btn.hide()
+            self.fit_table_container.hide()
+            
+        self.update_plots()
+
+    def add_fit_row(self, target_fit_id=None):
+        # QPushButton.clicked emits 'False'. We must ignore this bool to generate a new ID.
+        if isinstance(target_fit_id, bool):
+            target_fit_id = None
+
+        row = self.fit_table.rowCount()
+        self.fit_table.insertRow(row)
+        
+        # Determine ID
+        if target_fit_id is not None:
+            fit_id = target_fit_id
+        else:
+            fit_id = self.next_fit_id
+            self.next_fit_id += 1
+        
+        # 1. Store ID in the Item (Source of Truth)
+        id_item = QTableWidgetItem()
+        id_item.setData(Qt.ItemDataRole.UserRole, fit_id)
+        self.fit_table.setItem(row, 0, id_item)
+        
+        # 2. Setup Widgets
+        self.fit_table.setCellWidget(row, 0, self._create_fit_move_widget())
+        
+        # Plot Combo
+        plot_combo = QComboBox()
+        plot_combo.currentIndexChanged.connect(self.update_plots)
+        self.fit_table.setCellWidget(row, 1, plot_combo)
+        
+        # Type Combo
+        type_combo = QComboBox()
+        type_combo.addItems(["Off", "Orig"])
+        type_combo.setProperty("fit_id", fit_id) # Tag for signal handling
+        type_combo.currentIndexChanged.connect(self._on_fit_type_changed)
+        self.fit_table.setCellWidget(row, 2, type_combo)
+
+        # Fit Fun Button
+        fun_btn = QPushButton("a*x + b")
+        fun_btn.setProperty("fit_id", fit_id) # Tag for signal handling
+        fun_btn.clicked.connect(self._on_fit_fun_clicked)
+        self.fit_table.setCellWidget(row, 3, fun_btn)
+        
+        # Error Label
+        err_label = QLabel("N/A")
+        err_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        err_label.setProperty("fit_id", fit_id) # Tag
+        self.fit_table.setCellWidget(row, 4, err_label)
+        
+        # Color
+        color_btn = ColorButton(QColor("gray"))
+        color_btn.colorChanged.connect(self.update_plots)
+        self.fit_table.setCellWidget(row, 5, color_btn)
+        
+        # Style
+        style_combo = self._create_style_combo()
+        style_combo.setCurrentText("Dash")
+        style_combo.currentTextChanged.connect(self.update_plots)
+        self.fit_table.setCellWidget(row, 6, style_combo)
+        
+        # Thickness
+        thk_edit = QLineEdit("1")
+        thk_edit.setValidator(QIntValidator(1, 10))
+        thk_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        thk_edit.textChanged.connect(self.update_plots)
+        self.fit_table.setCellWidget(row, 7, self._create_centered_widget(thk_edit))
+        
+        # Delete Button
+        del_btn = QPushButton("X")
+        del_btn.setStyleSheet("color: red; font-weight: bold;")
+        del_btn.setProperty("fit_id", fit_id) # Tag
+        del_btn.clicked.connect(self.delete_fit_row)
+        self.fit_table.setCellWidget(row, 8, self._create_centered_widget(del_btn))
+        
+        # Initialize Independent Dialog
+        # Use default arg fid=fit_id to capture the specific integer for this row
+        dialog = FitFunctionDialog(self)
+        dialog.fitUpdated.connect(lambda res, fid=fit_id: self._on_fit_updated(fid, res))
+        self.fit_dialogs[fit_id] = dialog
+        
+        self._update_fit_source_combos()
+        self._update_fit_type_combos()
+        
+        type_combo.setCurrentIndex(0)
+
+    def _on_fit_type_changed(self):
+        """Handle changes in the Fit Type dropdown (Off/Orig/Mean)."""
+        sender = self.sender()
+        if not isinstance(sender, QComboBox): return
+        
+        fit_id = sender.property("fit_id")
+        text = sender.currentText()
+        
+        if text == "Off":
+            # Just update plots to hide it
+            self.update_plots()
+        else:
+            # 1. Update plots to ensure the Dialog receives the correct Data (Mean vs Orig)
+            #    based on the new selection.
+            self.update_plots()
+            
+            # 2. Trigger calculation automatically
+            if fit_id in self.fit_dialogs:
+                # The dialog data was updated by the call to self.update_plots() above
+                self.fit_dialogs[fit_id].calculate_fit()
+
+    def delete_fit_row(self):
+        btn = self.sender()
+        if not btn: return
+        
+        # Identify by the ID attached to the specific button clicked
+        fit_id = btn.property("fit_id")
+        
+        # Find the row that visually holds this ID
+        row_to_del = -1
+        for r in range(self.fit_table.rowCount()):
+            item = self.fit_table.item(r, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == fit_id:
+                row_to_del = r
+                break
+        
+        if row_to_del != -1:
+            self.fit_table.removeRow(row_to_del)
+        
+        # Clean up memory
+        if fit_id in self.fit_dialogs:
+            self.fit_dialogs[fit_id].close()
+            del self.fit_dialogs[fit_id]
+        if fit_id in self.fit_results:
+            del self.fit_results[fit_id]
+            
+        self.update_plots()
+
+    def _create_fit_move_widget(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        up_btn = QPushButton("▲")
+        down_btn = QPushButton("▼")
+        
+        # Connect buttons to movement slots
+        up_btn.clicked.connect(self.move_fit_row_up)
+        down_btn.clicked.connect(self.move_fit_row_down)
+        
+        layout.addWidget(up_btn)
+        layout.addWidget(down_btn)
+        return widget
+
+    def move_fit_row_up(self):
+        button = self.sender()
+        if button:
+            parent_widget = button.parentWidget()
+            pos = parent_widget.mapTo(self.fit_table.viewport(), QPoint(0,0))
+            row = self.fit_table.indexAt(pos).row()
+            if row > 0:
+                self.swap_fit_rows(row, row - 1)
+
+    def move_fit_row_down(self):
+        button = self.sender()
+        if button:
+            parent_widget = button.parentWidget()
+            pos = parent_widget.mapTo(self.fit_table.viewport(), QPoint(0,0))
+            row = self.fit_table.indexAt(pos).row()
+            if row < self.fit_table.rowCount() - 1:
+                self.swap_fit_rows(row, row + 1)
+
+    def swap_fit_rows(self, r1, r2):
+        self.fit_table.blockSignals(True)
+        
+        # 1. Swap ID Items (The Data)
+        item1 = self.fit_table.item(r1, 0)
+        item2 = self.fit_table.item(r2, 0)
+        id1 = item1.data(Qt.ItemDataRole.UserRole)
+        id2 = item2.data(Qt.ItemDataRole.UserRole)
+        item1.setData(Qt.ItemDataRole.UserRole, id2)
+        item2.setData(Qt.ItemDataRole.UserRole, id1)
+
+        # 2. Update Widget Properties (The Signals)
+        # We must re-tag the widgets so they point to their new location's ID
+        for r, fid in [(r1, id2), (r2, id1)]:
+            self.fit_table.cellWidget(r, 2).setProperty("fit_id", fid) # Type
+            self.fit_table.cellWidget(r, 3).setProperty("fit_id", fid) # Fun Btn
+            self.fit_table.cellWidget(r, 4).setProperty("fit_id", fid) # Err Lbl
+            # Del Btn is inside a container
+            container = self.fit_table.cellWidget(r, 8)
+            if container:
+                btn = container.findChild(QPushButton)
+                if btn: btn.setProperty("fit_id", fid)
+
+        # 3. Swap Visual Values
+        def swap_combo(c):
+            w1 = self.fit_table.cellWidget(r1, c)
+            w2 = self.fit_table.cellWidget(r2, c)
+            t1, t2 = w1.currentText(), w2.currentText()
+            w1.setCurrentText(t2)
+            w2.setCurrentText(t1)
+        
+        swap_combo(1) # Plot Combo
+        swap_combo(2) # Type Combo
+        swap_combo(6) # Style Combo
+        
+        # Swap Button Text
+        btn1 = self.fit_table.cellWidget(r1, 3)
+        btn2 = self.fit_table.cellWidget(r2, 3)
+        txt1, txt2 = btn1.text(), btn2.text()
+        btn1.setText(txt2)
+        btn2.setText(txt1)
+        
+        # Swap Error Label Text
+        lbl1 = self.fit_table.cellWidget(r1, 4)
+        lbl2 = self.fit_table.cellWidget(r2, 4)
+        txt1, txt2 = lbl1.text(), lbl2.text()
+        lbl1.setText(txt2)
+        lbl2.setText(txt1)
+        
+        # Swap Colors
+        col1 = self.fit_table.cellWidget(r1, 5)
+        col2 = self.fit_table.cellWidget(r2, 5)
+        c1, c2 = col1.color(), col2.color()
+        col1.set_color(c2)
+        col2.set_color(c1)
+        
+        # Swap Thickness
+        thk1 = self.fit_table.cellWidget(r1, 7).findChild(QLineEdit)
+        thk2 = self.fit_table.cellWidget(r2, 7).findChild(QLineEdit)
+        v1, v2 = thk1.text(), thk2.text()
+        thk1.setText(v2)
+        thk2.setText(v1)
+
+        self.fit_table.blockSignals(False)
+        self.update_plots()
+
+    def _update_fit_source_combos(self):
+        options = []
+        for r in range(self.plot_table.rowCount()):
+            text = self._get_row_display_name(r)
+            options.append(text)
+            
+        for r in range(self.fit_table.rowCount()):
+            combo = self.fit_table.cellWidget(r, 1)
+            # Apply delegate if needed
+            if not isinstance(combo.view().itemDelegate(), NoNewLineDelegate):
+                combo.setItemDelegate(NoNewLineDelegate(combo))
+            
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(options)
+            if current in options:
+                combo.setCurrentText(current)
+            elif options:
+                combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+
+    def _on_fit_fun_clicked(self):
+        btn = self.sender()
+        fit_id = btn.property("fit_id")
+        if fit_id in self.fit_dialogs:
+            dialog = self.fit_dialogs[fit_id]
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+
+    def _on_fit_updated(self, fit_id, result):
+        self.fit_results[fit_id] = result
+        
+        for r in range(self.fit_table.rowCount()):
+            item_id = self.fit_table.item(r, 0)
+            if not item_id: continue
+            
+            # Match purely by Integer ID
+            if item_id.data(Qt.ItemDataRole.UserRole) == fit_id:
+                val = result.get('final_error', float('inf'))
+                
+                err_lbl = self.fit_table.cellWidget(r, 4)
+                if err_lbl:
+                    if val > 1e15:
+                        err_lbl.setText("Fail")
+                    else:
+                        err_lbl.setText(f"{val:.2e}")
+                
+                # Update Button Text with formula
+                func_str = "Fit..."
+                if fit_id in self.fit_dialogs:
+                    func_str = self.fit_dialogs[fit_id].func_input.text()
+                
+                btn = self.fit_table.cellWidget(r, 3)
+                if btn:
+                    display_text = (func_str[:12] + "...") if len(func_str) > 12 else func_str
+                    btn.setText(display_text)
+                break
+        
+        self.update_plots()
 
     # --- Public Interface for MainWindow ---
     
@@ -1363,20 +1754,38 @@ class LogPlotPanel(QWidget):
         self._update_plot_labels()
 
     def update_plots(self):
+        """
+        Main function to refresh the plot widget. 
+        It handles data fetching, processing (averaging/smoothing), 
+        caching for curve fitting, and rendering both original data and fits.
+        """
+        # 1. Clear existing plots and reset view
         self.plot_controller.clear_all_plots()
+        
+        # [Fit Integration] Update sources for the fit table dropdowns so they match current plot names
+        self._update_fit_source_combos()
+        # [Fit Integration] Logic Change: Update available "Types" based on Source "Mean" availability
+        self._update_fit_type_combos()
+        
         selected_row_idx = self.plot_table.currentRow()
-
         all_plot_info = []
+        
+        # [Fit Integration] Cache to store source data (x, y) so fits can run even if source is hidden
+        plot_data_cache = {}
+
+        # --- A. Gather Configuration from Plot Table ---
         for row in range(self.plot_table.rowCount()):
             try:
                 item = self.plot_table.item(row, 1)
                 if not item: continue
 
                 plot_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
-                study, system, x_ax, y_ax = plot_name.split(' | ')
+                display_name = self._get_row_display_name(row) # Used to match fit source dropdowns
                 
+                study, system, x_ax, y_ax = plot_name.split(' | ')
                 is_valid = "N/A" not in [study, system, x_ax, y_ax]
 
+                # UI State Retrieval
                 show_original = self.plot_table.cellWidget(row, 2).findChild(QCheckBox).isChecked()
                 mean_text = self.plot_table.cellWidget(row, 3).findChild(QLineEdit).text()
                 mean_window = int(mean_text) if mean_text.isdigit() else 0
@@ -1387,24 +1796,34 @@ class LogPlotPanel(QWidget):
                 thickness = float(self.plot_table.cellWidget(row, 7).findChild(QLineEdit).text())
 
                 is_active = show_original or (mean_window > 0) or show_std
-
-                x_label = self.global_label_map.get(x_ax, x_ax)
-                y_label = self.global_label_map.get(y_ax, y_ax)
+                
+                # [Fit Integration] Check if this plot is a source for an ACTIVE fit
+                is_fit_source = False
+                if self.fit_table_visible:
+                    for fr in range(self.fit_table.rowCount()):
+                        src_combo = self.fit_table.cellWidget(fr, 1)
+                        # Type combo is at column 2
+                        type_combo = self.fit_table.cellWidget(fr, 2)
+                        # It is a source only if names match AND the fit type is NOT "Off"
+                        if src_combo and src_combo.currentText() == display_name and type_combo.currentText() != "Off":
+                            is_fit_source = True
+                            break
 
                 plot_info = {
-                    'row': row, 'plot_name': plot_name, 'study': study, 'system': system,
-                    'x_ax': x_ax, 'y_ax': y_ax, 'color': color, 'style': style, 'thickness': thickness,
+                    'row': row, 'plot_name': plot_name, 'display_name': display_name,
+                    'study': study, 'system': system, 'x_ax': x_ax, 'y_ax': y_ax, 
+                    'color': color, 'style': style, 'thickness': thickness,
                     'show_original': show_original, 'mean_window': mean_window, 'show_std': show_std,
                     'is_valid': is_valid, 'is_active': is_active,
-                    'x_label': x_label, 'y_label': y_label
+                    'is_fit_source': is_fit_source
                 }
                 all_plot_info.append(plot_info)
             except (ValueError, AttributeError, IndexError):
                 continue
         
-        # Determine the primary X-axis from the selected row
+        # --- Determine Preferred Axes (for View Locking) ---
         preferred_x_ax = None
-        selected_y_ax = None # To track the selected Y-axis for sorting
+        selected_y_ax = None 
 
         if selected_row_idx != -1 and selected_row_idx < len(all_plot_info):
             selected_plot_info = all_plot_info[selected_row_idx]
@@ -1412,65 +1831,59 @@ class LogPlotPanel(QWidget):
                 preferred_x_ax = selected_plot_info['x_ax']
                 selected_y_ax = selected_plot_info['y_ax']
 
-        # Fallback to the first active and valid plot if none is selected
         if not preferred_x_ax:
             for info in all_plot_info:
                 if info['is_active'] and info['is_valid']:
                     preferred_x_ax = info['x_ax']
                     break
         
-        # Sort plots to control Axis creation order in LogController.
-        # Logic: Process plots with the selected Y-axis LAST.
-        # This ensures the selected Y-axis becomes the "Right-most" (top-most) axis in the layout.
-        # Secondary sort by row index preserves table order within the same axis group.
+        # Sort plots: Selected Y-axis plots draw last (on top)
         all_plot_info.sort(key=lambda x: (x['y_ax'] == selected_y_ax if selected_y_ax else False, x['row']))
 
+        # --- B. Main Loop: Data Fetching, Caching, and Plotting ---
         for plot_info in all_plot_info:
-            if not (plot_info['is_valid'] and plot_info['is_active']):
+            if not plot_info['is_valid']: continue
+            
+            # [Optimization] Skip data fetch only if plot is HIDDEN AND NOT needed for a fit
+            if not plot_info['is_active'] and not plot_info['is_fit_source']:
                 continue
 
-            # Get custom labels for this row
+            # Resolve Labels
             x_label = self.global_label_map.get(plot_info['x_ax'], plot_info['x_ax'])
             y_label = self.global_label_map.get(plot_info['y_ax'], plot_info['y_ax'])
             
             z_offset = 100 if plot_info['row'] == selected_row_idx else 0
+            
+            # --- Consistency Check (Original Logic) ---
             user_choices = None
             if plot_info['system'] == 'average':
                 study_name = plot_info['study']
                 current_consistency = self.data_manager.check_data_consistency(study_name)
-
-                # If current_consistency is empty, the data is consistent.
                 if current_consistency:
-                    # Data is inconsistent, decide whether to show the dialog.
                     cached_data = self.average_user_choices.get(study_name)
-                    
                     if cached_data and cached_data.get('lengths') == current_consistency:
-                        # The inconsistency is the same as when the choice was saved. Reuse it.
                         user_choices = cached_data['choice']
                     else:
-                        # The inconsistency has changed or there's no cached choice. Show dialog.
-                        dialog = InconsistentDataDialog(current_consistency, self)
-                        if dialog.exec():
-                            user_choices = dialog.get_choices()
-                            # Cache the new choice and the current inconsistency fingerprint.
-                            self.average_user_choices[study_name] = {'choice': user_choices, 'lengths': current_consistency}
+                        if plot_info['is_active']:
+                            dialog = InconsistentDataDialog(current_consistency, self)
+                            if dialog.exec():
+                                user_choices = dialog.get_choices()
+                                self.average_user_choices[study_name] = {'choice': user_choices, 'lengths': current_consistency}
+                            else:
+                                continue 
                         else:
-                            continue # Skip this plot if user cancels dialog
-            
-            # Determine if we need to compute/fetch the raw inter-system standard deviation.
-            # This is True ONLY if:
-            # 1. System is 'average'
-            # 2. 'Std' checkbox is checked
-            # 3. Running mean window is 0 (or empty)
+                            continue
+
+            # Determine if we need to compute raw inter-system standard deviation
             compute_raw_std = (
                 plot_info['system'] == 'average' and 
                 plot_info['show_std'] and 
                 plot_info['mean_window'] == 0
             )
             
-            # Use the preferred x-axis for all plots to ensure consistency
             current_x_ax = preferred_x_ax or plot_info['x_ax']
 
+            # --- Fetch Data ---
             data = self.data_manager.get_plot_data(
                 plot_info['study'], plot_info['system'], current_x_ax, plot_info['y_ax'], 
                 compute_raw_std, user_choices
@@ -1478,84 +1891,229 @@ class LogPlotPanel(QWidget):
             
             if not data: continue
 
+            # [Fit Integration] Cache Data for Engine
+            try:
+                x_np = data['x'].to_numpy(dtype=float) if hasattr(data['x'], 'to_numpy') else np.array(data['x'], dtype=float)
+                y_np = data['y'].to_numpy(dtype=float) if hasattr(data['y'], 'to_numpy') else np.array(data['y'], dtype=float)
+            except ValueError:
+                continue 
+
+            plot_data_cache[plot_info['display_name']] = {
+                'x': x_np, 
+                'y': y_np, 
+                'color': plot_info['color'],
+                'mean_window': plot_info['mean_window'],
+                'raw_y_ax': plot_info['y_ax'],
+                'y_label': y_label
+            }
+
+            # [Fit Integration] Pre-calculate running mean if needed for fit (Mean Type)
+            running_mean_y = None
+            running_mean_x = None
+
+            if plot_info['mean_window'] >= 1:
+                running_mean_y = self._calculate_running_average(y_np, plot_info['mean_window'], 'mean')
+                len_diff = len(x_np) - len(running_mean_y)
+                if len_diff > 0:
+                    start_idx = len_diff // 2
+                    end_idx = len(x_np) - (len_diff - start_idx)
+                    running_mean_x = x_np[start_idx:end_idx]
+                else:
+                    running_mean_x = x_np
+                
+                plot_data_cache[plot_info['display_name']]['mean_x'] = running_mean_x
+                plot_data_cache[plot_info['display_name']]['mean_y'] = running_mean_y
+
+            # [Fit Integration] Barrier: If plot is hidden in table, stop here.
+            if not plot_info['is_active']:
+                continue
+
+            # --- Visualization Preparation ---
             data['y_col'] = plot_info['y_ax']
             data['y_label'] = y_label if y_label else plot_info['y_ax']
             
-            # Build legend name with custom labels
             display_x = x_label if x_label else plot_info['x_ax']
             display_y = y_label if y_label else plot_info['y_ax']
             legend_name = f"{plot_info['study']} | {plot_info['system']} | {display_x} | {display_y}"
 
-            original_x_np = data['x'].to_numpy() if hasattr(data['x'], 'to_numpy') else np.array(data['x'])
-            original_y_np = data['y'].to_numpy() if hasattr(data['y'], 'to_numpy') else np.array(data['y'])
-
+            # --- 1. Draw Original Data ---
             if plot_info['show_original']:
                 plot_data = data.copy()
-                # If compute_raw_std is False (e.g., mean_window > 0), explicitly remove any std data
-                # so we don't plot the raw inter-system variation.
-                # If it is True, the 'std' key in data will be used to plot the band.
-                if not compute_raw_std:
-                    plot_data['std'] = None
-                
+                if not compute_raw_std: plot_data['std'] = None
                 self.plot_controller.add_or_update_plot(
                     legend_name, plot_data, plot_info['color'], 
                     plot_info['style'], thickness=plot_info['thickness'],
                     layer_priority=z_offset
                 )
 
+            # --- 2. Draw Running Mean / Std Deviation ---
             if plot_info['mean_window'] >= 1:
-                running_mean_y = self._calculate_running_average(original_y_np, plot_info['mean_window'], 'mean')
-                
-                # Adjust x-axis data based on the output length, especially for 'valid_window'
-                len_diff = len(original_x_np) - len(running_mean_y)
-                if len_diff > 0:
-                    start_idx = len_diff // 2
-                    end_idx = len(original_x_np) - (len_diff - start_idx)
-                    running_mean_x = original_x_np[start_idx:end_idx]
-                else:
-                    running_mean_x = original_x_np
-
-                # For running mean (mean > 0), Std checkbox controls the running window std deviation
                 if plot_info['show_std']:
-                    running_std = self._calculate_running_average(original_y_np, plot_info['mean_window'], 'std')
+                    running_std = self._calculate_running_average(y_np, plot_info['mean_window'], 'std')
                     if running_std is not None and len(running_std) == len(running_mean_y):
                         std_data = {
-                            'x': running_mean_x, 'y': running_mean_y, 'std': running_std,
+                            'x': running_mean_x, 'y': running_mean_y, 'std': running_std, 
                             'y_col': plot_info['y_ax'], 'y_label': data['y_label']
                         }
                         std_color = QColor(plot_info['color'])
                         std_color.setHsv(std_color.hue(), int(std_color.saturation() * 0.66), int(std_color.value() * 0.5), int(std_color.alpha() * 0.5))
+                        
                         self.plot_controller.add_or_update_plot_with_custom_colors(
                             legend_name + "_running_mean_std", std_data, std_color, 
                             Qt.PenStyle.NoPen, layer_priority=1 + z_offset
                         )
                 
-                # Only draw the mean line if the window is > 0
                 if plot_info['mean_window'] > 0:
                     mean_color = QColor(plot_info['color'])
-                    # If original line is shown, make mean line 50% darker (current behavior)
-                    # If original line is NOT shown, make mean line only 20% darker than original
                     if plot_info['show_original']:
-                        # Original behavior: 50% darker
                         mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.5, mean_color.alphaF())
                     else:
-                        # New behavior: only 20% darker
                         mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.8, mean_color.alphaF())
-                    mean_data = {'x': running_mean_x, 'y': running_mean_y, 'std': None, 
-                                'y_col': plot_info['y_ax'], 'y_label': data['y_label']}
+                    
+                    mean_data = {
+                        'x': running_mean_x, 'y': running_mean_y, 'std': None, 
+                        'y_col': plot_info['y_ax'], 'y_label': data['y_label']
+                    }
                     self.plot_controller.add_or_update_plot_with_custom_colors(
-                        legend_name + "_running_mean", mean_data, mean_color,
+                        legend_name + "_running_mean", mean_data, mean_color, 
                         plot_info['style'], layer_priority=2 + z_offset, thickness=plot_info['thickness']
                     )
 
+        # --- C. Fit Plotting Loop ---
+        if self.fit_table_visible:
+            for r in range(self.fit_table.rowCount()):
+                try:
+                    # Robust lookup: Use Item Data as Source of Truth
+                    item_id = self.fit_table.item(r, 0)
+                    if not item_id: continue
+                    fit_id = item_id.data(Qt.ItemDataRole.UserRole)
+                    
+                    # Ensure we aren't processing a "False" ID (legacy safety)
+                    if fit_id is False: continue
+                    
+                    source_name = self.fit_table.cellWidget(r, 1).currentText()
+                    fit_type = self.fit_table.cellWidget(r, 2).currentText()
+                    
+                    if fit_type == "Off":
+                        continue
+
+                    if source_name not in plot_data_cache:
+                        continue
+                        
+                    src_data = plot_data_cache[source_name]
+                    
+                    # Visuals
+                    color_btn = self.fit_table.cellWidget(r, 5)
+                    # Auto-color logic
+                    if color_btn.color() == QColor("gray"):
+                        src_color = src_data['color']
+                        new_color = QColor(src_color)
+                        new_color.setHsvF(new_color.hueF(), new_color.saturationF(), max(0, new_color.valueF() * 0.75), new_color.alphaF())
+                        color_btn.blockSignals(True)
+                        color_btn.set_color(new_color)
+                        color_btn.blockSignals(False)
+                    
+                    fit_color = color_btn.color()
+                    style_text = self.fit_table.cellWidget(r, 6).currentText()
+                    style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
+                    thickness = float(self.fit_table.cellWidget(r, 7).findChild(QLineEdit).text())
+
+                    # Data Source Selection
+                    if fit_type == "Mean" and 'mean_x' in src_data:
+                        x_fit_src = src_data['mean_x']
+                        y_fit_src = src_data['mean_y']
+                    else:
+                        x_fit_src = src_data['x']
+                        y_fit_src = src_data['y']
+
+                    # Push Data to Dialog
+                    if fit_id in self.fit_dialogs:
+                        self.fit_dialogs[fit_id].set_data(x_fit_src, y_fit_src)
+                    
+                    # Plot Result
+                    if fit_id in self.fit_results:
+                        res = self.fit_results[fit_id]
+                        if res.get('status') in ['Success', 'Fit Poor / Failed']:
+                            legend = f"Fit: {source_name} ({fit_type}) [ID:{fit_id}]"
+                            
+                            fit_y_col = src_data.get('raw_y_ax', 'N/A')
+                            fit_y_label = src_data.get('y_label', 'N/A')
+                            
+                            fit_plot_data = {
+                                'x': res['x_fit'],
+                                'y': res['y_fit'],
+                                'std': None,
+                                'y_col': fit_y_col,
+                                'y_label': fit_y_label
+                            }
+                            
+                            self.plot_controller.add_or_update_plot_with_custom_colors(
+                                legend, fit_plot_data, fit_color, style, 
+                                layer_priority=200, thickness=thickness
+                            )
+                except Exception as e:
+                    print(f"Fit Plotting Error row {r}: {e}")
+                    continue
+
+        # --- Finalize View ---
         self.current_x_axis = preferred_x_ax
-        # Update axis labels and row visual states
-        self._update_axis_properties([p for p in all_plot_info if p['is_active'] and p['is_valid']], preferred_x_ax)
+        visible_plots = [p for p in all_plot_info if p['is_active'] and p['is_valid']]
+        
+        self._update_axis_properties(visible_plots, preferred_x_ax)
+        
         for row in range(self.plot_table.rowCount()):
             self._update_row_visual_state(row)
         
-        # Re-apply any active axis locks to the newly created plots
         self.plot_controller.apply_current_locks()
+
+    def _update_fit_type_combos(self):
+        """
+        New logic: Iterates through fit rows, checks if the selected source has a valid
+        Mean Window. If not, removes 'Mean' from the dropdown. If 'Mean' was selected
+        and is no longer valid, auto-switches to 'Orig'.
+        """
+        # 1. Build a map of Source Display Name -> HasValidMean
+        source_mean_map = {}
+        for r in range(self.plot_table.rowCount()):
+            display_name = self._get_row_display_name(r)
+            mean_widget = self.plot_table.cellWidget(r, 3)
+            has_valid_mean = False
+            if mean_widget:
+                txt = mean_widget.findChild(QLineEdit).text()
+                if txt.isdigit() and int(txt) > 0:
+                    has_valid_mean = True
+            source_mean_map[display_name] = has_valid_mean
+
+        # 2. Update Fit Table Rows
+        for r in range(self.fit_table.rowCount()):
+            src_combo = self.fit_table.cellWidget(r, 1)
+            type_combo = self.fit_table.cellWidget(r, 2)
+            
+            if not src_combo or not type_combo: continue
+            
+            selected_source = src_combo.currentText()
+            has_mean = source_mean_map.get(selected_source, False)
+            
+            current_type = type_combo.currentText()
+            
+            # Rebuild items
+            type_combo.blockSignals(True)
+            type_combo.clear()
+            items = ["Off", "Orig"]
+            if has_mean:
+                items.append("Mean")
+            type_combo.addItems(items)
+            
+            # Restore selection or Auto-Switch
+            if current_type in items:
+                type_combo.setCurrentText(current_type)
+            elif current_type == "Mean" and not has_mean:
+                # Requirement: Switch to Orig if Mean is no longer applicable
+                type_combo.setCurrentText("Orig")
+            else:
+                type_combo.setCurrentIndex(0)
+                
+            type_combo.blockSignals(False)
         
     def _handle_table_widget_change(self, row, column):
         """
@@ -1761,22 +2319,23 @@ class LogPlotPanel(QWidget):
         combo.view().setMinimumWidth(max_width + 30)
         return combo
         
-    def _save_state_on_exit(self):
-        config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
-        os.makedirs(config_dir, exist_ok=True)
-        path = os.path.join(config_dir, 'autosave.json')
-
+    def _get_current_state_dict(self):
+        """Helper to gather current state for saving."""
         config = {
             'path': self.main_window.path_edit.text(),
-            'plots': [],
             'average_choices': self.average_user_choices,
             'running_mean_setting': self.running_mean_setting,
             'global_label_map': self.global_label_map,
             'custom_properties': self.custom_properties,
             'scale_lock': self.scale_lock_enabled,
             'axes_lock': self.lock_axes_btn.isChecked(),
-            'view_ranges': self.plot_controller.get_view_ranges()
+            'view_ranges': self.plot_controller.get_view_ranges(),
+            'fit_table_visible': self.fit_table_visible,
+            'plots': [],
+            'fits': []
         }
+        
+        # Save Plots
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
             if item:
@@ -1791,41 +2350,38 @@ class LogPlotPanel(QWidget):
                     'thickness': self.plot_table.cellWidget(row, 7).findChild(QLineEdit).text(),
                 }
                 config['plots'].append(plot_info)
-        
-        SettingsManager.save_state(path, config)
+
+        # Save Fits
+        for row in range(self.fit_table.rowCount()):
+            item = self.fit_table.item(row, 0) # ID is here
+            if not item: continue
+            fit_id = item.data(Qt.ItemDataRole.UserRole)
+            
+            fit_info = {
+                'id': fit_id,
+                'source': self.fit_table.cellWidget(row, 1).currentText(),
+                'type': self.fit_table.cellWidget(row, 2).currentText(),
+                'color': self.fit_table.cellWidget(row, 5).color().name(),
+                'style': self.fit_table.cellWidget(row, 6).currentText(),
+                'thickness': self.fit_table.cellWidget(row, 7).findChild(QLineEdit).text(),
+                'dialog_state': self.fit_dialogs[fit_id].get_state() if fit_id in self.fit_dialogs else None
+            }
+            config['fits'].append(fit_info)
+            
+        return config
+
+    def _save_state_on_exit(self):
+        config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
+        os.makedirs(config_dir, exist_ok=True)
+        path = os.path.join(config_dir, 'autosave.json')
+        SettingsManager.save_state(path, self._get_current_state_dict())
 
     def save_session(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Session", "", "JSON Files (*.json)")
         if not path:
             return
-            
-        config = {
-            'path': self.main_window.path_edit.text(),
-            'plots': [],
-            'average_choices': self.average_user_choices,
-            'running_mean_setting': self.running_mean_setting,
-            'global_label_map': self.global_label_map,
-            'custom_properties': self.custom_properties,
-            'scale_lock': self.scale_lock_enabled,
-            'axes_lock': self.lock_axes_btn.isChecked(),
-            'view_ranges': self.plot_controller.get_view_ranges()
-        }
-        for row in range(self.plot_table.rowCount()):
-            item = self.plot_table.item(row, 1)
-            if item:
-                full_name = item.data(Qt.ItemDataRole.UserRole) or item.text()
-                plot_info = {
-                    'name': full_name,
-                    'show': self.plot_table.cellWidget(row, 2).findChild(QCheckBox).isChecked(),
-                    'mean': self.plot_table.cellWidget(row, 3).findChild(QLineEdit).text(),
-                    'std': self.plot_table.cellWidget(row, 4).findChild(QCheckBox).isChecked(),
-                    'color': self.plot_table.cellWidget(row, 5).color().name(),
-                    'style': self.plot_table.cellWidget(row, 6).currentText(),
-                    'thickness': self.plot_table.cellWidget(row, 7).findChild(QLineEdit).text(),
-                }
-                config['plots'].append(plot_info)
         
-        if SettingsManager.save_state(path, config):
+        if SettingsManager.save_state(path, self._get_current_state_dict()):
             QMessageBox.information(self, "Success", "Session saved successfully.")
         else:
             QMessageBox.critical(self, "Error", "Failed to save session.")
@@ -1871,20 +2427,15 @@ class LogPlotPanel(QWidget):
                 # Refresh combos to show loaded custom properties
                 self._refresh_axis_combos()
                 
-                # Load settings after project load to prevent them from being reset
+                # Load settings
                 self.running_mean_setting = config.get('running_mean_setting', 'symmetric_window')
-                
-                # Restore Lock States
                 self.scale_lock_enabled = config.get('scale_lock', False)
                 axes_locked = config.get('axes_lock', False)
-                
-                # Apply 0-Lock (triggers signal to update controller)
                 self.lock_axes_btn.setChecked(axes_locked)
-                
-                # Apply Scale Lock (manual update as it's not a direct button toggle)
                 self.plot_controller.toggle_scale_lock(self.scale_lock_enabled)
                 self._update_lock_button_visuals()
 
+                # Restore Plots
                 self.plot_table.setRowCount(0)
                 for plot_info in config.get('plots', []):
                     row = self.plot_table.rowCount()
@@ -1906,13 +2457,68 @@ class LogPlotPanel(QWidget):
 
                 self._update_all_row_displays()
                 self._update_move_buttons_visibility()
-                self.update_plots()
                 self._update_plot_labels()
                 
-                # Restore View Ranges (must be done after plots are updated/created)
-                view_ranges = config.get('view_ranges', {})
-                if view_ranges:
-                    self.plot_controller.set_view_ranges(view_ranges)
+                # Restore Fits
+                # First clear existing fits and reset state
+                self.fit_table.setRowCount(0)
+                self.fit_dialogs = {}
+                self.fit_results = {}
+                self.next_fit_id = 0
+                
+                saved_fits = config.get('fits', [])
+                if saved_fits:
+                    max_id = 0
+                    for fit_info in saved_fits:
+                        saved_id = fit_info['id']
+                        if saved_id >= max_id: max_id = saved_id
+                        
+                        # 1. Create Row with the EXACT Saved ID
+                        # This ensures signals are connected to 'saved_id' from the start
+                        self.add_fit_row(target_fit_id=saved_id)
+                        
+                        row = self.fit_table.rowCount() - 1
+                        
+                        # 2. Restore Widget Values
+                        # (Note: IDs on widgets are already correct due to add_fit_row)
+                        self.fit_table.cellWidget(row, 1).setCurrentText(fit_info.get('source', ''))
+                        self.fit_table.cellWidget(row, 2).setCurrentText(fit_info.get('type', 'Orig'))
+                        self.fit_table.cellWidget(row, 5).set_color(QColor(fit_info.get('color', 'gray')))
+                        self.fit_table.cellWidget(row, 6).setCurrentText(fit_info.get('style', 'Dash'))
+                        self.fit_table.cellWidget(row, 7).findChild(QLineEdit).setText(fit_info.get('thickness', '1'))
+                        
+                        # 3. Restore Dialog State
+                        if saved_id in self.fit_dialogs:
+                            dialog = self.fit_dialogs[saved_id]
+                            dialog.set_state(fit_info.get('dialog_state'))
+                            
+                            # Update Function Button Text
+                            func_str = dialog.func_input.text()
+                            display_text = (func_str[:10] + "...") if len(func_str) > 10 else func_str
+                            self.fit_table.cellWidget(row, 3).setText(display_text)
+
+                    # Ensure future IDs don't collide
+                    self.next_fit_id = max_id + 1
+
+                # Restore Visibility
+                fit_visible = config.get('fit_table_visible', False)
+                if fit_visible != self.fit_table_visible:
+                    self._toggle_fit_ui() # This calls update_plots internally
+                
+                # Explicit update if fit visibility didn't trigger it
+                if not fit_visible:
+                    self.update_plots()
+                
+                # CRITICAL: Re-Calculate Active Fits
+                # update_plots() has just run and pushed source data to the dialogs.
+                # Now we must trigger the calculation to generate results and plots.
+                if fit_visible:
+                    for fid, dialog in self.fit_dialogs.items():
+                        # We can check if the row is "active" (not Off), but calculate_fit 
+                        # handles empty data gracefully. It will emit _on_fit_finished
+                        # which will update the UI and call update_plots again to show the line.
+                        if dialog.x_data is not None and len(dialog.x_data) > 0:
+                            dialog.calculate_fit()
 
             except FileNotFoundError as e:
                 QMessageBox.critical(self, "Error", f"Could not find project path from session file:\n{e}")
