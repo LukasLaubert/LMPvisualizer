@@ -1,5 +1,3 @@
-# lmp_visualizer/main_window.py
-
 import sys
 import os
 from pathlib import Path
@@ -10,7 +8,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QCheckBox, QLabel, QSplitter, QGridLayout, QSizePolicy, QMenu
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint
-from PyQt6.QtGui import QColor, QIntValidator, QAction, QIcon, QActionGroup
+from PyQt6.QtGui import QColor, QIntValidator, QAction, QIcon, QActionGroup, QMouseEvent
 import pyqtgraph as pg
 import random
 import numpy as np
@@ -22,6 +20,15 @@ from plotting_controller import PlottingController
 from settings_manager import SettingsManager
 from ui_components import ColorButton, InconsistentDataDialog, ChipInputWidget
 from global_label_editor_dialog import GlobalLabelEditorDialog
+
+class RightClickButton(QPushButton):
+    rightClicked = pyqtSignal()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.RightButton:
+            self.rightClicked.emit()
+        else:
+            super().mousePressEvent(event)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -38,6 +45,7 @@ class MainWindow(QMainWindow):
         self.average_user_choices = {}
         self.current_x_axis = None
         self.global_label_map = {}
+        self.scale_lock_enabled = False
 
         self.add_btn = QPushButton("Add")
         self.load_btn = QPushButton("Load")
@@ -135,18 +143,18 @@ class MainWindow(QMainWindow):
         self.plot_widget.setBackground('w')
         self.plot_controller = PlottingController(self.plot_widget)
 
-        self.lock_axes_btn = QPushButton()
+        self.lock_axes_btn = RightClickButton()
         self.lock_axes_btn.setCheckable(True)
         self.lock_axes_btn.setText("🔓")  # Unlock emoji
-        self.lock_axes_btn.setToolTip("Lock/Unlock Y-Axes at Zero")
+        self.lock_axes_btn.setToolTip("Left Click: Lock/Unlock 0-alignment\nRight Click: Lock/Unlock Scaling")
         self.lock_axes_btn.hide()
         self.lock_axes_btn.setParent(self.plot_widget)
-        self.lock_axes_btn.setGeometry(self.plot_widget.width() - 30, 00, 30, 30)
+        self.lock_axes_btn.setGeometry(self.plot_widget.width() - 40, 00, 40, 30)
 
         original_resize = self.plot_widget.resizeEvent
         def custom_resize_event(event):
             if hasattr(self, 'lock_axes_btn'):
-                self.lock_axes_btn.setGeometry(self.plot_widget.width() - 30, 00, 30, 30)
+                self.lock_axes_btn.setGeometry(self.plot_widget.width() - 40, 00, 40, 30)
             if original_resize:
                 original_resize(event)
         self.plot_widget.resizeEvent = custom_resize_event
@@ -591,6 +599,7 @@ class MainWindow(QMainWindow):
         self.export_btn.clicked.connect(self.export_plot)
         self.exit_btn.clicked.connect(self.close)
         self.lock_axes_btn.toggled.connect(self._on_lock_axes_toggled)
+        self.lock_axes_btn.rightClicked.connect(self._on_scale_lock_toggled)
 
         # Connect study selection to update available systems
         self.study_combo.currentTextChanged.connect(self.on_study_selected)
@@ -610,12 +619,33 @@ class MainWindow(QMainWindow):
         """Handle double-click on table row to edit labels."""
         self._edit_global_labels()
 
+    def _update_lock_button_visuals(self):
+        """Updates the lock button text to reflect 0-lock (Checked) and Scale-lock (Flag) states."""
+        # 0-Lock is represented by the button's Checked state (visualized by the OS/Theme, usually darker/blue)
+        # Scale-Lock is represented by the Vertical Arrow symbol
+        
+        # Base icon: Locked or Unlocked based on 0-alignment (Position)
+        text = "🔒" if self.lock_axes_btn.isChecked() else "🔓"
+        
+        # Append Vertical Arrow if Scaling is locked
+        if self.scale_lock_enabled:
+            text += " ↕"
+            
+        self.lock_axes_btn.setText(text)
+        
+        # Clear any specific stylesheets to ensure the native "Checked" state is visible
+        self.lock_axes_btn.setStyleSheet("")
+
     def _on_lock_axes_toggled(self, checked):
-        if checked:
-            self.lock_axes_btn.setText("🔒")  # Lock emoji
-        else:
-            self.lock_axes_btn.setText("🔓")  # Unlock emoji
+        """Handle Left Click: Toggle 0-alignment lock."""
         self.plot_controller.toggle_axes_lock(checked)
+        self._update_lock_button_visuals()
+
+    def _on_scale_lock_toggled(self):
+        """Handle Right Click: Toggle Scale lock."""
+        self.scale_lock_enabled = not self.scale_lock_enabled
+        self.plot_controller.toggle_scale_lock(self.scale_lock_enabled)
+        self._update_lock_button_visuals()
 
     def _show_mean_header_context_menu(self, pos):
         header = self.plot_table.horizontalHeader()
@@ -1331,6 +1361,9 @@ class MainWindow(QMainWindow):
         self._update_axis_properties([p for p in all_plot_info if p['is_active'] and p['is_valid']], preferred_x_ax)
         for row in range(self.plot_table.rowCount()):
             self._update_row_visual_state(row)
+        
+        # Re-apply any active axis locks to the newly created plots
+        self.plot_controller.apply_current_locks()
         
     def _handle_table_widget_change(self, row, column):
         """

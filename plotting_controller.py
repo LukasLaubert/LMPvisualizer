@@ -1,5 +1,3 @@
-# lmp_visualizer/plotting_controller.py
-
 import pyqtgraph as pg
 from PyQt6.QtGui import QColor
 from typing import Dict, Any
@@ -26,6 +24,7 @@ class PlottingController:
         self.x_axis_label: str = ""
         
         self.axes_locked = False
+        self.scale_locked = False
         self._is_syncing_axes = False # Flag to prevent recursive signal handling
 
     def toggle_axes_lock(self, locked: bool):
@@ -41,57 +40,99 @@ class PlottingController:
             except (TypeError, RuntimeError):
                 pass # Ignore if it wasn't connected
             
-            # If locking, reconnect the signal
-            if locked:
+            # If locking (either 0-lock or scale-lock), reconnect the signal
+            if self.axes_locked or self.scale_locked:
                 vb.sigRangeChanged.connect(self._on_axis_range_changed)
         
         # If we are locking, trigger an initial sync to align everything
-        if locked and self.y_axes:
-            # Use the first viewbox as the source for the initial sync
-            first_vb = next(iter(self.y_axes.values()))['viewbox']
-            self._synchronize_y_axes(source_vb=first_vb)
+        if self.axes_locked and self.y_axes:
+            # Use the main viewbox as source for initial sync
+            self._synchronize_axes(source_vb=self.plot_item.getViewBox())
+
+    def toggle_scale_lock(self, locked: bool):
+        """Toggles scaling lock state and updates connections."""
+        self.scale_locked = locked
+        
+        # Re-evaluate connections
+        for axis_info in self.y_axes.values():
+            vb = axis_info['viewbox']
+            try:
+                vb.sigRangeChanged.disconnect(self._on_axis_range_changed)
+            except (TypeError, RuntimeError):
+                pass
+
+            if self.axes_locked or self.scale_locked:
+                vb.sigRangeChanged.connect(self._on_axis_range_changed)
+        
+        # Trigger immediate sync if enabling scale lock
+        if self.scale_locked and self.y_axes:
+            self._synchronize_axes(source_vb=self.plot_item.getViewBox())
+
+    def apply_current_locks(self):
+        """Forces synchronization if any locks are active. Useful after reloading plots."""
+        if (self.axes_locked or self.scale_locked) and self.y_axes:
+            self._synchronize_axes(source_vb=self.plot_item.getViewBox())
 
     def _on_axis_range_changed(self, changed_vb: pg.ViewBox):
         """Signal handler that triggers when any connected axis is moved."""
-        if self._is_syncing_axes or not self.axes_locked:
+        if self._is_syncing_axes or not (self.axes_locked or self.scale_locked):
             return
 
         self._is_syncing_axes = True
         try:
-            self._synchronize_y_axes(source_vb=changed_vb)
+            self._synchronize_axes(source_vb=changed_vb)
         finally:
             self._is_syncing_axes = False
 
-    def _synchronize_y_axes(self, source_vb: pg.ViewBox):
+    def _synchronize_axes(self, source_vb: pg.ViewBox):
         """
-        Synchronizes all other Y-axes based on the source ViewBox.
-        This works by aligning the relative position of the zero-line.
+        Synchronizes Y-axes based on current lock settings.
+        - If Scale Locked: Syncs height (zoom level).
+        - If Axes Locked: Syncs relative zero position.
+        - If Both: Syncs both (effectively identical ranges).
         """
         if len(self.y_axes) < 2:
             return
 
-        y_range = source_vb.viewRange()[1]
-        height = y_range[1] - y_range[0]
-        if height == 0: return
+        # Get source parameters
+        src_range = source_vb.viewRange()[1]
+        src_min, src_max = src_range
+        src_height = src_max - src_min
+        if src_height == 0: return
 
-        # Calculate the relative position of the zero line on the source axis (0.0 to 1.0)
-        zero_pos_relative = -y_range[0] / height
+        # Calculate the relative position of the zero line on the source axis
+        src_zero_rel = -src_min / src_height
 
-        # Apply this relative zero position to all other axes
+        # Apply to all other axes
         for axis_info in self.y_axes.values():
             vb = axis_info['viewbox']
             if vb is source_vb:
-                continue # Don't update the one that's being dragged
+                continue 
 
-            current_target_range = vb.viewRange()[1]
-            current_target_height = current_target_range[1] - current_target_range[0]
-            if current_target_height == 0: continue
+            curr_range = vb.viewRange()[1]
+            curr_min, curr_max = curr_range
+            curr_height = curr_max - curr_min
+            if curr_height == 0: continue
             
-            # Calculate the new range for the target that preserves its height (zoom)
-            # but matches the zero position of the source.
-            new_min = -zero_pos_relative * current_target_height
-            new_max = (1 - zero_pos_relative) * current_target_height
+            # Step 1: Determine new height (zoom)
+            new_height = curr_height
+            if self.scale_locked:
+                new_height = src_height
             
+            # Step 2: Determine new position (min)
+            if self.axes_locked:
+                # Align 0 position relative to height
+                new_min = -src_zero_rel * new_height
+            else:
+                if self.scale_locked:
+                    # If only scale is locked, preserve the current center of the target view
+                    curr_center = (curr_min + curr_max) / 2
+                    new_min = curr_center - (new_height / 2)
+                else:
+                    # If no lock active (shouldn't happen in this loop), keep current
+                    new_min = curr_min
+
+            new_max = new_min + new_height
             vb.setYRange(new_min, new_max, padding=0)
 
     def add_or_update_plot(self, name: str, data: dict, color: QColor, style, thickness: float = 1.0, layer_priority: int = 0):
@@ -125,14 +166,18 @@ class PlottingController:
             else: # Create a new ViewBox and Axis on the right for subsequent plots
                 vb = pg.ViewBox()
                 ax = pg.AxisItem('right')
+                
+                # Assign a decreasing Z-value so that the first added right axis (inner) stays 'above' subsequent axes (outer) in the scene stack regarding event capture.
+                ax.setZValue(1000 - len(self.y_axes))
+                
                 self.plot_item.layout.addItem(ax, 2, len(self.y_axes) + 2)
                 self.plot_item.scene().addItem(vb)
                 ax.linkToView(vb)
                 vb.setXLink(self.plot_item.getViewBox())
                 self.y_axes[y_col_name] = {'axis': ax, 'viewbox': vb}
             
-            # If axes are locked, connect the signal to the newly created viewbox
-            if self.axes_locked:
+            # If any lock is active, connect the signal to the newly created viewbox
+            if self.axes_locked or self.scale_locked:
                 self.y_axes[y_col_name]['viewbox'].sigRangeChanged.connect(self._on_axis_range_changed)
 
         view_box = self.y_axes[y_col_name]['viewbox']
@@ -181,9 +226,14 @@ class PlottingController:
                 plot_info['view_box'].removeItem(plot_info['error_item'])
     
     def clear_all_plots(self):
-        """Removes all plots, axes, and viewboxes from the graph."""
-        self.toggle_axes_lock(False) # Disengage lock and disconnect all signals
-        
+        """Removes all plots, axes, and viewboxes from the graph. Preserves lock states."""
+        # Disconnect signals from current viewboxes before deleting them
+        for axis_info in self.y_axes.values():
+            try:
+                axis_info['viewbox'].sigRangeChanged.disconnect(self._on_axis_range_changed)
+            except (TypeError, RuntimeError):
+                pass
+
         for name in list(self.plots.keys()):
             self.remove_plot(name)
             
@@ -200,6 +250,7 @@ class PlottingController:
         self.y_axis_colors.clear()  # Clear stored colors
         self.y_axis_labels.clear()  # Clear stored labels
         self.x_axis_label = ""       # Clear x-axis label
+        # Note: axes_locked and scale_locked flags are preserved
 
     def update_views(self):
         """Updates the geometry of all viewboxes to match the main one."""
@@ -308,7 +359,8 @@ class PlottingController:
             
             # Set axis color
             ax.spines['left' if y_col == y_axis_order[0] else 'right'].set_edgecolor(mpl_axis_color)
-            ax.tick_params(axis='y', colors=mpl_axis_color)
+            # Added direction='in' to point ticks inside
+            ax.tick_params(axis='y', colors=mpl_axis_color, direction='in')
             ax.yaxis.label.set_color(mpl_axis_color)
             
             # Set axis label
@@ -355,7 +407,8 @@ class PlottingController:
         # Set x-axis label and color to black
         ax_primary.set_xlabel(self.x_axis_label)
         ax_primary.spines['bottom'].set_edgecolor('black')
-        ax_primary.tick_params(axis='x', colors='black')
+        # Added direction='in' to point ticks inside
+        ax_primary.tick_params(axis='x', colors='black', direction='in')
         ax_primary.xaxis.label.set_color('black')
         
         ax_primary.grid(True, alpha=0.3)
