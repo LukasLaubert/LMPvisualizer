@@ -3,6 +3,8 @@ import numpy as np
 import pandas as pd
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, Qt
 from PyQt6.QtGui import QColor
+# Shared appearance defaults, so the plot cannot diverge from what the table row shows.
+from dsd_widgets import DEFAULT_STYLE, DEFAULT_SIZE, DEFAULT_STRAIN_STYLE, DEFAULT_STRAIN_SIZE
 
 class DSDController(QObject):
     frameChanged = pyqtSignal(int)
@@ -70,8 +72,15 @@ class DSDController(QObject):
         self._strain_cache = None
         self._strain_cache_key = None
         
-    def set_active_system(self, study, system):
-        if self.current_study != study or self.current_system != system:
+    def set_active_system(self, study, system, force=False):
+        """Switches the active study/system.
+
+        force=True re-derives the timestep lists even when the names are unchanged.
+        Needed after a project reload: study/system are derived from folder names
+        (grandparent/parent), so a different project can carry identical names while
+        the underlying data manager has been reset.
+        """
+        if force or self.current_study != study or self.current_system != system:
             # 1. Capture current state for Hybrid Conservation
             old_start_val = self.timesteps[0] if self.timesteps else 0
             
@@ -538,23 +547,13 @@ class DSDController(QObject):
             
         return 0.0, 1.0
 
-    def update_scene(self):
-        if not self.timesteps: return
-        
-        plot_type = self.plot_config.get('plot_type', 'Displacement plot')
-        slice_axis = self.plot_config.get('slice_axis', 'X')
-        observe_axis = self.plot_config.get('observe_axis', 'Y')
-        
-        # CRITICAL: Disable auto-range BEFORE clearing/drawing when view is locked
-        # This prevents any intermediate auto-range during scene setup
-        if self.view_locked:
-            self.plot_item.disableAutoRange()
-        
+    def _reset_canvas(self):
+        """Drops every drawn item and restores the empty canvas' visual state."""
         # Clear EVERYTHING first
         self.plot_item.clear()
         self.vb2.clear()
         self.plot_items = {}
-        
+
         # Restore Legend (clear() removes it)
         if self.plot_item.legend:
             try:
@@ -564,15 +563,45 @@ class DSDController(QObject):
                 pass
             finally:
                 self.plot_item.legend = None
-                
+
         self.plot_item.addLegend()
-        
+
         # Restore fundamental visual state
         self.plot_item.showGrid(x=True, y=True, alpha=0.3)
-        
+
         # Ensure right axis is hidden by default (Displacement plot will show if needed)
         self.plot_item.hideAxis('right')
-        
+
+    def clear_scene(self):
+        """Empties the canvas and unbinds the data, leaving the configuration alone.
+
+        Used when the project path is cleared: the domains stay in the table, but the
+        canvas must not keep showing a project that is no longer loaded.
+        """
+        self.pause()
+        self._reset_canvas()
+        self.plot_item.setLabel('bottom', '')
+        self.plot_item.setLabel('left', '')
+
+        self.current_study, self.current_system = None, None
+        self.timesteps, self.full_timesteps = [], []
+        self.current_timestep = 0
+        self._strain_cache, self._strain_cache_key = None, None
+
+    def update_scene(self):
+        if not self.timesteps: return
+
+        plot_type = self.plot_config.get('plot_type', 'Displacement plot')
+        slice_axis = self.plot_config.get('slice_axis', 'X')
+        observe_axis = self.plot_config.get('observe_axis', 'Y')
+
+        # CRITICAL: Disable auto-range BEFORE clearing/drawing when view is locked
+        # This prevents any intermediate auto-range during scene setup
+        if self.view_locked:
+            self.plot_item.disableAutoRange()
+
+        self._reset_canvas()
+
         # Set labels AFTER clear, specific to plot type
         if plot_type == 'Displacement plot':
             self.plot_item.setLabel('bottom', f"Initial box center in {slice_axis}")
@@ -693,10 +722,13 @@ class DSDController(QObject):
                 seg_weight = df_res['sum_weights'].sum()
 
                 color = QColor(domain.get('color', 'blue'))
-                style_str = domain.get('style', 'o')
+                # Fall back to the same defaults the table row displays (dsd_widgets),
+                # otherwise a fresh domain plots as 'o'/3.0 while its row shows Dots/2 -
+                # and 'o' additionally draws a connecting line that "Dots" does not.
+                style_str = domain.get('style', DEFAULT_STYLE)
                 symbol, pen_style = self._get_pyqtgraph_style(style_str)
-                try: width = float(domain.get('size', 3.0))
-                except: width = 3.0
+                try: width = float(domain.get('size', DEFAULT_SIZE))
+                except: width = float(DEFAULT_SIZE)
 
                 # Plot Error Band
                 if y_err is not None:
@@ -925,12 +957,12 @@ class DSDController(QObject):
 
             # Visual Properties
             color = QColor(domain.get('color', 'blue'))
-            try: width = float(domain.get('strain_size', 2.0))
-            except: width = 2.0
-            
+            try: width = float(domain.get('strain_size', DEFAULT_STRAIN_SIZE))
+            except: width = float(DEFAULT_STRAIN_SIZE)
+
             # Resolve Starting Style
-            user_style = domain.get('strain_style', '-')
-            if not user_style: user_style = '-'
+            user_style = domain.get('strain_style', DEFAULT_STRAIN_STYLE)
+            if not user_style: user_style = DEFAULT_STRAIN_STYLE
             
             # Determine Cycle of 3 styles
             if user_style in line_styles_order:
@@ -983,8 +1015,12 @@ class DSDController(QObject):
                     if item: item.setZValue(z_val)
 
         # 4. Optimal Line (Target Strain)
+        # Only drawn when the table actually carries an End-to-end row - previously this
+        # defaulted to True when no such row existed, so the curve appeared (and was
+        # legended) with no corresponding entry the user could switch off.
+        # This mirrors the displacement path, which already requires opt_settings.
         opt_settings = next((d for d in self.domains if d.get('is_optimal_line')), None)
-        show_opt = opt_settings.get('strain_show', True) if opt_settings else True
+        show_opt = bool(opt_settings) and opt_settings.get('strain_show', True)
         
         # Get properties from settings, defaulting to strain defaults
         try: opt_width = float(opt_settings.get('strain_size', 2.0)) if opt_settings else 2.0
@@ -1159,6 +1195,8 @@ class DSDController(QObject):
         ax2 = ax1.twinx() if show_right else None
         if ax2:
             ax2.set_ylabel(self.plot_item.getAxis('right').labelText, fontsize=12)
+            # Ticks inside the frame, matching the Pop Out window
+            ax2.tick_params(axis='both', which='both', labelsize=10, direction='in')
             # Try to match secondary view range if possible
             if self.vb2:
                  vr2 = self.vb2.viewRange()
@@ -1168,7 +1206,8 @@ class DSDController(QObject):
         # Labels
         ax1.set_xlabel(self.plot_item.getAxis('bottom').labelText, fontsize=12)
         ax1.set_ylabel(self.plot_item.getAxis('left').labelText, fontsize=12)
-        ax1.tick_params(axis='both', which='major', labelsize=10)
+        # Ticks inside the frame, matching the Pop Out window
+        ax1.tick_params(axis='both', which='both', labelsize=10, direction='in')
         
         handles, labels = [], []
         

@@ -265,14 +265,16 @@ class LogDataManager:
                 log_files = file_map.get(key, [])
 
                 if not log_files:
-                    # Fallback for manual addition or older session files
-                    log_path = root_path / study_name / system_name
-                    if not log_keywords:
-                        log_files = list(log_path.glob("log.lammps"))
-                    else:
-                        for keyword in log_keywords:
-                            log_files.extend(log_path.glob(f"*{keyword}*"))
-                        log_files = sorted(list(set(log_files)))
+                    # Fallback for manual addition or older session files.
+                    # root_path may be several project paths.
+                    for base in (root_path if isinstance(root_path, (list, tuple)) else [root_path]):
+                        log_path = Path(base) / study_name / system_name
+                        if not log_keywords:
+                            log_files.extend(log_path.glob("log.lammps"))
+                        else:
+                            for keyword in log_keywords:
+                                log_files.extend(log_path.glob(f"*{keyword}*"))
+                    log_files = sorted(list(set(log_files)))
 
                 if not log_files:
                     continue

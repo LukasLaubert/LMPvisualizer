@@ -30,10 +30,12 @@ class TrjDataManager:
                 target_files = file_map.get(key, [])
                 
                 if not target_files:
-                    system_path = root_path / study_name / system_name
-                    if system_path.is_dir():
-                        for keyword in keywords:
-                            target_files.extend(list(system_path.glob(f"*{keyword}*")))
+                    # root_path may be several project paths.
+                    for base in (root_path if isinstance(root_path, (list, tuple)) else [root_path]):
+                        system_path = Path(base) / study_name / system_name
+                        if system_path.is_dir():
+                            for keyword in keywords:
+                                target_files.extend(list(system_path.glob(f"*{keyword}*")))
                 
                 if not target_files: continue
                 target_files.sort()

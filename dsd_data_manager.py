@@ -47,6 +47,9 @@ class DSDDataManager:
         self.parsers.clear()
         self.cache.clear()
         self.strain_evolution_cache.clear()
+        # Keyed by id() of the frame DataFrames, which self.cache just dropped - a
+        # recycled id would otherwise serve another project's slice results.
+        self.slicing_results.clear()
         warnings = []
         successful_keywords = set()
 
@@ -59,11 +62,12 @@ class DSDDataManager:
                 target_files = file_map.get(key, [])
                 
                 if not target_files:
-                    # Backward compat scan
-                    system_path = root_path / study_name / system_name
-                    if system_path.is_dir():
-                        for keyword in keywords:
-                            target_files.extend(list(system_path.glob(f"*{keyword}*")))
+                    # Backward compat scan. root_path may be several project paths.
+                    for base in (root_path if isinstance(root_path, (list, tuple)) else [root_path]):
+                        system_path = Path(base) / study_name / system_name
+                        if system_path.is_dir():
+                            for keyword in keywords:
+                                target_files.extend(list(system_path.glob(f"*{keyword}*")))
                 
                 if not target_files: continue
                 target_files.sort()
@@ -271,6 +275,11 @@ class DSDDataManager:
             list_slice_for_binning, list_slice_curr = [pos_slice_init_pop[mask_main]], [pos_slice_curr_pop[mask_main]]
 
             if pbc_active:
+                # One target list per axis: every ghost contribution must land in the
+                # list of the axis it belongs to, otherwise x grows three times faster
+                # than y/z and the later per-atom arithmetic cannot broadcast.
+                lists_i, lists_c = (list_xi, list_yi, list_zi), (list_xc, list_yc, list_zc)
+
                 L_slice_init = pi.get(f'l{s_ax}', 1.0)
                 ghost_pos_L = pos_slice_init_pop - L_slice_init
                 mask_gL = (ghost_pos_L >= box_min) & (ghost_pos_L <= box_max)
@@ -279,8 +288,8 @@ class DSDDataManager:
                     s_idx = {'x':0, 'y':1, 'z':2}[s_ax]
                     list_slice_curr.append(pos_slice_curr_pop[mask_gL] - shift_vec_c[s_idx])
                     for i, axis in enumerate(['x','y','z']):
-                        list_xi.append(df_init_pop[axis].values[mask_gL] - shift_vec_i[i])
-                        list_xc.append(df_curr_pop[axis].values[mask_gL] - shift_vec_c[i])
+                        lists_i[i].append(df_init_pop[axis].values[mask_gL] - shift_vec_i[i])
+                        lists_c[i].append(df_curr_pop[axis].values[mask_gL] - shift_vec_c[i])
 
                 ghost_pos_R = pos_slice_init_pop + L_slice_init
                 mask_gR = (ghost_pos_R >= box_min) & (ghost_pos_R <= box_max)
@@ -289,8 +298,8 @@ class DSDDataManager:
                     s_idx = {'x':0, 'y':1, 'z':2}[s_ax]
                     list_slice_curr.append(pos_slice_curr_pop[mask_gR] + shift_vec_c[s_idx])
                     for i, axis in enumerate(['x','y','z']):
-                        list_xi.append(df_init_pop[axis].values[mask_gR] + shift_vec_i[i])
-                        list_xc.append(df_curr_pop[axis].values[mask_gR] + shift_vec_c[i])
+                        lists_i[i].append(df_init_pop[axis].values[mask_gR] + shift_vec_i[i])
+                        lists_c[i].append(df_curr_pop[axis].values[mask_gR] + shift_vec_c[i])
 
             all_xi, all_yi, all_zi = np.concatenate(list_xi), np.concatenate(list_yi), np.concatenate(list_zi)
             all_xc, all_yc, all_zc = np.concatenate(list_xc), np.concatenate(list_yc), np.concatenate(list_zc)

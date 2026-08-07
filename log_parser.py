@@ -96,7 +96,152 @@ class LogParser:
             return {}, ["No log files found matching keywords in the directory hierarchy."], {}
 
         return studies, warnings, file_map
-    
+
+    # --- Multi-path support --------------------------------------------------
+    #
+    # Several project paths can be loaded side by side. Discovery runs per path and
+    # the results are merged into the single {study: [systems]} shape the panels have
+    # always consumed. Study names collide easily (study = grandparent folder), so a
+    # colliding name is qualified with just enough of its path to tell them apart.
+    # A study name that only one path owns is left exactly as it was, which keeps
+    # single-path projects - and their saved sessions - byte-identical.
+
+    STUDY_SEP = " › "  # single-right-pointing-angle quotation mark
+
+    @staticmethod
+    def canonical_path(value) -> str:
+        """One spelling per project path.
+
+        Chips, study origins and the (source path, study) pair stored on every table
+        row are all compared as plain strings, so they have to agree character for
+        character. They did not: a path typed with forward slashes, pasted with a
+        trailing separator or restored from an older session file kept whatever
+        spelling it arrived with, while discovery reported it back as str(Path(...)).
+        Every row then looked like it belonged to a path that was no longer loaded
+        and got pruned. Canonicalising at the door keeps the two in step.
+        """
+        text = str(value).strip().strip('"')
+        if not text:
+            return ""
+        try:
+            return str(Path(text))
+        except Exception:
+            return text
+
+    @staticmethod
+    def path_key(value) -> str:
+        """Comparison key for a project path (Windows paths differ only in case)."""
+        return os.path.normcase(LogParser.canonical_path(value))
+
+    @staticmethod
+    def same_path(a, b) -> bool:
+        return LogParser.path_key(a) == LogParser.path_key(b)
+
+    @staticmethod
+    def normalize_paths(value) -> List[str]:
+        """Accepts a str/Path or an iterable of them; returns de-duplicated strings."""
+        if value is None:
+            return []
+        if isinstance(value, (str, Path)):
+            value = [value]
+        out, seen = [], set()
+        for item in value:
+            text = LogParser.canonical_path(item)
+            key = os.path.normcase(text)
+            if text and key not in seen:
+                seen.add(key)
+                out.append(text)
+        return out
+
+    @staticmethod
+    def _shortest_distinct_labels(paths: List[Path]) -> Dict[str, str]:
+        """Labels each path with the fewest trailing folders that keep it unique."""
+        labels = {}
+        parts = {str(p): [x for x in Path(p).parts if x not in ('/', '\\')] for p in paths}
+        depth = 1
+        remaining = list(parts.keys())
+
+        while remaining and depth <= 8:
+            candidate = {p: "/".join(parts[p][-depth:]) if parts[p] else p for p in remaining}
+            counts = {}
+            for label in candidate.values():
+                counts[label] = counts.get(label, 0) + 1
+
+            still = []
+            for p, label in candidate.items():
+                if counts[label] == 1 or depth >= len(parts[p]):
+                    labels[p] = label
+                else:
+                    still.append(p)
+            remaining = still
+            depth += 1
+
+        for p in remaining:  # pathological ties - fall back to the full path
+            labels[p] = p
+        return labels
+
+    @staticmethod
+    def discover_multi(paths, log_keywords: List[str]):
+        """Discovery merged across several project paths.
+
+        Returns (studies, warnings, file_map, origins) where origins maps every study
+        key to {'path': <project path>, 'study': <raw folder name>} so a row can be
+        traced back to the chip it came from even after the key gets qualified.
+        """
+        # Canonical spelling throughout: origins['path'] is compared against the chip
+        # set and against the path stored on every table row.
+        paths = [Path(p) for p in LogParser.normalize_paths(paths)]
+
+        studies, warnings, file_map, origins = {}, [], {}, {}
+        if not paths:
+            return studies, ["No project path selected."], file_map, origins
+
+        per_path = []
+        for p in paths:
+            s, w, fm = LogParser.discover_studies_systems(p, log_keywords)
+            # Only surface per-path complaints when that path really is empty; a path
+            # that found nothing must not mask the ones that did.
+            if s:
+                per_path.append((p, s, fm))
+            else:
+                warnings.append(f"{p}: no matching files found.")
+            warnings.extend(w if s else [])
+
+        if not per_path:
+            return {}, warnings or ["No files found matching keywords."], {}, {}
+
+        # Which raw study names are claimed by more than one path?
+        owners = {}
+        for p, s, _ in per_path:
+            for study in s:
+                owners.setdefault(study, set()).add(str(p))
+
+        colliding = {study for study, ps in owners.items() if len(ps) > 1}
+        labels = LogParser._shortest_distinct_labels([p for p, _, _ in per_path])
+
+        for p, s, fm in per_path:
+            for study, systems in s.items():
+                key = (f"{labels[str(p)]}{LogParser.STUDY_SEP}{study}"
+                       if study in colliding else study)
+                origins[key] = {'path': str(p), 'study': study}
+                studies.setdefault(key, [])
+                for system in systems:
+                    if system not in studies[key]:
+                        studies[key].append(system)
+                    src = fm.get(f"{study}|{system}", [])
+                    if src:
+                        file_map.setdefault(f"{key}|{system}", []).extend(src)
+
+        return studies, warnings, file_map, origins
+
+    @staticmethod
+    def qualify_study(origins: Dict[str, dict], path: str, study: str):
+        """Reverse lookup: (chip path, raw study) -> the current study key, or None."""
+        for key, origin in (origins or {}).items():
+            if origin.get('study') == study and LogParser.same_path(origin.get('path'), path):
+                return key
+        return None
+
     @staticmethod
     def peek_columns(logfile_path: Path) -> List[str]:
         """

@@ -16,6 +16,14 @@ import random
 import bisect
 import numpy as np
 
+# Single source of truth for a new domain's appearance.
+# The table widgets and DSDController's plotting fallbacks must agree, otherwise a
+# freshly added domain renders differently from what its own table row displays.
+DEFAULT_STYLE = 'Dots'
+DEFAULT_SIZE = '2'
+DEFAULT_STRAIN_STYLE = '-'
+DEFAULT_STRAIN_SIZE = '2.0'
+
 class HorizontalFilterBarWidget(QWidget):
     """
     Horizontal version of FilterBarWidget for managing domain splits.
@@ -57,7 +65,30 @@ class HorizontalFilterBarWidget(QWidget):
             self.active_segments = new_states
         else:
             self.active_segments = states
+        self._fit_range_to_splits()
         self.update()
+
+    def _fit_range_to_splits(self):
+        """Widens the displayed range so incoming splits stay inside the bar.
+
+        Splits are stored in absolute axis coordinates, so a domain defined on one
+        system can carry values far outside another system's extent (or outside the
+        0..100 default used when no bounds were supplied). Without this the handles,
+        the segment fills and the numeric labels are painted outside the dialog,
+        which is fixed-size and therefore cannot be widened to reach them.
+        """
+        if not self.splits:
+            return
+
+        lo = min(self.splits + [self.data_min])
+        hi = max(self.splits + [self.data_max])
+        if lo >= self.data_min and hi <= self.data_max:
+            return  # already covered, leave the true axis bounds untouched
+
+        span = hi - lo
+        margin = span * 0.05 if span > 0 else 1.0
+        self.data_min = lo - margin
+        self.data_max = hi + margin
 
     def get_data(self):
         return self.splits, self.active_segments
@@ -65,6 +96,8 @@ class HorizontalFilterBarWidget(QWidget):
     def val_to_x(self, val, rect):
         if self.data_max == self.data_min: return rect.left()
         rel = (val - self.data_min) / (self.data_max - self.data_min)
+        # Clamp: never paint or hit-test outside the bar, whatever the value.
+        rel = max(0.0, min(1.0, rel))
         return rect.left() + rel * rect.width()
 
     def x_to_val(self, x, rect):
@@ -456,7 +489,8 @@ class CheckableComboBox(QComboBox):
 
 
 class DSDAddDomainDialog(QDialog):
-    def __init__(self, parent=None, current_data=None, current_slice_axis=None, available_types=None, axis_bounds=None):
+    def __init__(self, parent=None, current_data=None, current_slice_axis=None, available_types=None, axis_bounds=None,
+                 current_observe_axis=None):
         super().__init__(parent)
         self.setWindowTitle("Add/Edit Domain")
         self.resize(350, 100) # Start small, let layout expand
@@ -573,9 +607,26 @@ class DSDAddDomainDialog(QDialog):
         self.chk_pbc = QCheckBox("Consider PBCs")
         if current_data:
             self.chk_pbc.setChecked(current_data.get('pbc', False))
-            
-        if current_slice_axis and current_slice_axis not in ['x', 'y', 'z']:
+
+        # PBC handling needs BOTH axes to be real box axes: the ghost images are built
+        # along the slice axis (needs l{slice}), while the displacement unwrapping uses
+        # the observe axis box length and its tilt component (needs l{observe}).
+        # Depending on the slice axis alone was wrong - and was undone by _check_splits()
+        # anyway, which used to re-enable the box for every split-free domain.
+        _box_axes = ('x', 'y', 'z')
+        bad_axes = [
+            name for name, ax in (("Slice ortho to", current_slice_axis),
+                                  ("Observe axis", current_observe_axis))
+            if ax and ax not in _box_axes
+        ]
+        self._pbc_axis_ok = not bad_axes
+        if not self._pbc_axis_ok:
             self.chk_pbc.setEnabled(False)
+            self.chk_pbc.setChecked(False)
+            self.chk_pbc.setToolTip(
+                "Periodic boundary conditions require both the slice and the observe axis "
+                "to be a box axis (x, y or z).\nNot a box axis: " + ", ".join(bad_axes)
+            )
         lay_calc.addWidget(self.chk_pbc, 1, 1)
         
         self.chk_weighted = QCheckBox("Weighted average")
@@ -618,8 +669,11 @@ class DSDAddDomainDialog(QDialog):
         
     def _check_splits(self):
         splits, active_segments = self.split_manager.get_data()
-        
-        if "Disabled" in self.chk_pbc.text():
+
+        # An unsupported axis pair vetoes PBC regardless of the split layout.
+        # (This used to test for "Disabled" in the checkbox text, which is never set,
+        # so the axis restriction was silently discarded for every split-free domain.)
+        if not self._pbc_axis_ok:
             return
 
         allow_pbc = False
@@ -722,9 +776,9 @@ class DSDTableWidget(QTableWidget):
             if style_combo:
                 style_combo.blockSignals(True)
                 if self.context_mode == 'displacement':
-                    style_combo.setCurrentText(settings.get('style', 'Dots'))
+                    style_combo.setCurrentText(settings.get('style', DEFAULT_STYLE))
                 else:
-                    style_combo.setCurrentText(settings.get('strain_style', '-'))
+                    style_combo.setCurrentText(settings.get('strain_style', DEFAULT_STRAIN_STYLE))
                 style_combo.blockSignals(False)
             
             # Update Size Edit
@@ -732,9 +786,9 @@ class DSDTableWidget(QTableWidget):
             if size_edit:
                 size_edit.blockSignals(True)
                 if self.context_mode == 'displacement':
-                    size_edit.setText(format_val(settings.get('size', '2')))
+                    size_edit.setText(format_val(settings.get('size', DEFAULT_SIZE)))
                 else:
-                    size_edit.setText(format_val(settings.get('strain_size', '2.0')))
+                    size_edit.setText(format_val(settings.get('strain_size', DEFAULT_STRAIN_SIZE)))
                 size_edit.blockSignals(False)
 
             # Update Show Checkbox
@@ -752,7 +806,25 @@ class DSDTableWidget(QTableWidget):
     def add_domain(self, name, settings, is_optimal_line=False):
         if settings.get('is_optimal_line', False) or name in ["Optimal Line", "End-to-end"]:
             is_optimal_line = True
-            
+
+        # Seed the appearance defaults BEFORE building the widgets, so the row and the
+        # stored settings dict cannot disagree. The dialog does not return style/size,
+        # and the widgets below are populated before their signals are connected, so
+        # without this the plot silently falls back to a different default than the one
+        # the row displays. setdefault: never overwrite values restored from a session.
+        if is_optimal_line:
+            # The End-to-end line has its own look; mirror the values the controller
+            # already draws with so the row matches the plot without changing it.
+            settings.setdefault('style', '--')
+            settings.setdefault('size', '1')
+            settings.setdefault('strain_style', '--')
+            settings.setdefault('strain_size', '2.0')
+        else:
+            settings.setdefault('style', DEFAULT_STYLE)
+            settings.setdefault('size', DEFAULT_SIZE)
+            settings.setdefault('strain_style', DEFAULT_STRAIN_STYLE)
+            settings.setdefault('strain_size', DEFAULT_STRAIN_SIZE)
+
         def format_val(val):
             try:
                 f = float(val)
@@ -840,15 +912,15 @@ class DSDTableWidget(QTableWidget):
         
         # Init based on context
         if self.context_mode == 'displacement':
-            style_combo.setCurrentText(settings.get('style', 'Dots'))
+            style_combo.setCurrentText(settings.get('style', DEFAULT_STYLE))
         else:
-            style_combo.setCurrentText(settings.get('strain_style', '-'))
+            style_combo.setCurrentText(settings.get('strain_style', DEFAULT_STRAIN_STYLE))
             
         style_combo.currentTextChanged.connect(lambda t: self._on_style_changed(style_combo, t))
         self.setCellWidget(row, 4, style_combo)
         
         # Col 5: Size
-        init_size = settings.get('size', '2') if self.context_mode == 'displacement' else settings.get('strain_size', '2.0')
+        init_size = settings.get('size', DEFAULT_SIZE) if self.context_mode == 'displacement' else settings.get('strain_size', DEFAULT_STRAIN_SIZE)
         size_edit = QLineEdit(format_val(init_size))
         
         # Use Double Validator for decimal support with C Locale (International)
@@ -1109,12 +1181,15 @@ class DSDTableWidget(QTableWidget):
 
         # Context
         current_slice_axis = None
+        current_observe_axis = None
         available_types = []
         axis_bounds = None
-        
+
         if self.panel:
             if hasattr(self.panel, 'slice_axis_combo'):
                 current_slice_axis = self.panel.slice_axis_combo.currentText()
+            if hasattr(self.panel, 'observe_axis_combo'):
+                current_observe_axis = self.panel.observe_axis_combo.currentText()
             if hasattr(self.panel, 'data_manager') and hasattr(self.panel, 'controller'):
                 study = self.panel.study_combo.currentText()
                 system = self.panel.system_combo.currentText()
@@ -1126,7 +1201,8 @@ class DSDTableWidget(QTableWidget):
                          if current_slice_axis in df.columns:
                             axis_bounds = (df[current_slice_axis].min(), df[current_slice_axis].max())
 
-        dlg = DSDAddDomainDialog(self, settings, current_slice_axis, available_types, axis_bounds)
+        dlg = DSDAddDomainDialog(self, settings, current_slice_axis, available_types, axis_bounds,
+                                 current_observe_axis)
         if dlg.exec():
             new_data = dlg.get_data()
             self.cellWidget(row, 1).setText(new_data['name'])

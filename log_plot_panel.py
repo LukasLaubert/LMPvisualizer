@@ -103,7 +103,9 @@ class LogPlotPanel(QWidget):
         self.next_plot_id = 0 # Unique ID for plot rows
 
         # Track loaded path to prevent clearing data on mode switch
-        self.loaded_path = None 
+        self.loaded_path = None
+        # study key -> {'path': <project path>, 'study': <raw folder name>}
+        self.study_origins = {}
         self._is_internal_update = False
 
         self._init_ui()
@@ -113,7 +115,9 @@ class LogPlotPanel(QWidget):
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(10)
-        main_layout.setContentsMargins(15, 15, 15, 15)
+        # Flush with the shared top bar, matching trj/dsd (which both use 0 margins
+        # and rely on the inner (5, 0, 5, 5) of the control row).
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
         # --- Top Controls (Specific to Log Plot) ---
         # Make controls_layout an attribute so attach_mode_combo can access it
@@ -202,10 +206,9 @@ class LogPlotPanel(QWidget):
         self.export_data_action.triggered.connect(self.export_raw_data)
         self.export_btn.setMenu(self.export_menu)
         
-        plot_buttons_layout = QHBoxLayout()
-        plot_buttons_layout.addWidget(self.popout_btn)
-        plot_buttons_layout.addWidget(self.export_btn)
-        left_layout.addLayout(plot_buttons_layout)
+        # Pop Out / Quick Export are added to the table button row below (like trj/dsd),
+        # so all five buttons sit together under the table instead of being stretched
+        # across the full window width. Wiring is unchanged - it is all by signal.
 
         # --- Right Panel (Table) ---
         right_panel = QWidget()
@@ -273,11 +276,13 @@ class LogPlotPanel(QWidget):
         
         top_table_layout.addWidget(self.fit_control_widget)
 
-        # --- Table Buttons (Save/Load/Exit) ---
+        # --- Table Buttons (Pop Out/Quick Export/Save/Load/Exit) ---
         self.save_btn = QPushButton("Save")
         self.load_btn = QPushButton("Load")
         self.exit_btn = QPushButton("Exit")
         table_buttons_layout = QHBoxLayout()
+        table_buttons_layout.addWidget(self.popout_btn)
+        table_buttons_layout.addWidget(self.export_btn)
         table_buttons_layout.addWidget(self.save_btn)
         table_buttons_layout.addWidget(self.load_btn)
         table_buttons_layout.addWidget(self.exit_btn)
@@ -1080,9 +1085,9 @@ class LogPlotPanel(QWidget):
 
     def on_keywords_changed(self, keywords):
         # Just reload if path exists
-        path_str = self.main_window.path_edit.text()
-        if path_str and os.path.exists(path_str):
-            self.load_project(Path(path_str), keywords)
+        paths = [p for p in self.main_window.get_project_paths() if os.path.exists(p)]
+        if paths:
+            self.load_project(paths, keywords)
 
     def save_state_for_exit(self):
         # Called by MainWindow closeEvent
@@ -1256,9 +1261,10 @@ class LogPlotPanel(QWidget):
         item = self.plot_table.item(row_index, 1)
         # Column 1: Plot name (QTableWidgetItem)
         data['plot_name'] = item.data(Qt.ItemDataRole.UserRole) or item.text() if item else "N/A | N/A | N/A | N/A"
-        # Extract ID (UserRole + 1)
+        # Extract ID (UserRole + 1) and the path this row's study came from (UserRole + 2)
         if item:
             data['plot_id'] = item.data(Qt.ItemDataRole.UserRole + 1)
+            data['origin'] = item.data(Qt.ItemDataRole.UserRole + 2)
 
         # Column 2: Show (QCheckBox)
         show_widget = self.plot_table.cellWidget(row_index, 2)
@@ -1295,6 +1301,8 @@ class LogPlotPanel(QWidget):
         name_item.setData(Qt.ItemDataRole.UserRole, data['plot_name'])
         if 'plot_id' in data:
             name_item.setData(Qt.ItemDataRole.UserRole + 1, data['plot_id'])
+        if data.get('origin'):
+            name_item.setData(Qt.ItemDataRole.UserRole + 2, data['origin'])
         self.plot_table.setItem(row_index, 1, name_item)
 
         # Column 2: Show
@@ -1359,6 +1367,82 @@ class LogPlotPanel(QWidget):
         combo.addItem(placeholder)
         combo.setCurrentIndex(0)
         return combo
+
+    def _resync_rows_to_paths(self, paths):
+        """Re-points rows at the current study keys and drops orphaned ones.
+
+        Study keys gain or lose their path prefix as chips come and go, so a row's
+        stable identity is the (source path, raw study folder) pair kept in UserRole+2.
+        Rows whose path chip is gone are removed; everything else is re-pointed.
+        """
+        origins = getattr(self, 'study_origins', None) or {}
+
+        for row in range(self.plot_table.rowCount()):
+            item = self.plot_table.item(row, 1)
+            if not item:
+                continue
+
+            name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+            study, system, x_axis, y_axis = self._parse_plot_name(name)
+            origin = item.data(Qt.ItemDataRole.UserRole + 2)
+
+            if not origin:
+                # Row from a single-path session: adopt the origin of its study key.
+                found = origins.get(study)
+                if found:
+                    item.setData(Qt.ItemDataRole.UserRole + 2, found)
+                continue
+
+            new_key = LogParser.qualify_study(origins, origin['path'], origin['study'])
+            if new_key and new_key != study:
+                item.setData(Qt.ItemDataRole.UserRole,
+                             self._build_plot_name(new_key, system, x_axis, y_axis))
+                self._update_row_display(row)
+
+        self._drop_rows_of_unloaded_paths(paths)
+
+    def _drop_rows_of_unloaded_paths(self, paths):
+        """Removes the rows of paths whose chip is gone, then rebuilds the survivors.
+
+        The rebuild is the point: every per-row cell widget captures its row index in
+        its signal handlers, so a bare removeRow() would leave each row below it wired
+        to the wrong index.
+        """
+        loaded = {LogParser.path_key(p) for p in paths}
+        survivors, dropped_ids = [], []
+        for row in range(self.plot_table.rowCount()):
+            item = self.plot_table.item(row, 1)
+            origin = item.data(Qt.ItemDataRole.UserRole + 2) if item else None
+            source = (origin or {}).get('path')
+            if source is None or LogParser.path_key(source) in loaded:
+                survivors.append(self._extract_row_data(row))
+            else:
+                dropped_ids.append(item.data(Qt.ItemDataRole.UserRole + 1))
+
+        if not dropped_ids:
+            return
+
+        for plot_id in dropped_ids:
+            self._detach_fits_from_plot(plot_id)
+
+        selected = self.plot_table.currentRow()
+        self.plot_table.blockSignals(True)
+        try:
+            self.plot_table.setRowCount(0)
+            for data in survivors:
+                row = self.plot_table.rowCount()
+                self.plot_table.insertRow(row)
+                self._populate_row_data(row, data)
+        finally:
+            self.plot_table.blockSignals(False)
+
+        self._update_all_row_displays()
+        self._update_move_buttons_visibility()
+
+        if self.plot_table.rowCount() == 0:
+            self.add_new_plot_row()
+        else:
+            self.plot_table.selectRow(min(max(selected, 0), self.plot_table.rowCount() - 1))
 
     def _parse_plot_name(self, plot_name: str) -> tuple:
         """Safely parse plot name into 4 components: study, system, x_axis, y_axis."""
@@ -1496,9 +1580,13 @@ class LogPlotPanel(QWidget):
             if component == 'study':
                 if value and value != "Select Study":
                     new_study = value
+                    # Remember which path chip this study came from. The key itself is
+                    # not stable - it gains a prefix as soon as another loaded path
+                    # contributes a study folder of the same name.
+                    plot_name_item.setData(Qt.ItemDataRole.UserRole + 2,
+                                           (self.study_origins or {}).get(value))
                     # Note: Changing study might invalidate the current System.
                     # We keep the old system string; if invalid, data fetching handles it (returns None).
-                    pass
                     
             elif component == 'system':
                 if value and value != "Select System":
@@ -1985,8 +2073,9 @@ class LogPlotPanel(QWidget):
             combo.setCurrentIndex(0)
 
     def load_project(self, root_path, keywords, show_discovery_warnings: bool = True, force_reload: bool = False, keep_table: bool = False, target_system=None):
+        paths = LogParser.normalize_paths(root_path)
         # Prevent redundant reloading if path is same and not forced
-        if not force_reload and self.loaded_path == root_path:
+        if not force_reload and self.loaded_path == paths:
             return
 
         preserved_view_ranges = None
@@ -2005,8 +2094,9 @@ class LogPlotPanel(QWidget):
             self._update_ui_state(project_loaded=False)
             return
 
-        studies, warnings, file_map = LogParser.discover_studies_systems(root_path, keywords)
-        
+        studies, warnings, file_map, origins = LogParser.discover_multi(paths, keywords)
+        self.study_origins = origins
+
         # Hide/show study/system selectors based on project structure
         # In Flat/Parent mode, we HAVE studies ('.' and '..'), so selectors should be VISIBLE.
         # Previously we hid them if keys == ['.']. 
@@ -2044,7 +2134,7 @@ class LogPlotPanel(QWidget):
              # Relax warning for flat mode
              pass
         
-        warnings, successful_keywords = self.data_manager.load_project_data(studies, root_path, keywords, file_map)
+        warnings, successful_keywords = self.data_manager.load_project_data(studies, paths, keywords, file_map)
         
         self.main_window.chip_input.update_chip_styles(successful_keywords)
 
@@ -2061,11 +2151,15 @@ class LogPlotPanel(QWidget):
         else:
             self.main_window.systems_label.setText("Systems: 0")
 
+        # Units and timestep come from the first path that can answer; they describe
+        # the simulation setup, and mixing them across projects would be meaningless.
         units = None
         timestep = None
-        if root_path.is_dir():
-            units = LogParser.get_units(root_path)
-            timestep = LogParser.get_timestep(root_path)
+        for base in paths:
+            base = Path(base)
+            if base.is_dir():
+                units = units or LogParser.get_units(base)
+                timestep = timestep or LogParser.get_timestep(base)
 
         time_units_map = {'lj': 'tau', 'real': 'fs', 'metal': 'ps', 'si': 's', 'cgs': 's', 'electron': 'fs', 'micro': 'us', 'nano': 'ns'}
         self.main_window.units_label.setText(f"Unit: {units or 'N/A'}")
@@ -2073,8 +2167,12 @@ class LogPlotPanel(QWidget):
         self.main_window.timestep_label.setText(f"Timestep: {timestep} {t_unit}" if timestep else "Timestep: N/A")
 
         # Update state tracking
-        self.loaded_path = root_path
-        
+        self.loaded_path = paths
+
+        # Rows remember (path, raw study); re-point them at the study keys this load
+        # produced and drop the ones whose path chip is gone.
+        self._resync_rows_to_paths(paths)
+
         self._update_ui_state(project_loaded=True, keep_table=keep_table)
         
         # Handle Auto-Selection
@@ -2144,8 +2242,10 @@ class LogPlotPanel(QWidget):
                 self._populate_axis_combo(self.xaxis_combo, self.data_manager.get_all_column_names())
                 self._populate_axis_combo(self.yaxis_combo, self.data_manager.get_all_column_names())
             
-            # Only add a default row if we cleared the table and have data
-            if not keep_table:
+            # Only add a default row if the table is empty (either because we cleared it,
+            # or because nothing was there to keep). Keyed on the row count rather than
+            # on keep_table so a preserved-but-empty table still gets its default row.
+            if self.plot_table.rowCount() == 0:
                 if self.data_manager.get_study_names() or self.data_manager.get_all_system_names():
                     self.add_new_plot_row()
                 else:
@@ -3013,29 +3113,7 @@ class LogPlotPanel(QWidget):
         deleted_plot_id = item.data(Qt.ItemDataRole.UserRole + 1) if item else None
 
         # 2. Update Fit Table: Detach any fit using this Source ID
-        if deleted_plot_id is not None and self.fit_table.rowCount() > 0:
-            for r in range(self.fit_table.rowCount()):
-                source_combo = self.fit_table.cellWidget(r, 1)
-                if not source_combo: continue
-                
-                # The combo holds the plot_id in the UserRole data
-                current_source_id = source_combo.currentData() 
-                
-                if current_source_id == deleted_plot_id:
-                    # Turn Fit Type to "Off"
-                    type_combo = self.fit_table.cellWidget(r, 2)
-                    if type_combo:
-                        type_combo.blockSignals(True)
-                        type_combo.setCurrentText("Off")
-                        type_combo.blockSignals(False)
-                    
-                    # Detach (Clear selection visually)
-                    # When update_plots runs later, this item will naturally disappear 
-                    # from the dropdown because it's removed from options, 
-                    # but setting index -1 ensures it's clean immediately.
-                    source_combo.blockSignals(True)
-                    source_combo.setCurrentIndex(-1) 
-                    source_combo.blockSignals(False)
+        self._detach_fits_from_plot(deleted_plot_id)
 
         self.plot_table.removeRow(row_to_delete)
 
@@ -3047,6 +3125,34 @@ class LogPlotPanel(QWidget):
             self._update_move_buttons_visibility()
             self._update_plot_labels()
             self.update_plots()
+
+    def _detach_fits_from_plot(self, plot_id):
+        """Turns off and unhooks any fit whose source is the given plot row."""
+        if plot_id is None or self.fit_table.rowCount() == 0:
+            return
+
+        for r in range(self.fit_table.rowCount()):
+            source_combo = self.fit_table.cellWidget(r, 1)
+            if not source_combo: continue
+
+            # The combo holds the plot_id in the UserRole data
+            if source_combo.currentData() != plot_id:
+                continue
+
+            # Turn Fit Type to "Off"
+            type_combo = self.fit_table.cellWidget(r, 2)
+            if type_combo:
+                type_combo.blockSignals(True)
+                type_combo.setCurrentText("Off")
+                type_combo.blockSignals(False)
+
+            # Detach (Clear selection visually)
+            # When update_plots runs later, this item will naturally disappear
+            # from the dropdown because it's removed from options,
+            # but setting index -1 ensures it's clean immediately.
+            source_combo.blockSignals(True)
+            source_combo.setCurrentIndex(-1)
+            source_combo.blockSignals(False)
 
     def _create_centered_widget(self, widget: QWidget) -> QWidget:
         container = QWidget()
@@ -3192,9 +3298,12 @@ class LogPlotPanel(QWidget):
         
     def _get_current_state_dict(self):
         """Helper to gather current state for saving."""
+        project_paths = self.main_window.get_project_paths()
         config = {
             'type': 'log',  # Simplified type identifier
-            'path': self.main_window.path_edit.text(),
+            # 'path' stays for older builds; 'project_paths' is authoritative.
+            'path': project_paths[0] if project_paths else '',
+            'project_paths': project_paths,
             'keywords': self.main_window.chip_input.get_chips(), # Added keywords
             'average_choices': self.average_user_choices,
             'running_mean_setting': self.running_mean_setting,
@@ -3221,6 +3330,8 @@ class LogPlotPanel(QWidget):
                 plot_info = {
                     'id': item.data(Qt.ItemDataRole.UserRole + 1),
                     'name': full_name,
+                    # Which path chip this row's study belongs to (see _resync_rows_to_paths)
+                    'origin': item.data(Qt.ItemDataRole.UserRole + 2),
                     'show': self.plot_table.cellWidget(row, 2).findChild(QCheckBox).isChecked(),
                     'mean': self.plot_table.cellWidget(row, 3).findChild(QLineEdit).text(),
                     'std': self.plot_table.cellWidget(row, 4).findChild(QCheckBox).isChecked(),
@@ -3252,7 +3363,7 @@ class LogPlotPanel(QWidget):
     def _is_session_valid(self):
         """Checks if the current session contains meaningful data to save."""
         # 1. Check if a project path is set
-        if not self.main_window.path_edit.text():
+        if not self.main_window.get_project_paths():
             return False
             
         # 2. Check if there are rows
@@ -3377,42 +3488,25 @@ class LogPlotPanel(QWidget):
         self.custom_properties = data.get('custom_properties', {})
         self.data_manager.set_custom_properties(self.custom_properties)
 
-        project_path = data.get('path')
+        project_paths = self.main_window.session_paths(data)
         keywords = data.get('keywords', [])
 
         # Prevent global widgets from triggering a reload during update
-        self.main_window.path_edit.blockSignals(True)
+        self.main_window.path_input.blockSignals(True)
         self.main_window.chip_input.blockSignals(True)
 
         try:
-            if project_path:
-                # Check for non-existent path
-                relocated = False
-                if not os.path.exists(project_path):
-                    action, new_path = MissingPathResolver.resolve(self, project_path)
-                    if action == 'cancel':
-                        return
-                    elif action == 'reset':
-                        # Clear path and reset panel
-                        self.main_window.path_edit.setText("")
-                        self.main_window.on_path_entered()
-                        return
-                    elif action == 'change':
-                        # Start with a new project path, clearing session
-                        self.main_window.path_edit.setText(new_path)
-                        self.main_window.on_path_entered()
-                        return
-                    elif action == 'relocate':
-                        # Use the new path but continue loading session data
-                        project_path = new_path
-                        relocated = True
+            if project_paths:
+                project_paths, relocated, action = self.main_window.resolve_session_paths(
+                    self, project_paths)
+                if action in ('cancel', 'reset', 'change'):
+                    return
 
-                self.main_window.path_edit.setText(project_path)
+                self.main_window.set_project_paths(project_paths)
                 self.main_window.chip_input.set_chips(keywords)
-                
-                root_path = Path(project_path)
+
                 # Internal load without UI warnings
-                self.load_project(root_path, keywords, show_discovery_warnings=False, keep_table=False)
+                self.load_project(project_paths, keywords, show_discovery_warnings=False, keep_table=False)
                 # Refresh combos
                 self._refresh_axis_combos()
 
@@ -3454,12 +3548,16 @@ class LogPlotPanel(QWidget):
                     'color': plot_info.get('color', QColor("black").name()),
                     'style': plot_info.get('style', "Solid"),
                     'thickness': plot_info.get('thickness', "1"),
-                    'plot_id': saved_id
+                    'plot_id': saved_id,
+                    'origin': plot_info.get('origin')
                 }
                 if 'id' not in plot_info:
                     self.next_plot_id += 1
                 self._populate_row_data(row, plot_data)
-            
+
+            # Rows are restored after load_project ran, so bind them to their paths here.
+            self._resync_rows_to_paths(self.main_window.get_project_paths())
+
             if self.plot_table.rowCount() > 0:
                 self.plot_table.selectRow(0)
                 
@@ -3532,7 +3630,7 @@ class LogPlotPanel(QWidget):
                             dialog.calculate_fit()
 
         finally:
-            self.main_window.path_edit.blockSignals(False)
+            self.main_window.path_input.blockSignals(False)
             self.main_window.chip_input.blockSignals(False)
 
     def export_image(self):

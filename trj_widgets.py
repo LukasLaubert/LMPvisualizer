@@ -520,20 +520,88 @@ class FilterBarWidget(QWidget):
 
 
 class HeatmapBarWidget(QWidget):
+    """Colour-scale bar for the heatmap.
+
+    The min/max numbers are click-to-edit (same interaction as the step labels below
+    the plot), so the user can pin the colour scale instead of always following the
+    data range. The reset button drops the override and returns to the auto range.
+    """
+    # Emitted with (min, max) when the user commits an edit.
+    boundsEdited = pyqtSignal(float, float)
+    # Emitted when the user clicks the reset button.
+    boundsReset = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(50)
+        self.setFixedWidth(70)
         self.setMinimumHeight(150)
-        
+
         self.data_min = 0.0
         self.data_max = 1.0
+        self._is_override = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(2)
+
+        self.max_lbl = EditableLabel(self._fmt(self.data_max))
+        self.min_lbl = EditableLabel(self._fmt(self.data_min))
+        for lbl in (self.max_lbl, self.min_lbl):
+            lbl.setToolTip("Click to set a fixed colour-scale bound")
+            lbl.valueChanged.connect(self._on_label_edited)
+
+        self.reset_btn = QPushButton("↺")
+        self.reset_btn.setFixedHeight(18)
+        self.reset_btn.setToolTip("Reset the colour scale to the data range")
+        self.reset_btn.setVisible(False)
+        self.reset_btn.clicked.connect(self.boundsReset.emit)
+
+        layout.addWidget(self.max_lbl)
+        layout.addStretch(1)          # the gradient is painted into this gap
+        layout.addWidget(self.min_lbl)
+        layout.addWidget(self.reset_btn)
+
         # Default to Rainbow (Jet) matching Controller default
         self.set_gradient_name("Rainbow")
+        self._refresh_labels()
 
-    def set_range(self, dmin, dmax):
+    @staticmethod
+    def _fmt(value):
+        try:
+            return f"{float(value):.1e}"
+        except (TypeError, ValueError):
+            return "0.0e+00"
+
+    def set_range(self, dmin, dmax, is_override=False):
         self.data_min = dmin
         self.data_max = dmax
+        self._is_override = is_override
+        self._refresh_labels()
         self.update()
+
+    def _refresh_labels(self):
+        # Block signals: this is a programmatic update, not a user edit.
+        for lbl, val in ((self.max_lbl, self.data_max), (self.min_lbl, self.data_min)):
+            lbl.blockSignals(True)
+            lbl.setText(self._fmt(val))
+            lbl.blockSignals(False)
+            lbl.label.setStyleSheet(
+                "font-weight: bold; color: #0057b8;" if self._is_override else ""
+            )
+        self.reset_btn.setVisible(self._is_override)
+
+    def _on_label_edited(self, _text):
+        """Validates both fields together and reports the new bounds."""
+        try:
+            hi = float(self.max_lbl.text_value)
+            lo = float(self.min_lbl.text_value)
+        except ValueError:
+            self._refresh_labels()   # revert to the last valid pair
+            return
+
+        if lo > hi:
+            lo, hi = hi, lo
+        self.boundsEdited.emit(lo, hi)
 
     def set_gradient_name(self, name):
         self.gradient = QLinearGradient(0, 0, 0, 1)
@@ -579,29 +647,21 @@ class HeatmapBarWidget(QWidget):
         self.update()
 
     def paintEvent(self, event):
+        # Only the gradient is painted now; the numbers are real EditableLabel widgets.
         painter = QPainter(self)
         w = self.width()
-        h = self.height()
-        
-        margin_top = 20
-        margin_bottom = 20
+
         bar_w = 15
         bar_x = (w - bar_w) // 2
-        bar_h = h - margin_top - margin_bottom
-        
-        painter.setPen(Qt.GlobalColor.black)
-        font = painter.font()
-        font.setPointSize(7)
-        painter.setFont(font)
-        
-        # Draw Max at Top
-        painter.drawText(QRectF(0, 0, w, margin_top), Qt.AlignmentFlag.AlignCenter, f"{self.data_max:.1e}")
-        # Draw Min at Bottom
-        painter.drawText(QRectF(0, h - margin_bottom, w, margin_bottom), Qt.AlignmentFlag.AlignCenter, f"{self.data_min:.1e}")
-        
+        top = self.max_lbl.geometry().bottom() + 2
+        bottom = self.min_lbl.geometry().top() - 2
+
+        if bottom <= top:
+            return
+
         painter.setBrush(QBrush(self.gradient))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRect(QRectF(bar_x, margin_top, bar_w, bar_h))
+        painter.drawRect(QRectF(bar_x, top, bar_w, bottom - top))
 
 
 class EditableLabel(QWidget):

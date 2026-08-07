@@ -12,7 +12,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
-from ui_components import ChipInputWidget, NoNewLineDelegate, ColorButton, NeutralPanel
+from ui_components import (ChipInputWidget, PathChipInputWidget, NoNewLineDelegate,
+                           ColorButton, NeutralPanel)
 from log_parser import LogParser
 from log_plot_panel import LogPlotPanel
 from trj_plot_panel import TrjPlotPanel
@@ -83,10 +84,12 @@ class MainWindow(QMainWindow):
         path_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self.top_controls_layout.addWidget(path_lbl, 0, 0)
         
-        self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText("Select Project Root Directory...")
-        self.path_edit.editingFinished.connect(self.on_path_entered)
-        self.top_controls_layout.addWidget(self.path_edit, 0, 1)
+        self.path_input = PathChipInputWidget()
+        self.path_input.submitted.connect(self.on_path_submitted)
+        self.path_input.pathsChanged.connect(self.on_paths_changed)
+        # Legacy alias: everything that only ever wanted the typing field still works.
+        self.path_edit = self.path_input.input_line
+        self.top_controls_layout.addWidget(self.path_input, 0, 1)
         
         self.browse_btn = QPushButton("Browse...")
         self.browse_btn.setFixedWidth(80)
@@ -177,7 +180,11 @@ class MainWindow(QMainWindow):
         self.neutral_panel.set_autoload_state(self.autoload_enabled)
         
         # Reset Top Controls
-        self.path_edit.clear()
+        self.path_input.blockSignals(True)
+        self.path_input.set_paths([], silent=True)
+        self.path_input.clear_input()
+        self.path_input.blockSignals(False)
+        self.current_project_path = ""
         self.chip_input.blockSignals(True)
         self.chip_input.set_chips([])
         self.chip_input.blockSignals(False)
@@ -237,7 +244,7 @@ class MainWindow(QMainWindow):
 
     def set_interface_locked(self, locked: bool):
         """Locks or unlocks the top controls."""
-        self.path_edit.setEnabled(not locked)
+        self.path_input.setEnabled(not locked)
         self.browse_btn.setEnabled(not locked)
         self.refresh_btn.setEnabled(not locked)
         self.chip_input.setEnabled(not locked)
@@ -374,7 +381,8 @@ class MainWindow(QMainWindow):
             return
 
         path = None
-        start_path = self.path_edit.text()
+        existing = self.get_project_paths()
+        start_path = existing[-1] if existing else self.path_edit.text()
         if not os.path.exists(start_path):
             start_path = str(Path.home())
 
@@ -384,102 +392,169 @@ class MainWindow(QMainWindow):
             path, _ = QFileDialog.getOpenFileName(self, "Select Single File", directory=start_path)
 
         if path:
-            self.path_edit.setText(path)
-            self.on_path_entered()
+            # Browse ADDS a path; it no longer replaces what is already loaded.
+            self.on_path_submitted(path)
 
-    def on_path_entered(self):
+    # --- Project paths (chips) ---
+
+    def get_project_paths(self) -> list:
+        return self.path_input.get_paths()
+
+    def set_project_paths(self, paths, silent=True):
+        """Replaces the chip set, by default without triggering a reload.
+
+        Session loaders use silent=True because they run their own load right after.
+        """
+        self.path_input.blockSignals(silent)
+        try:
+            self.path_input.set_paths([p for p in (paths or []) if p], silent=silent)
+        finally:
+            self.path_input.blockSignals(False)
+        self.current_project_path = self.get_project_paths()[0] if self.get_project_paths() else ""
+
+    @staticmethod
+    def session_paths(data: dict) -> list:
+        """Reads the project paths out of a session dict.
+
+        'project_paths' is the current field; sessions written before multi-path
+        support only carry the single 'project_path'.
+        """
+        paths = data.get('project_paths')
+        if paths is None:
+            single = data.get('project_path') or data.get('path') or ''
+            paths = [single] if single else []
+        return [p for p in paths if p]
+
+    def resolve_session_paths(self, panel, paths):
+        """Runs MissingPathResolver over every path a session refers to.
+
+        Returns (paths, relocated, action). An action of 'cancel', 'reset' or 'change'
+        means the caller must abort - the resolver has already taken over.
+        """
+        from ui_components import MissingPathResolver
+
+        resolved, relocated = [], False
+        for project_path in paths:
+            if os.path.exists(project_path):
+                resolved.append(project_path)
+                continue
+
+            action, new_path = MissingPathResolver.resolve(panel, project_path)
+            if action == 'cancel':
+                return paths, False, 'cancel'
+            if action == 'reset':
+                # Drop every path and reset the panel.
+                self.set_project_paths([], silent=False)
+                return [], False, 'reset'
+            if action == 'change':
+                # Start over from the new path, discarding the session's rows.
+                self.set_project_paths([new_path], silent=False)
+                return [new_path], False, 'change'
+            if action == 'relocate':
+                resolved.append(new_path)
+                relocated = True
+
+        return resolved, relocated, 'ok'
+
+    def on_path_submitted(self, text: str):
+        """A path was typed, pasted or picked through Browse. It becomes a new chip.
+
+        A session .json is not a project path - it still switches mode and loads,
+        exactly as before.
+        """
+        # Committing a path also commits a half-typed keyword, as it always has.
         self.chip_input.add_chip_from_input()
-        path_str = self.path_edit.text()
-        
-        if not path_str:
-             # Path cleared: Reset current panel to default
-             self.current_project_path = ""
-             current_panel = self.stacked_widget.currentWidget()
-             if hasattr(current_panel, '_update_ui_state'):
-                 current_panel.loaded_path = None
-                 current_panel._update_ui_state(project_loaded=False)
-             return
 
-        if path_str == self.current_project_path:
+        text = (text or "").strip().strip('"')
+        if not text:
             return
-        
-        path = Path(path_str)
+
+        path = Path(text)
         if not path.exists():
-             QMessageBox.critical(self, "Error", "The specified path does not exist.")
-             self.path_edit.setText(self.current_project_path)
-             return
-             
-        if path.is_file():
-             # Check for JSON Session File
-             if path.suffix.lower() == '.json':
-                 try:
-                     with open(path, 'r') as f:
-                         data = json.load(f)
-                     
-                     file_type = data.get('type')
-                     
-                     # Map type string to Mode Constant (Support legacy *_plot suffix)
-                     type_map = {
-                         'dsd': self.MODE_DSD, 'dsd_plot': self.MODE_DSD,
-                         'trj': self.MODE_TRJ, 'trj_plot': self.MODE_TRJ,
-                         'log': self.MODE_LOG, 'log_plot': self.MODE_LOG
-                     }
-                     
-                     if file_type in type_map:
-                         detected_mode = type_map[file_type]
-                         
-                         # Switch and Load
-                         self.switch_to_mode(detected_mode)
-                         current_panel = self.stacked_widget.currentWidget()
-                         if hasattr(current_panel, 'load_session_from_file'):
-                             current_panel.load_session_from_file(str(path))
-                             self.path_edit.setText(str(path))
-                             return
-                     else:
-                         QMessageBox.warning(self, "Invalid Session File", 
-                             f"The file '{path.name}' is not a valid session file OR has an unknown type.\n\n"
-                             f"Found type: '{file_type}'\n\n"
-                             "Valid types:\n"
-                             "- 'dsd' (DSD Mode)\n"
-                             "- 'trj' (Trajectory Plot)\n"
-                             "- 'log' (Log Plot)")
-                         return
+            # Clear first: editingFinished fires again on focus-out and would otherwise
+            # re-raise the same dialog for the same bad text.
+            self.path_input.clear_input()
+            QMessageBox.critical(self, "Error", "The specified path does not exist.")
+            return
 
-                 except Exception as e:
-                     QMessageBox.warning(self, "Error", f"Failed to parse JSON file:\n{e}")
-                     return
+        if path.is_file() and path.suffix.lower() == '.json':
+            self.path_input.clear_input()
+            self._load_session_file(path)
+            return
 
-             # If a specific file is entered (not JSON session), load its parent directory 
-             # and request auto-selection of this file as the target system.
-             self.propagate_load(path.parent, target_system=path.stem)
-             # Update path to parent for clarity
-             self.path_edit.setText(str(path.parent))
-             self.current_project_path = str(path.parent)
-        else:
-             if path.is_dir():
-                try:
-                     # Attempt to find root if inside a subdirectory
-                     root = LogParser.find_project_root(path_str)
-                     self.path_edit.setText(str(root))
-                     path = root
-                except FileNotFoundError:
-                     pass
-            
-             self.current_project_path = self.path_edit.text()
-             self.propagate_load(path)
+        if path.is_dir():
+            try:
+                # Attempt to find root if inside a subdirectory
+                path = LogParser.find_project_root(str(path))
+            except FileNotFoundError:
+                pass
+
+        self.path_input.clear_input()
+        if not self.path_input.add_path(str(path)):
+            print(f"[System] Path already loaded: {path}")
+
+    def _load_session_file(self, path: Path):
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to parse JSON file:\n{e}")
+            return
+
+        file_type = data.get('type')
+
+        # Map type string to Mode Constant (Support legacy *_plot suffix)
+        type_map = {
+            'dsd': self.MODE_DSD, 'dsd_plot': self.MODE_DSD,
+            'trj': self.MODE_TRJ, 'trj_plot': self.MODE_TRJ,
+            'log': self.MODE_LOG, 'log_plot': self.MODE_LOG
+        }
+
+        if file_type not in type_map:
+            QMessageBox.warning(self, "Invalid Session File",
+                f"The file '{path.name}' is not a valid session file OR has an unknown type.\n\n"
+                f"Found type: '{file_type}'\n\n"
+                "Valid types:\n"
+                "- 'dsd' (DSD Mode)\n"
+                "- 'trj' (Trajectory Plot)\n"
+                "- 'log' (Log Plot)")
+            return
+
+        self.switch_to_mode(type_map[file_type])
+        current_panel = self.stacked_widget.currentWidget()
+        if hasattr(current_panel, 'load_session_from_file'):
+            current_panel.load_session_from_file(str(path))
+
+    def on_paths_changed(self, paths):
+        """A chip was added or removed - reload the current panel against the new set."""
+        self.current_project_path = paths[0] if paths else ""
+
+        if not paths:
+            current_panel = self.stacked_widget.currentWidget()
+            # Panels that want a say in what survives a cleared path provide
+            # on_path_cleared(); the rest fall back to the plain reset.
+            if hasattr(current_panel, 'on_path_cleared'):
+                current_panel.on_path_cleared()
+            elif hasattr(current_panel, '_update_ui_state'):
+                current_panel.loaded_path = None
+                current_panel._update_ui_state(project_loaded=False)
+            return
+
+        # keep_table=True so adding or removing a path does not destroy the user's rows;
+        # rows belonging to a removed path are pruned by the panel itself.
+        self.propagate_load(paths, force_reload=True, keep_table=True)
 
     def on_refresh_clicked(self):
-        path_str = self.path_edit.text()
-        if path_str and os.path.exists(path_str):
-            # No target system on refresh, unless we tracked it? 
-            # For now, just reload the path.
-            self.propagate_load(Path(path_str), force_reload=True)
+        paths = [p for p in self.get_project_paths() if os.path.exists(p)]
+        if paths:
+            # keep_table=True: a refresh re-reads the same project, it must not wipe the table.
+            self.propagate_load(paths, force_reload=True, keep_table=True)
 
     def on_keywords_changed(self, keywords):
-        path_str = self.path_edit.text()
-        if path_str:
+        paths = self.get_project_paths()
+        if paths:
             # Pass keep_table=True so we don't wipe the user's work when adding a keyword
-            self.propagate_load(Path(path_str), force_reload=True, keep_table=True)
+            self.propagate_load(paths, force_reload=True, keep_table=True)
 
     def propagate_load(self, path, force_reload=False, keep_table=False, target_system=None):
         # Send load command to CURRENT panel

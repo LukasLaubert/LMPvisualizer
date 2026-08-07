@@ -321,13 +321,24 @@ class LogController:
         for name in list(self.plots.keys()):
             self.remove_plot(name)
             
-        # Clear the dynamically added axes and viewboxes
+        # Clear the dynamically added axes and viewboxes.
+        # Teardown must mirror creation exactly (layout.addItem + scene().addItem +
+        # linkToView). Taking the axis out of the layout alone leaves it parented in
+        # the scene - still painted, and still linked to a ViewBox we are about to
+        # drop - which crashes GraphicsView.paintEvent once that ViewBox is collected.
         for y_col, axis_info in list(self.y_axes.items()):
+            axis, viewbox = axis_info['axis'], axis_info['viewbox']
             # Don't remove the default left axis
-            if axis_info['axis'] is not self.plot_item.getAxis('left'):
-                self.plot_item.layout.removeItem(axis_info['axis'])
-                if axis_info['viewbox'].scene():
-                    self.plot_item.scene().removeItem(axis_info['viewbox'])
+            if axis is not self.plot_item.getAxis('left'):
+                self.plot_item.layout.removeItem(axis)
+                try:
+                    axis.unlinkFromView()
+                except Exception:
+                    pass
+                if axis.scene():
+                    axis.scene().removeItem(axis)
+                if viewbox.scene():
+                    self.plot_item.scene().removeItem(viewbox)
 
         self.plots.clear()
         self.y_axes.clear()

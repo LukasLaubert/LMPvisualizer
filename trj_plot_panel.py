@@ -32,9 +32,18 @@ class TrjPlotPanel(QWidget):
         self.data_manager = TrjDataManager()
         self.controller = None 
         self.loaded_path = None
-        self.global_label_map = {} 
+        # study key -> {'path': <project path>, 'study': <raw folder name>}
+        self.study_origins = {}
+        self._pending_study_key = None
+        # Armed when the loaded project set changed under the current selection, so the
+        # next study/system binding widens the step window instead of conserving it.
+        self._reset_range_on_next_bind = False
+        self.global_label_map = {}
         self._updating_from_code = False
-        
+        # Set while load_project() rebuilds the data manager, so on_system_changed()
+        # forces the controller to re-derive its timestep lists and reset the range.
+        self._force_system_reload = False
+
         # Track last selected row to save state before switching
         self.last_selected_row = -1
         
@@ -85,58 +94,16 @@ class TrjPlotPanel(QWidget):
         self.left_grid.setColumnStretch(1, 1)
         self.left_grid.setColumnStretch(3, 1)
 
-        top_layout.addLayout(self.left_grid, stretch=3)
+        # Stretch left side to take priority (matches dsd)
+        top_layout.addLayout(self.left_grid, stretch=5)
 
-        # 3. Visual Divider
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.VLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        line.setLineWidth(1)
-        line.setStyleSheet("background-color: #888; margin-top: 5px; margin-bottom: 5px;")
-        top_layout.addWidget(line)
-
-        # 4. Right Controls
-        self.right_grid = QGridLayout()
-        self.right_grid.setContentsMargins(0, 0, 0, 0)
-        self.right_grid.setHorizontalSpacing(10)
-        self.right_grid.setVerticalSpacing(5)
-
-        self.right_grid.addWidget(QLabel("Z-Filter"), 0, 0)
-        self.zfilter_combo = self._create_combo("No Z-Filter")
-        self.right_grid.addWidget(self.zfilter_combo, 0, 1)
-        
-        ref_options = ["Initial", "Final"]
-        # self.zfilter_ref_combo = self._create_combo("Current", ref_options) # Replaced for order control
-        
-        self.zfilter_ref_combo = QComboBox()
-        self.zfilter_ref_combo.setItemDelegate(NoNewLineDelegate(self.zfilter_ref_combo))
-        self.zfilter_ref_combo.addItems(["Initial", "Current", "Final", "Set step"])
-        self.zfilter_ref_combo.setCurrentText("Current")
-        self.zfilter_ref_combo.setFixedWidth(120)
-        self.zfilter_ref_combo.setEnabled(False)
-        self.right_grid.addWidget(self.zfilter_ref_combo, 0, 2)
-
-        self.right_grid.addWidget(QLabel("Heatmap"), 1, 0)
-        self.heatmap_combo = self._create_combo("No Heatmap")
-        self.right_grid.addWidget(self.heatmap_combo, 1, 1)
-        
-        self.heatmap_ref_combo = QComboBox()
-        self.heatmap_ref_combo.setItemDelegate(NoNewLineDelegate(self.heatmap_ref_combo))
-        self.heatmap_ref_combo.addItems(["Initial", "Current", "Final", "Set step"])
-        self.heatmap_ref_combo.setCurrentText("Current")
-        self.heatmap_ref_combo.setFixedWidth(120)
-        self.heatmap_ref_combo.setEnabled(False)
-        self.right_grid.addWidget(self.heatmap_ref_combo, 1, 2)
-        
-        self.right_grid.setColumnStretch(1, 1)
-
-        top_layout.addLayout(self.right_grid, stretch=3)
-
-        # 5. Add Button
+        # 3. Add / Auto Preload - placed LEFT of the divider so they belong to the
+        #    plot-side block, and so the divider can line up with the splitter handle.
         self.add_btn = QPushButton("Add")
         self.add_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         self.add_btn.setMinimumWidth(60)
-        self.add_btn.clicked.connect(self.add_new_row)
+        # clicked is wired in _connect_signals(); connecting it here as well made every
+        # click add two rows.
         top_layout.addWidget(self.add_btn)
 
         self.idx_btn = QPushButton("Auto\nPreload")
@@ -145,11 +112,67 @@ class TrjPlotPanel(QWidget):
         self.idx_btn.clicked.connect(self._on_auto_index_clicked)
         top_layout.addWidget(self.idx_btn)
 
+        # 4. Visual Divider
+        self.header_divider = QFrame()
+        self.header_divider.setFrameShape(QFrame.Shape.VLine)
+        self.header_divider.setFrameShadow(QFrame.Shadow.Sunken)
+        self.header_divider.setLineWidth(1)
+        self.header_divider.setStyleSheet("background-color: #888; margin-top: 5px; margin-bottom: 5px;")
+        top_layout.addWidget(self.header_divider)
+
+        # 5. Right Controls - inside a container so its width can be pinned to the
+        #    table pane, which keeps the divider above the splitter handle.
+        self.right_container = QWidget()
+        self.right_grid = QGridLayout(self.right_container)
+        self.right_grid.setContentsMargins(0, 0, 0, 0)
+        self.right_grid.setHorizontalSpacing(10)
+        self.right_grid.setVerticalSpacing(5)
+
+        # Column Widths (kept identical to dsd so both headers line up)
+        middle_min_width = 180   # For Z-Filter and Heatmap
+        far_right_fixed_width = 150  # For the two Ref combos
+
+        self.right_grid.addWidget(QLabel("Z-Filter"), 0, 0)
+        self.zfilter_combo = self._create_combo("No Z-Filter")
+        self.zfilter_combo.setMinimumWidth(middle_min_width)
+        self.right_grid.addWidget(self.zfilter_combo, 0, 1)
+
+        ref_options = ["Initial", "Final"]
+        # self.zfilter_ref_combo = self._create_combo("Current", ref_options) # Replaced for order control
+        
+        self.zfilter_ref_combo = QComboBox()
+        self.zfilter_ref_combo.setItemDelegate(NoNewLineDelegate(self.zfilter_ref_combo))
+        self.zfilter_ref_combo.addItems(["Initial", "Current", "Final", "Set step"])
+        self.zfilter_ref_combo.setCurrentText("Current")
+        self.zfilter_ref_combo.setFixedWidth(far_right_fixed_width)
+        self.zfilter_ref_combo.setEnabled(False)
+        self.right_grid.addWidget(self.zfilter_ref_combo, 0, 2)
+
+        self.right_grid.addWidget(QLabel("Heatmap"), 1, 0)
+        self.heatmap_combo = self._create_combo("No Heatmap")
+        self.heatmap_combo.setMinimumWidth(middle_min_width)
+        self.right_grid.addWidget(self.heatmap_combo, 1, 1)
+
+        self.heatmap_ref_combo = QComboBox()
+        self.heatmap_ref_combo.setItemDelegate(NoNewLineDelegate(self.heatmap_ref_combo))
+        self.heatmap_ref_combo.addItems(["Initial", "Current", "Final", "Set step"])
+        self.heatmap_ref_combo.setCurrentText("Current")
+        self.heatmap_ref_combo.setFixedWidth(far_right_fixed_width)
+        self.heatmap_ref_combo.setEnabled(False)
+        self.right_grid.addWidget(self.heatmap_ref_combo, 1, 2)
+
+        # Right side takes only what it needs (stretch=0), matching dsd: the columns
+        # are pinned, so all extra window width goes to the left block instead of
+        # widening these combos.
+        top_layout.addWidget(self.right_container, stretch=0)
+
+        self.top_layout = top_layout
         main_layout.addWidget(top_container)
 
         # --- Main Splitter ---
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        
+        self.main_splitter = main_splitter
+
         # Canvas
         canvas_container = QWidget()
         canvas_layout = QVBoxLayout(canvas_container)
@@ -268,6 +291,46 @@ class TrjPlotPanel(QWidget):
         
         main_layout.addWidget(main_splitter, 1)
 
+    # --- Header divider alignment ---
+
+    def _sync_header_divider(self):
+        """Keeps the header's vertical divider above the splitter handle.
+
+        The header and the splitter are siblings, so nothing links them by default.
+        Pinning the right block's width to the table pane makes the divider track the
+        handle as the user drags it.
+        """
+        if not hasattr(self, 'right_container') or not hasattr(self, 'main_splitter'):
+            return
+
+        sizes = self.main_splitter.sizes()
+        if len(sizes) < 2 or sizes[0] <= 0:
+            return
+
+        margins = self.top_layout.contentsMargins()
+        spacing = self.top_layout.spacing()
+        line_w = self.header_divider.sizeHint().width()
+        handle_w = self.main_splitter.handleWidth()
+
+        # divider centre == handle centre  ->  solve for the right block's width
+        width = (self.width() - margins.right() - spacing - line_w / 2.0
+                 - sizes[0] - handle_w / 2.0)
+        width = int(round(width))
+
+        # Never shrink below what the controls actually need.
+        min_w = self.right_container.sizeHint().width()
+        self.right_container.setFixedWidth(max(width, min_w))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_header_divider()
+
+    def showEvent(self, event):
+        # The panel lives in a QStackedWidget, so it may never get a resize event
+        # between construction and first display - sync the divider explicitly.
+        super().showEvent(event)
+        self._sync_header_divider()
+
     # --- Helpers & Logic ---
 
     def attach_mode_combo(self, combo_box):
@@ -316,7 +379,11 @@ class TrjPlotPanel(QWidget):
         
         # Updated connection
         self.filter_bar.rangesChanged.connect(self._on_filter_bar_changed)
-        
+
+        self.heatmap_bar.boundsEdited.connect(self._on_heatmap_bounds_edited)
+        self.heatmap_bar.boundsReset.connect(self._on_heatmap_bounds_reset)
+
+
         self.popout_btn.clicked.connect(self.launch_popout)
         # self.export_btn click is handled by its dropdown menu
         self.save_btn.clicked.connect(self.save_session)
@@ -325,6 +392,17 @@ class TrjPlotPanel(QWidget):
         
         self.lock_axes_btn.toggled.connect(self._on_view_lock_toggled)
         self.lock_axes_btn.rightClicked.connect(self._on_view_sync_toggled)
+
+        # pyqtgraph's own auto-range button re-arms the ViewBox's auto-range flag, which
+        # silently defeats our lock (the view keeps refitting on every redraw). PlotItem
+        # connected its handler first, so ours runs after the fit has been applied.
+        try:
+            self.plot_widget.getPlotItem().autoBtn.clicked.connect(self._on_auto_range_clicked)
+        except Exception as e:
+            print(f"[System] Could not hook the auto-range button: {e}")
+
+        # Keep the header divider above the splitter handle while it is dragged
+        self.main_splitter.splitterMoved.connect(lambda *_: self._sync_header_divider())
 
     def _on_jump_to_step(self, val):
         if not self.controller.timesteps: return
@@ -336,16 +414,54 @@ class TrjPlotPanel(QWidget):
         self._save_step_to_current_row(idx)
 
     def load_project(self, root_path, keywords, force_reload=False, keep_table=False, target_system=None):
-        if not force_reload and self.loaded_path == root_path:
+        paths = LogParser.normalize_paths(root_path)
+        if not force_reload and self.loaded_path == paths:
             return
 
-        studies, warnings, file_map = LogParser.discover_studies_systems(root_path, keywords)
-        warnings_load, _ = self.data_manager.load_project_data(studies, root_path, keywords, file_map)
+        # A study key gains or loses its path prefix as chips come and go, so note
+        # which folder the current selection points at before the keys are rebuilt.
+        previous = (self.study_origins or {}).get(self.study_combo.currentText())
+
+        studies, warnings, file_map, origins = LogParser.discover_multi(paths, keywords)
+        self.study_origins = origins
+        self._pending_study_key = (
+            LogParser.qualify_study(origins, previous['path'], previous['study'])
+            if previous else None)
+        warnings_load, _ = self.data_manager.load_project_data(studies, paths, keywords, file_map)
         warnings.extend(warnings_load)
-        
-        self.loaded_path = root_path
-        self._update_ui_state(project_loaded=True, keep_table=keep_table)
-        
+
+        self.loaded_path = paths
+        # Rows remember (path, raw study); re-point them at the study keys this load
+        # produced and drop the ones whose path chip is gone.
+        self._resync_rows_to_paths(paths)
+        # The data manager was just rebuilt, so the controller's cached timestep lists
+        # are stale even if the study/system names happen to be identical, and the step
+        # window must widen back to the new trajectory's full extent.
+        self._force_system_reload = True
+        try:
+            self._update_ui_state(project_loaded=True, keep_table=keep_table)
+        finally:
+            self._force_system_reload = False
+
+        if previous and not any(LogParser.same_path(previous['path'], p) for p in paths):
+            # The project the selection belonged to is gone. A different project can
+            # carry the very same study/system folder names, so drop the controller's
+            # identity - otherwise set_active_system() would short-circuit on the
+            # matching names and keep serving the old trajectory's timesteps.
+            self.controller.current_study = None
+            self.controller.current_system = None
+            # Conserving the old project's step window across a project swap is
+            # meaningless, but the user may only pick the study later - so arm the
+            # reset for whenever that binding happens.
+            self._reset_range_on_next_bind = True
+
+            # Nothing took the selection's place: blank the scene rather than keep
+            # showing a project that is no longer loaded. Deliberately narrow, so a
+            # plain reload cannot disturb a restored step range.
+            if self.study_combo.currentText() == "Select Study":
+                self.player_controls.set_timesteps([])
+                self.controller.update_view_config({'active': False})
+
         if target_system:
             if "." in studies:
                 self.study_combo.setCurrentText(".")
@@ -353,6 +469,87 @@ class TrjPlotPanel(QWidget):
                 index = self.system_combo.findText(target_system)
                 if index != -1:
                     self.system_combo.setCurrentIndex(index)
+
+    def _study_origin_fields(self, study_key):
+        """The (path, raw study) a study key came from, for storing in a row."""
+        origin = (getattr(self, 'study_origins', None) or {}).get(study_key)
+        if not origin:
+            return {}
+        return {'source_path': origin['path'], 'study_raw': origin['study']}
+
+    def _resync_rows_to_paths(self, paths):
+        """Re-points rows at the current study keys and drops orphaned ones.
+
+        Study keys gain or lose their path prefix as chips come and go, so a row's
+        stored key is not stable - the stable identity is (source_path, raw study).
+        Rows whose path chip is gone are removed; everything else is re-pointed.
+        """
+        origins = getattr(self, 'study_origins', None) or {}
+
+        for row in range(self.plot_table.rowCount()):
+            item = self.plot_table.item(row, 1)
+            state = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if not state:
+                continue
+
+            source = state.get('source_path')
+            if source is None:
+                # Row from a single-path session: adopt the origin of its study key.
+                origin = origins.get(state.get('study'))
+                if origin:
+                    state['source_path'] = origin['path']
+                    state['study_raw'] = origin['study']
+                    item.setData(Qt.ItemDataRole.UserRole, state)
+                continue
+
+            new_key = LogParser.qualify_study(origins, source, state.get('study_raw'))
+            if new_key and new_key != state.get('study'):
+                state['study'] = new_key
+                item.setData(Qt.ItemDataRole.UserRole, state)
+                item.setText(f"{new_key} | {state.get('system', 'N/A')}")
+
+        self._drop_rows_of_unloaded_paths(paths)
+
+    def _drop_rows_of_unloaded_paths(self, paths):
+        """Removes the rows of paths whose chip is gone, then rebuilds the survivors.
+
+        The rebuild is the point: every per-row cell widget captures its row index in
+        its signal handlers, so a bare removeRow() would leave each row below it wired
+        to the wrong index.
+        """
+        loaded = {LogParser.path_key(p) for p in paths}
+        survivors, dropped = [], 0
+        for row in range(self.plot_table.rowCount()):
+            item = self.plot_table.item(row, 1)
+            state = item.data(Qt.ItemDataRole.UserRole) if item else None
+            source = (state or {}).get('source_path')
+            if source is None or LogParser.path_key(source) in loaded:
+                survivors.append(self._extract_row_data(row))
+            else:
+                dropped += 1
+
+        if not dropped:
+            return
+
+        selected = self.plot_table.currentRow()
+        self.plot_table.blockSignals(True)
+        try:
+            self.plot_table.setRowCount(0)
+            for data in survivors:
+                row = self.plot_table.rowCount()
+                self.plot_table.insertRow(row)
+                self._populate_row_data(row, data)
+        finally:
+            self.plot_table.blockSignals(False)
+
+        self.last_selected_row = -1
+        self._update_move_buttons_visibility()
+
+        if self.plot_table.rowCount() == 0:
+            self._reset_controls_to_defaults()
+            self.add_new_row()
+        else:
+            self.plot_table.selectRow(min(max(selected, 0), self.plot_table.rowCount() - 1))
 
     def _update_ui_state(self, project_loaded, keep_table=False):
         if not keep_table:
@@ -366,8 +563,16 @@ class TrjPlotPanel(QWidget):
             self.add_btn.setEnabled(True)
             
             studies = self.data_manager.get_study_names()
-            self._populate_combo(self.study_combo, "Select Study", studies)
-            
+            # Preserve the current selection across a reload, and force the cascade:
+            # _populate_combo blocks signals, so without this the system combo would
+            # still list the PREVIOUS project's systems and the controller would keep
+            # its stale timestep lists.
+            # _pending_study_key follows the selection through a re-qualified key.
+            self._populate_combo(self.study_combo, "Select Study", studies,
+                                 self._pending_study_key or self.study_combo.currentText())
+            self._pending_study_key = None
+            self.on_study_changed(self.study_combo.currentText())
+
             if self.plot_table.rowCount() == 0:
                 self.add_new_row()
         else:
@@ -405,7 +610,12 @@ class TrjPlotPanel(QWidget):
             parser = self.data_manager.get_parser(study, text)
             if parser:
                 cols = parser.get_column_names()
-                self.controller.set_active_system(study, text)
+                self.controller.set_active_system(study, text, force=self._force_system_reload)
+                if self._force_system_reload or self._reset_range_on_next_bind:
+                    # New project: show the whole trajectory instead of conserving the
+                    # previous project's (possibly much shorter) min/max window.
+                    self.controller.reset_range()
+                    self._reset_range_on_next_bind = False
                 self.player_controls.set_timesteps(self.controller.get_available_timesteps())
                 
                 # Sync player controls to the controller's preserved timestep
@@ -432,7 +642,7 @@ class TrjPlotPanel(QWidget):
                         target = retention if retention and retention in cols else combo.currentText()
                         self._populate_combo(combo, placeholder, cols, target)
                         combo.setEnabled(True)
-            
+
         # Only sync if we are NOT in the middle of a programmatic update
         if not self._updating_from_code:
             self.sync_dropdowns_to_row()
@@ -763,12 +973,47 @@ class TrjPlotPanel(QWidget):
 
     def _on_controller_bounds_changed(self, bounds):
         if 'heatmap' in bounds:
-            hmin, hmax = bounds['heatmap']
-            self.heatmap_bar.set_range(hmin, hmax)
-        
+            payload = bounds['heatmap']
+            hmin, hmax = payload[0], payload[1]
+            is_override = payload[2] if len(payload) > 2 else False
+            self.heatmap_bar.set_range(hmin, hmax, is_override)
+
         if 'z_filter' in bounds:
             zmin, zmax = bounds['z_filter']
             self.filter_bar.set_data_range(zmin, zmax)
+
+    # --- Heatmap colour-scale overrides (per reference type, persisted in the row) ---
+
+    def _current_row_state(self):
+        row = self.plot_table.currentRow()
+        if row < 0:
+            return None, None
+        item = self.plot_table.item(row, 1)
+        if not item:
+            return None, None
+        return item, item.data(Qt.ItemDataRole.UserRole)
+
+    def _on_heatmap_bounds_edited(self, lo, hi):
+        item, state = self._current_row_state()
+        if not state:
+            return
+        key = self.controller.bounds_key(state.get('h_ref', 'Current'))
+        bounds = dict(state.get('h_bounds') or {})
+        bounds[key] = [lo, hi]
+        state['h_bounds'] = bounds
+        item.setData(Qt.ItemDataRole.UserRole, state)
+        self.update_plot_from_selection()
+
+    def _on_heatmap_bounds_reset(self):
+        item, state = self._current_row_state()
+        if not state:
+            return
+        key = self.controller.bounds_key(state.get('h_ref', 'Current'))
+        bounds = dict(state.get('h_bounds') or {})
+        bounds.pop(key, None)
+        state['h_bounds'] = bounds
+        item.setData(Qt.ItemDataRole.UserRole, state)
+        self.update_plot_from_selection()
 
     # --- Logic ---
 
@@ -816,9 +1061,13 @@ class TrjPlotPanel(QWidget):
             'view_sync': old_state.get('view_sync', False),
             'view_range': old_state.get('view_range', None),
             'current_step_index': old_state.get('current_step_index', 0),
-            'z_ranges': old_state.get('z_ranges', self.filter_bar.current_ranges)
+            'z_ranges': old_state.get('z_ranges', self.filter_bar.current_ranges),
+            # Carried over explicitly: this dict is rebuilt from the combos on every
+            # sync, so anything not listed here would be silently dropped.
+            'h_bounds': old_state.get('h_bounds', {})
         }
-        
+        state.update(self._study_origin_fields(state['study']))
+
         if state['view_lock']:
             vb = self.plot_widget.getPlotItem().getViewBox()
             state['view_range'] = vb.viewRange()
@@ -1107,6 +1356,8 @@ class TrjPlotPanel(QWidget):
             'z_ranges_rel': rel_ranges,
             'heatmap_col': h_col,
             'heatmap_ref': state.get('h_ref', 'Initial'),
+            # Per-reference-type colour-scale overrides; empty dict = follow the data.
+            'h_bounds': state.get('h_bounds') or {},
             'heatmap_gradient': gradient,
             'color': color,
             'symbol': style_widget.currentText(),
@@ -1135,6 +1386,27 @@ class TrjPlotPanel(QWidget):
         self._update_lock_button_visuals(checked, state.get('view_sync', False))
         
         self.update_plot_from_selection()
+
+    def _on_auto_range_clicked(self):
+        """Re-asserts the view lock after pyqtgraph's auto-range button.
+
+        The button enables the ViewBox's own auto-range, so without this the view would
+        keep refitting on every frame even though the lock reads as closed. Freeze the
+        range the button just produced and adopt it as the locked range.
+        """
+        row = self.plot_table.currentRow()
+        if row < 0: return
+
+        item = self.plot_table.item(row, 1)
+        if not item: return
+
+        state = item.data(Qt.ItemDataRole.UserRole)
+        if not state or not state.get('view_lock'): return
+
+        vb = self.plot_widget.getPlotItem().getViewBox()
+        vb.disableAutoRange()
+        state['view_range'] = vb.viewRange()
+        item.setData(Qt.ItemDataRole.UserRole, state)
 
     def _on_view_sync_toggled(self):
         row = self.plot_table.currentRow()
@@ -1219,7 +1491,7 @@ class TrjPlotPanel(QWidget):
 
     def _is_session_valid(self):
         """Checks if the current session contains meaningful data to save."""
-        if not self.main_window.path_edit.text():
+        if not self.main_window.get_project_paths():
             return False
 
         if self.plot_table.rowCount() == 0:
@@ -1250,9 +1522,12 @@ class TrjPlotPanel(QWidget):
              print(f"[System] Save aborted: Session contains no valid data.")
              return False
         
+        paths = self.main_window.get_project_paths()
         session_data = {
-            'type': 'trj', 
-            'project_path': self.main_window.path_edit.text(),
+            'type': 'trj',
+            # 'project_path' stays for older builds; 'project_paths' is authoritative.
+            'project_path': paths[0] if paths else '',
+            'project_paths': paths,
             'keywords': self.main_window.chip_input.get_chips(),
             'initial_step': self.controller.timesteps[0] if self.controller.timesteps else None,
             'final_step': self.controller.timesteps[-1] if self.controller.timesteps else None,
@@ -1346,41 +1621,28 @@ class TrjPlotPanel(QWidget):
 
         # --- Load Logic ---
         self.global_label_map = data.get('global_label_map', {})
-        project_path = data.get('project_path', '')
+        project_paths = self.main_window.session_paths(data)
         keywords = data.get('keywords', [])
 
         # Prevent global widgets from triggering a reload during update
-        self.main_window.path_edit.blockSignals(True)
+        self.main_window.path_input.blockSignals(True)
         self.main_window.chip_input.blockSignals(True)
 
         try:
-            if project_path:
-                # Check for non-existent path
-                relocated = False
-                if not os.path.exists(project_path):
-                    action, new_path = MissingPathResolver.resolve(self, project_path)
-                    if action == 'cancel':
-                        return
-                    elif action == 'reset':
-                        # Clear path and reset panel
-                        self.main_window.path_edit.setText("")
-                        self.main_window.on_path_entered()
-                        return
-                    elif action == 'change':
-                        # Start with a new project path, clearing session rows
-                        self.main_window.path_edit.setText(new_path)
-                        self.main_window.on_path_entered()
-                        return
-                    elif action == 'relocate':
-                        # Use the new path but continue loading session data
-                        project_path = new_path
-                        relocated = True
+            if project_paths:
+                project_paths, relocated, action = self.main_window.resolve_session_paths(
+                    self, project_paths)
+                if action in ('cancel', 'reset', 'change'):
+                    return
 
-                self.main_window.path_edit.setText(project_path)
+                self.main_window.set_project_paths(project_paths)
                 self.main_window.chip_input.set_chips(keywords)
-                
+
                 # Load project data (Force reload to ensure consistency)
-                self.load_project(Path(project_path), keywords, force_reload=True, keep_table=False)
+                self.load_project(project_paths, keywords, force_reload=True, keep_table=False)
+                # A session carries its own step window; never let the project-swap
+                # reset fire while restoring it.
+                self._reset_range_on_next_bind = False
 
                 # Restore Range
                 init_s = data.get('initial_step')
@@ -1417,10 +1679,13 @@ class TrjPlotPanel(QWidget):
                 row = self.plot_table.rowCount()
                 self.plot_table.insertRow(row)
                 self._populate_row_data(row, row_data)
-                
+
+            # Rows are restored after load_project ran, so bind them to their paths here.
+            self._resync_rows_to_paths(self.main_window.get_project_paths())
+
             if self.plot_table.rowCount() > 0:
                 self.plot_table.selectRow(0)
 
         finally:
-            self.main_window.path_edit.blockSignals(False)
+            self.main_window.path_input.blockSignals(False)
             self.main_window.chip_input.blockSignals(False)

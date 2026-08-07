@@ -63,10 +63,16 @@ class TrjController(QObject):
         # Store active data for export
         self.active_df = None
 
-    def set_active_system(self, study: str, system: str):
-        """Called when Study/System selection changes."""
+    def set_active_system(self, study: str, system: str, force=False):
+        """Called when Study/System selection changes.
+
+        force=True re-derives the timestep lists even when the names are unchanged.
+        Needed after a project reload: study/system are derived from folder names
+        (grandparent/parent), so a different project can carry identical names while
+        the underlying data manager has been reset.
+        """
         # Only reset if actually changing system
-        if self.current_study != study or self.current_system != system:
+        if force or self.current_study != study or self.current_system != system:
             
             # Capture current state before switch
             old_ts = self.current_timestep
@@ -162,6 +168,21 @@ class TrjController(QObject):
 
     def get_available_timesteps(self):
         return self.timesteps
+
+    def reset_range(self):
+        """Widens the active step window back to the full trajectory.
+
+        set_active_system() deliberately *conserves* the previous min/max when the
+        user switches study/system inside a project. On a new project that is wrong -
+        the range would stay clamped to the old trajectory's extent - so loading a
+        path resets it explicitly.
+        """
+        self.timesteps = list(self.full_timesteps)
+        if self.timesteps:
+            if self.current_timestep not in self.timesteps:
+                self.current_timestep = self.timesteps[0]
+        else:
+            self.current_timestep = 0
 
     def set_timestep_index(self, idx: int):
         """Sets current step by index (from slider)."""
@@ -351,7 +372,8 @@ class TrjController(QObject):
         if heatmap_col and heatmap_col not in ["Select Heatmap", "No Heatmap"]:
             ref_type = self.view_config.get('heatmap_ref', 'Current')
             h_min, h_max = self._get_bounds(study, system, heatmap_col, ref_type)
-            self.boundsChanged.emit({'heatmap': (h_min, h_max)})
+            is_override = self.bounds_key(ref_type) in (self.view_config.get('h_bounds') or {})
+            self.boundsChanged.emit({'heatmap': (h_min, h_max, is_override)})
             
             vals = None
             if ref_type in ['Initial', 'Final'] or ref_type.startswith("Step "):
@@ -478,11 +500,32 @@ class TrjController(QObject):
 
         return 0.0, 1.0
 
+    @staticmethod
+    def bounds_key(ref_type):
+        """Normalises a heatmap reference label into a custom-bounds storage key.
+
+        "Set step" resolves to a concrete "Step <N>" label, and the previous
+        "Step ..." entry is removed from the combo whenever the user re-sets it.
+        Keying every concrete step separately would therefore orphan the override,
+        so all custom steps share one stable slot.
+        """
+        if not ref_type:
+            return 'Current'
+        return 'Set step' if str(ref_type).startswith('Step ') else str(ref_type)
+
     def _get_bounds(self, study, system, col, ref_type):
         """Calculates Min/Max for coloring based on Reference Type."""
         # Safety fallback for None ref_type
         if ref_type is None:
             ref_type = 'Current'
+
+        # 0. User-pinned bounds for this reference type win over the data range.
+        override = (self.view_config.get('h_bounds') or {}).get(self.bounds_key(ref_type))
+        if override:
+            try:
+                return float(override[0]), float(override[1])
+            except (TypeError, ValueError, IndexError):
+                pass
 
         # 1. Initial Frame Bounds
         if ref_type == 'Initial':
@@ -584,7 +627,9 @@ class TrjController(QObject):
             y_lbl = self.view_config.get('y_label', self.view_config.get('y_col', ''))
             ax.set_xlabel(x_lbl)
             ax.set_ylabel(y_lbl)
-            
+            # Ticks inside the frame, matching the Pop Out window
+            ax.tick_params(axis='both', which='both', direction='in')
+
             fig.savefig(filename, dpi=300, bbox_inches='tight')
             plt.close(fig)
             print(f"Exported to {filename}")

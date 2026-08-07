@@ -9,9 +9,9 @@ import numpy as np
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QDockWidget, QScrollArea, QFormLayout, QLabel, 
                              QLineEdit, QCheckBox, QComboBox, QSpinBox, 
-                             QDoubleSpinBox, QGroupBox, QPushButton, QColorDialog, 
+                             QDoubleSpinBox, QGroupBox, QPushButton, QColorDialog,
                              QFrame, QSizePolicy, QMessageBox, QToolBar,
-                             QDialog, QDialogButtonBox, QFileDialog)
+                             QDialog, QDialogButtonBox, QFileDialog, QGridLayout)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics
 
@@ -45,59 +45,70 @@ class LinePropertiesWidget(QGroupBox):
         self.setChecked(initial_props.get('visible', True))
         self.toggled.connect(self.propertiesChanged)
 
-        layout = QFormLayout(self)
+        # Grid layout: two label/control pairs per row, so the group needs roughly
+        # half the vertical space of the previous one-control-per-row form.
+        layout = QGridLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(5)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(5)
+        layout.setColumnStretch(1, 1)
 
-        # Label
+        # Row 0: Legend text + colour swatch (no separate "Color:" row/label)
         self.label_edit = QLineEdit(initial_props['name'])
         self.label_edit.editingFinished.connect(self.propertiesChanged)
         self.label_edit.setMaximumWidth(200)
-        layout.addRow("Legend:", self.label_edit)
 
-        # Color
         is_heatmap = self.is_scatter and 'colors' in initial_props and initial_props['colors'] is not None
-        
+        self.color_btn = ColorButton(initial_props['color'])
+        self.color_btn.colorChanged.connect(lambda: self.propertiesChanged.emit())
+
+        layout.addWidget(QLabel("Legend:"), 0, 0)
+        layout.addWidget(self.label_edit, 0, 1)
         if not is_heatmap:
-            self.color_btn = ColorButton(initial_props['color'])
-            self.color_btn.colorChanged.connect(lambda: self.propertiesChanged.emit())
-            layout.addRow("Color:", self.color_btn)
-        else:
-            self.color_btn = ColorButton(initial_props['color'])
+            # Square swatch, sized to the line edit's height
+            side = self.label_edit.sizeHint().height()
+            self.color_btn.setFixedSize(side, side)
+            self.color_btn.setToolTip("Series colour")
+            layout.addWidget(self.color_btn, 0, 2, 1, 2)
+        # (heatmap series intentionally keep the button unparented / hidden)
+
+        def _spin(lo, hi, val, step=None):
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi)
+            if step is not None:
+                sp.setSingleStep(step)
+            sp.setValue(float(val))
+            sp.valueChanged.connect(self.propertiesChanged)
+            sp.setMaximumWidth(90)
+            return sp
 
         if self.is_scatter:
-            self.size_spin = QDoubleSpinBox()
-            self.size_spin.setRange(1.0, 200.0)
-            self.size_spin.setValue(float(initial_props.get('size', 10)))
-            self.size_spin.valueChanged.connect(self.propertiesChanged)
-            self.size_spin.setFixedWidth(100)
-            layout.addRow("Size:", self.size_spin)
-            
+            self.size_spin = _spin(1.0, 200.0, initial_props.get('size', 10))
+
             self.marker_combo = QComboBox()
             self.marker_combo.addItems(['o', 'x', '+', 'v', '^', '<', '>', 's', 'p', '*', 'h', 'H', 'D', 'd'])
             self.marker_combo.setCurrentText(initial_props.get('marker', 'o'))
             self.marker_combo.currentTextChanged.connect(self.propertiesChanged)
-            self.marker_combo.setMaximumWidth(100)
-            layout.addRow("Marker:", self.marker_combo)
-            
-            # Placeholders for scatter
+            self.marker_combo.setMaximumWidth(90)
+
+            # Row 1: Size | Marker
+            layout.addWidget(QLabel("Size:"), 1, 0)
+            layout.addWidget(self.size_spin, 1, 1)
+            layout.addWidget(QLabel("Marker:"), 1, 2)
+            layout.addWidget(self.marker_combo, 1, 3)
+
+            # Placeholders for scatter (line width/style do not apply)
             self.style_combo = QComboBox()
             self.width_spin = QDoubleSpinBox()
+            next_row = 2
         else:
+            self.width_spin = _spin(0.1, 20.0, initial_props.get('linewidth', 1.5), step=0.5)
+
             self.style_combo = QComboBox()
             self.style_combo.addItems(['-', '--', ':', '-.'])
             self.style_combo.setCurrentText(initial_props.get('linestyle', '-'))
             self.style_combo.currentTextChanged.connect(self.propertiesChanged)
-            self.style_combo.setMaximumWidth(100)
-            layout.addRow("Style:", self.style_combo)
-
-            self.width_spin = QDoubleSpinBox()
-            self.width_spin.setRange(0.1, 20.0)
-            self.width_spin.setSingleStep(0.5)
-            self.width_spin.setValue(initial_props.get('linewidth', 1.5))
-            self.width_spin.valueChanged.connect(self.propertiesChanged)
-            self.width_spin.setFixedWidth(100)
-            layout.addRow("Width:", self.width_spin)
+            self.style_combo.setMaximumWidth(90)
 
             self.marker_combo = QComboBox()
             self.marker_combo.addItems(['None', 'o', 'x', '+', 'v', '^', '<', '>', 's', 'p', '*', 'h', 'H', 'D', 'd'])
@@ -105,18 +116,30 @@ class LinePropertiesWidget(QGroupBox):
             if current_marker is None: current_marker = 'None'
             self.marker_combo.setCurrentText(current_marker)
             self.marker_combo.currentTextChanged.connect(self.propertiesChanged)
-            self.marker_combo.setMaximumWidth(100)
-            layout.addRow("Marker:", self.marker_combo)
-            
-            # Placeholder for line
-            self.size_spin = QDoubleSpinBox()
+            self.marker_combo.setMaximumWidth(90)
+
+            # Marker size is now adjustable for line series too - it used to be an
+            # orphan widget with a hardcoded markersize of 6 in get_properties().
+            self.size_spin = _spin(1.0, 200.0, initial_props.get('size', 6))
+
+            # Row 1: Width | Style     Row 2: Marker | Size
+            layout.addWidget(QLabel("Width:"), 1, 0)
+            layout.addWidget(self.width_spin, 1, 1)
+            layout.addWidget(QLabel("Style:"), 1, 2)
+            layout.addWidget(self.style_combo, 1, 3)
+
+            layout.addWidget(QLabel("Marker:"), 2, 0)
+            layout.addWidget(self.marker_combo, 2, 1)
+            layout.addWidget(QLabel("Size:"), 2, 2)
+            layout.addWidget(self.size_spin, 2, 3)
+            next_row = 3
 
         # Shared Error Band Control (Available for both line and scatter if data exists)
         self.error_check = QCheckBox("Show Error Band")
         if self.has_std:
             self.error_check.setChecked(initial_props.get('show_std', True))
             self.error_check.toggled.connect(self.propertiesChanged)
-            layout.addRow(self.error_check)
+            layout.addWidget(self.error_check, next_row, 0, 1, 4)
 
     def get_properties(self):
         props = {
@@ -136,7 +159,7 @@ class LinePropertiesWidget(QGroupBox):
             props['marker'] = m
             props['linestyle'] = self.style_combo.currentText()
             props['linewidth'] = self.width_spin.value()
-            props['size'] = 6 # Default for line markers
+            props['size'] = self.size_spin.value()  # marker size, now user-adjustable
             
         props['show_std'] = self.error_check.isChecked() if self.has_std else False
             
@@ -199,12 +222,23 @@ class PopOutWindow(QMainWindow):
 
         self.form_layout.addStretch()
         self.scroll.setWidget(self.scroll_content)
+
+        # The two-column groups are wider than the old single-column form, so give the
+        # dock enough room to show both columns instead of hiding one behind a
+        # horizontal scrollbar. The preferred width is capped so a long series name
+        # cannot bloat the dock, but never below what the layout actually needs.
+        sb_w = self.scroll.verticalScrollBar().sizeHint().width() + 8
+        preferred = self.scroll_content.sizeHint().width() + sb_w
+        floor = self.scroll_content.minimumSizeHint().width() + sb_w
+        self.scroll.setMinimumWidth(max(floor, min(preferred, 560)))
+
         self.dock_layout.addWidget(self.scroll)
         self.dock.setWidget(self.dock_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
 
-        # Apply session state LAST, after all widgets (like font_title_spin) exist.
-        # This triggers on_latex_toggled -> redraw_plot safely.
+        # Connect + apply session state LAST, after all widgets (like font_title_spin)
+        # exist. on_latex_toggled triggers a full redraw that touches them.
+        self.latex_check.toggled.connect(self.on_latex_toggled)
         self.latex_check.setChecked(PopOutWindow._session_latex_enabled)
 
     def _init_global_settings(self):
@@ -253,48 +287,57 @@ class PopOutWindow(QMainWindow):
         self.title_edit.setMaximumWidth(160)
         layout.addRow("Title:", self.title_edit)
 
+        # Show Grid and Use LaTeX share one row (LaTeX on the right).
+        # NOTE: latex_check.toggled is still connected last, in _init_ui, because its
+        # handler triggers a full redraw that touches font_title_spin.
         self.latex_check = QCheckBox("Use LaTeX (slow...)")
-        self.latex_check.toggled.connect(self.on_latex_toggled)
-        layout.addRow(self.latex_check)
 
         self.grid_check = QCheckBox("Show Grid")
         self.grid_check.setChecked(True)
         self.grid_check.toggled.connect(self.redraw_plot)
-        layout.addRow(self.grid_check)
+
+        checks_row = QHBoxLayout()
+        checks_row.setContentsMargins(0, 0, 0, 0)
+        checks_row.setSpacing(8)
+        checks_row.addWidget(self.grid_check)
+        checks_row.addWidget(self.latex_check)
+        checks_row.addStretch(1)
+        layout.addRow(checks_row)
 
         self.form_layout.addWidget(group)
 
     def _init_font_settings(self):
         group = QGroupBox("Font Sizes")
-        layout = QFormLayout(group)
+        # 2x2 grid instead of four single-column rows - same widgets, same signals,
+        # half the vertical space.
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(5)
 
-        self.font_title_spin = QSpinBox()
-        self.font_title_spin.setRange(6, 72)
-        self.font_title_spin.setValue(12)
-        self.font_title_spin.valueChanged.connect(self.redraw_plot)
-        self.font_title_spin.setFixedWidth(70)
-        layout.addRow("Title:", self.font_title_spin)
+        def _font_spin(value):
+            sp = QSpinBox()
+            sp.setRange(6, 72)
+            sp.setValue(value)
+            sp.valueChanged.connect(self.redraw_plot)
+            sp.setFixedWidth(60)
+            return sp
 
-        self.font_label_spin = QSpinBox()
-        self.font_label_spin.setRange(6, 72)
-        self.font_label_spin.setValue(11)
-        self.font_label_spin.valueChanged.connect(self.redraw_plot)
-        self.font_label_spin.setFixedWidth(70)
-        layout.addRow("Axis Labels:", self.font_label_spin)
+        self.font_title_spin = _font_spin(12)
+        self.font_label_spin = _font_spin(11)
+        self.font_tick_spin = _font_spin(12)
+        self.font_legend_spin = _font_spin(12)
 
-        self.font_tick_spin = QSpinBox()
-        self.font_tick_spin.setRange(6, 72)
-        self.font_tick_spin.setValue(12)
-        self.font_tick_spin.valueChanged.connect(self.redraw_plot)
-        self.font_tick_spin.setFixedWidth(70)
-        layout.addRow("Tick Labels:", self.font_tick_spin)
+        for row, col, text, spin in (
+            (0, 0, "Title:", self.font_title_spin),
+            (0, 2, "Axis Labels:", self.font_label_spin),
+            (1, 0, "Tick Labels:", self.font_tick_spin),
+            (1, 2, "Legend:", self.font_legend_spin),
+        ):
+            layout.addWidget(QLabel(text), row, col)
+            layout.addWidget(spin, row, col + 1)
 
-        self.font_legend_spin = QSpinBox()
-        self.font_legend_spin.setRange(6, 72)
-        self.font_legend_spin.setValue(12)
-        self.font_legend_spin.valueChanged.connect(self.redraw_plot)
-        self.font_legend_spin.setFixedWidth(70)
-        layout.addRow("Legend:", self.font_legend_spin)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
 
         self.form_layout.addWidget(group)
 

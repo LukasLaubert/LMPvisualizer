@@ -31,9 +31,15 @@ class DSDPlotPanel(QWidget):
         self.data_manager = DSDDataManager()
         self.controller = None 
         self.loaded_path = None
+        # study key -> {'path': <project path>, 'study': <raw folder name>}
+        self.study_origins = {}
+        self._pending_study_key = None
         self._updating_from_code = False
         self._loading_session = False
-        
+        # Set while load_project() rebuilds the data manager, so on_system_changed()
+        # forces the controller to re-derive its timestep lists.
+        self._force_system_reload = False
+
         self._init_ui()
         self.controller = DSDController(self.plot_widget, self.data_manager)
         self._connect_signals()
@@ -81,16 +87,32 @@ class DSDPlotPanel(QWidget):
         # Stretch left side to take priority
         top_layout.addLayout(self.left_grid, stretch=5)
 
-        # 2. Visual Spacer Line
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.VLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        line.setLineWidth(1)
-        line.setStyleSheet("background-color: #888; margin-top: 5px; margin-bottom: 5px;")
-        top_layout.addWidget(line)
+        # 2. Add / Auto Preload - placed LEFT of the divider so they belong to the
+        #    plot-side block, and so the divider can line up with the splitter handle.
+        self.add_btn = QPushButton("Add")
+        self.add_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self.add_btn.setMinimumWidth(60)
+        self.add_btn.clicked.connect(self.add_new_domain)
+        top_layout.addWidget(self.add_btn)
 
-        # 3. Right Controls (Filter/Options)
-        self.right_grid = QGridLayout()
+        self.idx_btn = QPushButton("Auto\nPreload")
+        self.idx_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self.idx_btn.setMinimumWidth(60)
+        self.idx_btn.clicked.connect(self._on_auto_index_clicked)
+        top_layout.addWidget(self.idx_btn)
+
+        # 3. Visual Spacer Line
+        self.header_divider = QFrame()
+        self.header_divider.setFrameShape(QFrame.Shape.VLine)
+        self.header_divider.setFrameShadow(QFrame.Shadow.Sunken)
+        self.header_divider.setLineWidth(1)
+        self.header_divider.setStyleSheet("background-color: #888; margin-top: 5px; margin-bottom: 5px;")
+        top_layout.addWidget(self.header_divider)
+
+        # 4. Right Controls (Filter/Options) - inside a container so its width can be
+        #    pinned to the table pane, which keeps the divider above the splitter handle.
+        self.right_container = QWidget()
+        self.right_grid = QGridLayout(self.right_container)
         self.right_grid.setContentsMargins(0, 0, 0, 0)
         self.right_grid.setHorizontalSpacing(10)
         self.right_grid.setVerticalSpacing(5)
@@ -121,20 +143,9 @@ class DSDPlotPanel(QWidget):
         self.right_grid.addWidget(self.options_btn, 1, 2)
 
         # Right side takes only what it needs (stretch=0)
-        top_layout.addLayout(self.right_grid, stretch=0)
-        
-        self.add_btn = QPushButton("Add")
-        self.add_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-        self.add_btn.setMinimumWidth(60)
-        self.add_btn.clicked.connect(self.add_new_domain)
-        top_layout.addWidget(self.add_btn)
+        top_layout.addWidget(self.right_container, stretch=0)
 
-        self.idx_btn = QPushButton("Auto\nPreload")
-        self.idx_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-        self.idx_btn.setMinimumWidth(60)
-        self.idx_btn.clicked.connect(self._on_auto_index_clicked)
-        top_layout.addWidget(self.idx_btn)
-
+        self.top_layout = top_layout
         main_layout.addWidget(top_container)
 
         # --- Main Splitter ---
@@ -431,6 +442,8 @@ class DSDPlotPanel(QWidget):
         
         # Trigger font size adjustment when the splitter divider is moved
         self.main_splitter.splitterMoved.connect(self._adjust_display_font_size)
+        # ...and keep the header divider above the splitter handle
+        self.main_splitter.splitterMoved.connect(lambda *_: self._sync_header_divider())
         
         # Table Signals
         self.plot_table.rowMoved.connect(self.update_plot)
@@ -534,6 +547,41 @@ class DSDPlotPanel(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._adjust_display_font_size()
+        self._sync_header_divider()
+
+    def showEvent(self, event):
+        # The panel lives in a QStackedWidget, so it may never get a resize event
+        # between construction and first display - sync the divider explicitly.
+        super().showEvent(event)
+        self._sync_header_divider()
+
+    def _sync_header_divider(self):
+        """Keeps the header's vertical divider above the splitter handle.
+
+        The header and the splitter are siblings, so nothing links them by default.
+        Pinning the right block's width to the table pane makes the divider track the
+        handle as the user drags it.
+        """
+        if not hasattr(self, 'right_container') or not hasattr(self, 'main_splitter'):
+            return
+
+        sizes = self.main_splitter.sizes()
+        if len(sizes) < 2 or sizes[0] <= 0:
+            return
+
+        margins = self.top_layout.contentsMargins()
+        spacing = self.top_layout.spacing()
+        line_w = self.header_divider.sizeHint().width()
+        handle_w = self.main_splitter.handleWidth()
+
+        # divider centre == handle centre  ->  solve for the right block's width
+        width = (self.width() - margins.right() - spacing - line_w / 2.0
+                 - sizes[0] - handle_w / 2.0)
+        width = int(round(width))
+
+        # Never shrink below what the controls actually need.
+        min_w = self.right_container.sizeHint().width()
+        self.right_container.setFixedWidth(max(width, min_w))
 
     def _on_controller_bounds_changed(self, bounds):
         """
@@ -549,17 +597,41 @@ class DSDPlotPanel(QWidget):
             self.filter_bar.blockSignals(False)
 
     def load_project(self, root_path, keywords, force_reload=False, keep_table=False, target_system=None):
-        if not force_reload and self.loaded_path == root_path:
+        paths = LogParser.normalize_paths(root_path)
+        if not force_reload and self.loaded_path == paths:
             return
 
-        studies, warnings, file_map = LogParser.discover_studies_systems(root_path, keywords)
-        
-        load_warns, _ = self.data_manager.load_project_data(studies, root_path, keywords, file_map)
+        # A study key gains or loses its path prefix as chips come and go, so note
+        # which folder the current selection points at before the keys are rebuilt.
+        previous = (self.study_origins or {}).get(self.study_combo.currentText())
+
+        studies, warnings, file_map, origins = LogParser.discover_multi(paths, keywords)
+        self.study_origins = origins
+        self._pending_study_key = (
+            LogParser.qualify_study(origins, previous['path'], previous['study'])
+            if previous else None)
+
+        load_warns, _ = self.data_manager.load_project_data(studies, paths, keywords, file_map)
         warnings.extend(load_warns)
-        
-        self.loaded_path = root_path
-        self._update_ui_state(project_loaded=True, keep_table=keep_table)
-        
+
+        self.loaded_path = paths
+        # The data manager was just rebuilt, so the controller's cached timestep lists
+        # are stale even if the study/system names happen to be identical.
+        self._force_system_reload = True
+        try:
+            self._update_ui_state(project_loaded=True, keep_table=keep_table)
+        finally:
+            self._force_system_reload = False
+
+        # The chip that owned the selected study was removed AND nothing took its
+        # place: blank the canvas rather than keep showing a project that is no longer
+        # loaded. The domains stay. Deliberately narrow - when the same study name is
+        # still available from another path the selection survives and must not be cut.
+        if (previous and previous['path'] not in paths
+                and self.study_combo.currentText() == "Select Study"):
+            self.controller.clear_scene()
+            self.player_controls.set_timesteps([])
+
         # Handle Auto-Selection if target_system provided
         if target_system:
             # We assume target_system is in the "." study (Current Directory)
@@ -572,23 +644,49 @@ class DSDPlotPanel(QWidget):
                 if index != -1:
                     self.system_combo.setCurrentIndex(index)
 
+    def on_path_cleared(self):
+        """Clearing the path empties the canvas but keeps the configured domains.
+
+        A domain is a configuration, not data - re-entering a path should bring the
+        same rows straight back instead of forcing the user to define them again.
+        """
+        self.loaded_path = None
+        self.controller.clear_scene()
+        self.player_controls.set_timesteps([])
+        self._update_ui_state(project_loaded=False, keep_table=True)
+
     def _update_ui_state(self, project_loaded, keep_table=False):
         if not keep_table:
             self.plot_table.setRowCount(0)
+            # Clearing the rows also removes the optimal-line row; keep the tracked
+            # index in sync or add_domain() would insert at an out-of-range position
+            # and every following setCellWidget() would be a silent no-op.
+            self.plot_table.opt_line_row = -1
             self.plot_widget.autoRange()
-        
+
         if project_loaded:
             self.study_combo.setEnabled(True)
             self.system_combo.setEnabled(True)
             self.add_btn.setEnabled(True)
-            
+
             studies = sorted(list(self.data_manager.parsers.keys()))
-            self._populate_combo(self.study_combo, "Select Study", studies)
-            
+            # Preserve the current selection across a reload/refresh. Without this the
+            # combo falls back to the "Select Study" placeholder, which cascades into an
+            # empty system combo and leaves Add without atom types or axis bounds.
+            # _pending_study_key follows the selection through a re-qualified key.
+            self._populate_combo(self.study_combo, "Select Study", studies,
+                                 self._pending_study_key or self.study_combo.currentText())
+            self._pending_study_key = None
+
             # Force trigger because _populate_combo blocks signals
             self.on_study_changed(self.study_combo.currentText())
         else:
             self.add_btn.setEnabled(False)
+            # No project loaded: the combos must not keep offering the studies and
+            # systems of a project that is no longer there. _populate_combo blocks
+            # signals, so this resets the labels without triggering a re-plot.
+            self._populate_combo(self.study_combo, "Select Study", [])
+            self._populate_combo(self.system_combo, "Select System", [])
 
     def _populate_combo(self, combo, placeholder, items, current=None):
         combo.blockSignals(True)
@@ -623,7 +721,7 @@ class DSDPlotPanel(QWidget):
             if text == "Strain average":
                 ref_system = next(iter(self.data_manager.parsers[study].keys()))
 
-            self.controller.set_active_system(study, text)
+            self.controller.set_active_system(study, text, force=self._force_system_reload)
             self.player_controls.set_timesteps(self.controller.get_available_timesteps())
             
             # Capture currently selected axes before repopulating
@@ -651,7 +749,8 @@ class DSDPlotPanel(QWidget):
 
     def add_new_domain(self):
         slice_ax = self.slice_axis_combo.currentText()
-        
+        obs_ax = self.observe_axis_combo.currentText()
+
         types = []
         study = self.study_combo.currentText()
         system = self.system_combo.currentText()
@@ -664,7 +763,7 @@ class DSDPlotPanel(QWidget):
                 if slice_ax in df.columns:
                     axis_bounds = (df[slice_ax].min(), df[slice_ax].max())
         
-        dlg = DSDAddDomainDialog(self, None, slice_ax, types, axis_bounds)
+        dlg = DSDAddDomainDialog(self, None, slice_ax, types, axis_bounds, obs_ax)
         if dlg.exec():
             data = dlg.get_data()
             self.plot_table.add_domain(data.get('name', "Domain " + str(self.plot_table.rowCount()+1)), data)
@@ -944,8 +1043,8 @@ class DSDPlotPanel(QWidget):
         self.load_session_from_file(path)
         
     def save_session_to_file(self, path):
-        p_path = self.main_window.path_edit.text()
-        if not p_path: return False
+        project_paths = self.main_window.get_project_paths()
+        if not project_paths: return False
         
         # Calculate percentages for robust restoration (Hybrid Mode)
         final_pct = 1.0
@@ -970,9 +1069,12 @@ class DSDPlotPanel(QWidget):
              curr_idx = self.player_controls.slider.value()
              current_pct = curr_idx / (len(self.controller.timesteps) - 1)
 
+        study_origin = (self.study_origins or {}).get(self.study_combo.currentText(), {})
         session_data = {
             'type': 'dsd',
-            'project_path': self.main_window.path_edit.text(),
+            # 'project_path' stays for older builds; 'project_paths' is authoritative.
+            'project_path': project_paths[0],
+            'project_paths': project_paths,
             'keywords': self.main_window.chip_input.get_chips(),
             'domains': self.plot_table.get_domains(),
             'opt_line_row': self.plot_table.opt_line_row,
@@ -980,6 +1082,9 @@ class DSDPlotPanel(QWidget):
             'view_limits': self.controller.view_limits,
             'global_options': {
                 'study': self.study_combo.currentText(),
+                # Stable identity of the selection, independent of prefixing.
+                'study_path': study_origin.get('path'),
+                'study_raw': study_origin.get('study'),
                 'system': self.system_combo.currentText(),
                 'slice_axis': self.slice_axis_combo.currentText(),
                 'observe_axis': self.observe_axis_combo.currentText(),
@@ -1046,39 +1151,23 @@ class DSDPlotPanel(QWidget):
         
         print(f"[System] Loading session: {path} for mode DSD Mode")
 
-        self.main_window.path_edit.blockSignals(True)
+        self.main_window.path_input.blockSignals(True)
         self.main_window.chip_input.blockSignals(True)
         self._loading_session = True
 
         try:
             # 1. Load Project Data
-            project_path = data.get('project_path', '')
+            project_paths = self.main_window.session_paths(data)
             keywords = data.get('keywords', [])
 
-            # Check for non-existent path
-            relocated = False
-            if project_path and not os.path.exists(project_path):
-                action, new_path = MissingPathResolver.resolve(self, project_path)
-                if action == 'cancel':
-                    return
-                elif action == 'reset':
-                    # Clear path and reset panel
-                    self.main_window.path_edit.setText("")
-                    self.main_window.on_path_entered()
-                    return
-                elif action == 'change':
-                    # Start with a new project path, clearing session domains
-                    self.main_window.path_edit.setText(new_path)
-                    self.main_window.on_path_entered()
-                    return
-                elif action == 'relocate':
-                    # Use the new path but continue loading session data
-                    project_path = new_path
-                    relocated = True
+            project_paths, relocated, action = self.main_window.resolve_session_paths(
+                self, project_paths)
+            if action in ('cancel', 'reset', 'change'):
+                return
 
-            self.main_window.path_edit.setText(project_path)
+            self.main_window.set_project_paths(project_paths)
             self.main_window.chip_input.set_chips(keywords)
-            self.load_project(Path(project_path), keywords, force_reload=True, keep_table=True)
+            self.load_project(project_paths, keywords, force_reload=True, keep_table=True)
             
             # If relocated and project was found, auto-update the session file
             if relocated and self.data_manager.parsers:
@@ -1094,7 +1183,15 @@ class DSDPlotPanel(QWidget):
             self.study_combo.blockSignals(True)
             self.system_combo.blockSignals(True)
             
-            self.study_combo.setCurrentText(g_opts.get('study', 'Select Study'))
+            # The session stores the study key it saw; with several paths loaded that
+            # key may now be prefixed, so prefer the (path, folder) pair when present.
+            saved_study = g_opts.get('study', 'Select Study')
+            if g_opts.get('study_path'):
+                saved_study = LogParser.qualify_study(
+                    self.study_origins, g_opts['study_path'],
+                    g_opts.get('study_raw', saved_study)) or saved_study
+
+            self.study_combo.setCurrentText(saved_study)
             self.on_study_changed(self.study_combo.currentText())
             
             # Now "Strain average" is guaranteed to be in the list if the study has > 1 system
@@ -1208,7 +1305,7 @@ class DSDPlotPanel(QWidget):
             self.update_plot()
         finally:
             self._loading_session = False
-            self.main_window.path_edit.blockSignals(False)
+            self.main_window.path_input.blockSignals(False)
             self.main_window.chip_input.blockSignals(False)
 
     def launch_popout(self):

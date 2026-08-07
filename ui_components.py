@@ -3,11 +3,11 @@
 from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget,
                              QDialogButtonBox, QHeaderView, QTableWidgetItem,
                              QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog,
-                             QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication, 
+                             QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication,
                              QStyledItemDelegate, QComboBox, QSizePolicy, QMessageBox, QFileDialog,
                              QStyleOptionButton, QStyle)
 from PyQt6.QtGui import QColor, QPalette, QFontMetrics, QFont, QPainter
-from PyQt6.QtCore import pyqtSignal, Qt, QEvent
+from PyQt6.QtCore import pyqtSignal, Qt, QEvent, QTimer
 
 class NeutralPanel(QWidget):
     """
@@ -204,8 +204,9 @@ class Chip(QFrame):
         layout.addWidget(remove_button)
 
     def on_remove(self):
+        # Teardown belongs to the owner (remove_chip); deleting here as well left the
+        # widget in the layout until the next DeferredDelete, holding its space.
         self.removed.emit(self.text)
-        self.deleteLater()
 
     def set_bold(self, bold: bool):
         font = self.label.font()
@@ -273,6 +274,10 @@ class ChipInputWidget(QWidget):
             for i in range(self.chip_layout.count()):
                 widget = self.chip_layout.itemAt(i).widget()
                 if isinstance(widget, Chip) and widget.text == text:
+                    # setParent(None) first: deleteLater alone leaves the widget in the
+                    # layout - and holding its width - until the event loop gets round
+                    # to it, which pushed the input field to the right.
+                    widget.setParent(None)
                     widget.deleteLater()
                     break
             self.chipsChanged.emit(self._chips)
@@ -291,6 +296,232 @@ class ChipInputWidget(QWidget):
             self.remove_chip(self._chips[0])
         for chip in chips:
             self.add_chip(chip)
+
+class PathChip(QFrame):
+    """A chip holding one project path. The label is elided, the tooltip is not."""
+    removed = pyqtSignal(str)
+
+    # Everything the chip needs beside its text: layout margins (4+4), spacing (4),
+    # remove button (14) and the stylesheet's own padding (4+4) and margin (1+1).
+    CHROME = 36
+    # A couple of pixels the label keeps to itself, so the last glyph of the path can
+    # never be shaved off by a rounding difference between metrics and rendering.
+    TEXT_PAD = 4
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self.path = path
+        # QLabel derives from QFrame, so a bare "QFrame { padding: 1px 4px; margin: 1px }"
+        # applies to the label too and shrinks its text box by ~22px. With the label
+        # width capped to the space left over by the x, that inset used to clip the tail
+        # of the path - the part worth reading - right where the x sits. Reset it.
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #d8e4f0;
+                border-radius: 8px;
+                padding: 1px 4px;
+                margin: 1px;
+            }
+            QLabel {
+                background-color: transparent;
+                border: none;
+                border-radius: 0px;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                font-weight: bold;
+                color: #555;
+            }
+            QPushButton:hover {
+                color: black;
+            }
+        """)
+        self.setToolTip(path)
+
+        # Same skeleton as the keyword chips: label, spacing, x. Nothing between them,
+        # so the x always follows the text at a constant distance.
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 1, 4, 1)
+        layout.setSpacing(4)
+
+        self.label = QLabel(path)
+        layout.addWidget(self.label)
+
+        remove_button = QPushButton("x")
+        remove_button.setFixedSize(14, 14)
+        remove_button.setToolTip("Remove this path")
+        remove_button.clicked.connect(self.on_remove)
+        layout.addWidget(remove_button)
+
+        self.set_available_width(self.natural_width())
+
+    def natural_width(self) -> int:
+        """Width at which the whole path is readable."""
+        advance = QFontMetrics(self.label.font()).horizontalAdvance(self.path)
+        return advance + self.TEXT_PAD + self.CHROME
+
+    def set_available_width(self, px: int):
+        """Shows as much of the path tail as fits in px, eliding from the left."""
+        px = max(int(px), self.CHROME + self.TEXT_PAD + 20)
+        text_px = px - self.CHROME - self.TEXT_PAD
+        fm = QFontMetrics(self.label.font())
+        shown = fm.elidedText(self.path, Qt.TextElideMode.ElideLeft, text_px)
+        self.label.setText(shown)
+        # Pin the label to exactly what its text needs. A label that is merely capped
+        # can still be handed less than that by a squeezed layout, and QLabel does not
+        # re-elide - it clips, which is what put the end of the path under the x.
+        self.label.setFixedWidth(min(fm.horizontalAdvance(shown) + self.TEXT_PAD, text_px))
+        self.setMaximumWidth(px)
+
+    def on_remove(self):
+        self.removed.emit(self.path)
+
+
+class PathChipInputWidget(QWidget):
+    """Project paths as chips, plus a line edit for typing or pasting a new one.
+
+    Mirrors ChipInputWidget's interaction model so the two rows of the top bar behave
+    the same way. Committed text is only announced - the owner decides whether it is a
+    project path or a session file.
+    """
+    pathsChanged = pyqtSignal(list)
+    submitted = pyqtSignal(str)
+
+    MIN_INPUT_WIDTH = 140
+    MIN_CHIP_WIDTH = 70
+    MAX_CHIP_SHARE = 2.0 / 3.0  # chips together never take more than this much room
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._paths = []
+
+        # Same skeleton as ChipInputWidget so both rows of the top bar start at the
+        # same x and behave identically.
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+
+        self.chip_container = QWidget()
+        self.chip_layout = QHBoxLayout(self.chip_container)
+        self.chip_layout.setContentsMargins(0, 0, 0, 0)
+        self.chip_layout.setSpacing(2)
+        self.chip_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.input_line = QLineEdit()
+        self.input_line.setPlaceholderText("Paste a path or select a project root directory...")
+        self.input_line.setMinimumWidth(self.MIN_INPUT_WIDTH)
+        # editingFinished already covers Return; also connecting returnPressed would
+        # submit the same text twice.
+        self.input_line.editingFinished.connect(self._on_submit)
+
+        self.layout.addWidget(self.chip_container)
+        self.layout.addWidget(self.input_line)
+        self.layout.setStretchFactor(self.input_line, 1)
+
+    # --- interaction ---------------------------------------------------------
+
+    def _on_submit(self):
+        text = self.input_line.text().strip().strip('"')
+        if text:
+            self.submitted.emit(text)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._relayout_chips()
+
+    def showEvent(self, event):
+        # Chips added before the first layout pass were sized against a stale width.
+        super().showEvent(event)
+        self._relayout_chips()
+
+    def _relayout_chips(self):
+        """Hands every chip its share of the width; each elides itself to fit."""
+        chips = self._chip_widgets()
+        if not chips:
+            return
+
+        spacing = self.chip_layout.spacing() * max(len(chips) - 1, 0)
+        # Two limits, whichever bites first: leave the type-in field its minimum, and
+        # never let the chips take more than MAX_CHIP_SHARE of the whole row.
+        budget = min(self.width() - self.MIN_INPUT_WIDTH,
+                     int(self.width() * self.MAX_CHIP_SHARE)) - self.layout.spacing() - spacing
+        share = max(budget // len(chips), self.MIN_CHIP_WIDTH)
+
+        for chip in chips:
+            chip.set_available_width(min(share, chip.natural_width()))
+
+    def _schedule_relayout(self):
+        """Sizes the chips now, then again once the layout has settled.
+
+        A chip added before the widget has its final width would otherwise keep the
+        minimum size it was given at that moment.
+        """
+        self._relayout_chips()
+        QTimer.singleShot(0, self._relayout_chips)
+
+    def _chip_widgets(self):
+        return [self.chip_layout.itemAt(i).widget() for i in range(self.chip_layout.count())
+                if isinstance(self.chip_layout.itemAt(i).widget(), PathChip)]
+
+    # --- public API ----------------------------------------------------------
+
+    def add_path(self, path: str, silent: bool = False) -> bool:
+        # One spelling per path, so the chip set, discovery's origins and the paths
+        # stored on the table rows compare equal - and so "D:/proj" and "D:\proj"
+        # cannot end up as two chips over the same project.
+        from log_parser import LogParser
+        path = LogParser.canonical_path(path)
+        if not path or any(LogParser.same_path(path, p) for p in self._paths):
+            return False
+
+        self._paths.append(path)
+        chip = PathChip(path)
+        chip.removed.connect(self.remove_path)
+        self.chip_layout.addWidget(chip)
+        self._schedule_relayout()
+        if not silent:
+            self.pathsChanged.emit(self.get_paths())
+        return True
+
+    def remove_path(self, path: str, silent: bool = False):
+        from log_parser import LogParser
+        path = next((p for p in self._paths if LogParser.same_path(p, path)), None)
+        if path is None:
+            return
+        self._paths.remove(path)
+        for chip in self._chip_widgets():
+            if chip.path == path:
+                chip.setParent(None)
+                chip.deleteLater()
+                break
+        self._schedule_relayout()
+        if not silent:
+            self.pathsChanged.emit(self.get_paths())
+
+    def get_paths(self) -> list:
+        return self._paths.copy()
+
+    def set_paths(self, paths: list, silent: bool = False):
+        """Replaces the whole chip set in one go (one signal, not one per chip)."""
+        for path in list(self._paths):
+            self.remove_path(path, silent=True)
+        for path in paths or []:
+            self.add_path(path, silent=True)
+        if not silent:
+            self.pathsChanged.emit(self.get_paths())
+
+    def clear_input(self):
+        self.input_line.blockSignals(True)
+        self.input_line.clear()
+        self.input_line.blockSignals(False)
+
+    def setEnabled(self, enabled: bool):
+        super().setEnabled(enabled)
+        self.input_line.setEnabled(enabled)
+
 
 class DraggableTableWidget(QTableWidget):
     """A QTableWidget that supports drag and drop reordering of rows."""
