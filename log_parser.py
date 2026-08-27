@@ -273,10 +273,121 @@ class LogParser:
             return []
 
     @staticmethod
-    def extract_thermo_data(logfile_path: Path) -> Optional[pd.DataFrame]:
+    def _collect_header_groups(log_files: List[Path]) -> Dict[Tuple[str, ...], Dict]:
+        """Lightweight scan: distinct header -> {cols, files, rows, header_str}."""
+        header_regex = re.compile(r'^\s*Step\s+')
+        end_block_regex = re.compile(r'^\s*Loop time of')
+        groups: Dict[Tuple[str, ...], Dict] = {}
+        # De-duplicate input list
+        seen = set()
+        uniq_files = []
+        for p in log_files or []:
+            try:
+                key = str(Path(p).resolve())
+            except Exception:
+                key = str(p)
+            if key not in seen:
+                seen.add(key)
+                uniq_files.append(Path(p))
+        for fpath in uniq_files:
+            try:
+                with open(fpath, 'r', errors='ignore') as f:
+                    lines = f.readlines()
+            except Exception:
+                continue
+            cur = None
+            in_block = False
+            for line in lines:
+                if header_regex.match(line):
+                    cur = tuple(line.strip().split())
+                    if cur not in groups:
+                        groups[cur] = {'cols': list(cur), 'header_str': line.strip(), 'files': set(), 'rows': 0}
+                    groups[cur]['files'].add(str(fpath))
+                    in_block = True
+                    continue
+                if in_block:
+                    if end_block_regex.match(line):
+                        in_block = False
+                        cur = None
+                    elif re.match(r'^\s*[-0-9]', line):
+                        if cur is not None:
+                            groups[cur]['rows'] += 1
+        # Convert file sets to counts for UI
+        for g in groups.values():
+            g['file_count'] = len(g['files'])
+            # Keep set for internal use as well
+        return groups
+
+    @staticmethod
+    def get_header_groups_for_filemap(file_map: Dict[str, List[Path]]) -> Dict[Tuple[str, ...], Dict]:
+        """Convenience: collect header groups across all paths in a file_map."""
+        all_files: List[Path] = []
+        for v in (file_map or {}).values():
+            all_files.extend(v)
+        return LogParser._collect_header_groups(all_files)
+
+    @staticmethod
+    def get_files_with_multiple_headers(file_map: Dict[str, List[Path]]):
+        """Returns batches where a single file has >1 header.
+        Groups files by their internal header set (frozenset of header tuples).
+        Each batch = {'header_set': frozenset, 'files': [...], 'groups': {header: aggregated info}}.
+        Only files with >1 distinct header are included; single-header files are ignored.
+        """
+        # First, per-file header map
+        per_file = {}  # file_str -> set of headers
+        per_file_groups = {}  # file_str -> groups dict for that file
+        for paths in (file_map or {}).values():
+            for p in paths or []:
+                try:
+                    fstr = str(Path(p).resolve())
+                except Exception:
+                    fstr = str(p)
+                if fstr in per_file:
+                    continue
+                groups = LogParser._collect_header_groups([Path(p)])
+                # groups keys are the headers found in that file
+                per_file[fstr] = set(groups.keys())
+                per_file_groups[fstr] = groups
+
+        # Keep only files with >1 header
+        multi_files = {f: hdrs for f, hdrs in per_file.items() if len(hdrs) > 1}
+        if not multi_files:
+            return []
+
+        # Group by header set
+        batches: Dict[frozenset, Dict] = {}
+        for fstr, hdr_set in multi_files.items():
+            key = frozenset(hdr_set)
+            if key not in batches:
+                batches[key] = {'header_set': key, 'files': [], 'groups': {}}
+            batches[key]['files'].append(fstr)
+
+        # Aggregate groups per batch (sum rows, union files per header)
+        for key, batch in batches.items():
+            agg: Dict[Tuple[str, ...], Dict] = {}
+            for fstr in batch['files']:
+                groups = per_file_groups[fstr]
+                for hdr, info in groups.items():
+                    if hdr not in agg:
+                        agg[hdr] = {'cols': info['cols'], 'header_str': info['header_str'], 'files': set(), 'rows': 0}
+                    agg[hdr]['files'].add(fstr)
+                    agg[hdr]['rows'] += info['rows']
+            for g in agg.values():
+                g['file_count'] = len(g['files'])
+            batch['groups'] = agg
+
+        # Return list sorted for determinism (largest batch first)
+        return sorted(batches.values(), key=lambda b: (-len(b['files']), -sum(g['rows'] for g in b['groups'].values())))
+
+
+
+    @staticmethod
+    def extract_thermo_data(logfile_path: Path, allowed_headers: Optional[set] = None) -> Optional[pd.DataFrame]:
         """
         Efficiently extracts thermo data from a LAMMPS log file into a pandas DataFrame.
-        Handles log files with multiple data sections.
+        Handles log files with multiple data sections and multiple header types.
+        Groups by distinct header; concat with outer join. If allowed_headers is set,
+        only those header tuples are included (selected via header dialog).
         """
         try:
             with open(logfile_path, 'r') as f:
@@ -284,8 +395,8 @@ class LogParser:
         except Exception:
             return None
 
-        all_data_lines = []
-        header_line = None
+        groups: Dict[Tuple[str, ...], List[str]] = {}
+        cur_header: Optional[Tuple[str, ...]] = None
         in_data_block = False
 
         header_regex = re.compile(r'^\s*Step\s+')
@@ -293,57 +404,105 @@ class LogParser:
 
         for line in lines:
             if header_regex.match(line):
-                if header_line is None:
-                    header_line = line.strip()
+                cur_header = tuple(line.strip().split())
+                if allowed_headers is not None and cur_header not in allowed_headers:
+                    # Keep tracking but don't create a group for disallowed headers
+                    # We still need to enter block to skip its data
+                    in_data_block = True
+                    continue
+                if cur_header not in groups:
+                    groups[cur_header] = []
                 in_data_block = True
-                # Skip the header line itself from being added to data
                 continue
 
             if in_data_block:
                 if end_block_regex.match(line):
                     in_data_block = False
+                    cur_header = None
                 else:
-                    # Add a check to ensure the line looks like data
                     if re.match(r'^\s*[-0-9]', line):
-                        all_data_lines.append(line)
+                        if cur_header is None:
+                            continue
+                        if allowed_headers is not None and cur_header not in allowed_headers:
+                            continue
+                        # Only append if group exists (allowed)
+                        if cur_header in groups:
+                            groups[cur_header].append(line)
 
-        if not header_line or not all_data_lines:
+        if not groups:
             return None
-        
-        # Use StringIO to let pandas read the string data as if it were a file
-        column_names = header_line.split()
-        data_io = StringIO(''.join(all_data_lines))
-        
-        try:
-            # FIX: Changed delim_whitespace to sep='\s+'
-            df = pd.read_csv(data_io, sep=r'\s+', names=column_names, engine='python')
-            
-            # Drop duplicate steps, keeping the last occurrence
-            df.drop_duplicates(subset='Step', keep='last', inplace=True)
+        # Remove empty groups (header seen but no data)
+        groups = {k: v for k, v in groups.items() if v}
+        if not groups:
+            return None
 
-            # Ensure all numeric columns are actually numeric, coercing errors
-            for col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            df.dropna(inplace=True) # Drop rows where coercion failed
-            return df
+        # Fast path: single header -> single read_csv (identical speed to before)
+        if len(groups) == 1:
+            header, data_lines = next(iter(groups.items()))
+            column_names = list(header)
+            data_io = StringIO(''.join(data_lines))
+            try:
+                df = pd.read_csv(data_io, sep=r'\s+', names=column_names, engine='python')
+                df.drop_duplicates(subset='Step', keep='last', inplace=True)
+                for col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                df.dropna(inplace=True)
+                return df
+            except Exception:
+                return None
+
+        # General path: one DataFrame per distinct header, then outer concat.
+        dfs = []
+        for header, data_lines in groups.items():
+            column_names = list(header)
+            data_io = StringIO(''.join(data_lines))
+            try:
+                df = pd.read_csv(data_io, sep=r'\s+', names=column_names, engine='python')
+                # Per-block cleanup before concat - drop only rows that failed
+                # numeric conversion for its own columns (not global NaNs from outer join)
+                for col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                df.dropna(inplace=True)
+                if not df.empty:
+                    dfs.append(df)
+            except Exception:
+                continue
+        if not dfs:
+            return None
+        try:
+            combined = pd.concat(dfs, ignore_index=True, sort=False)
+            if 'Step' in combined.columns:
+                combined.drop_duplicates(subset='Step', keep='last', inplace=True)
+                combined.sort_values(by='Step', inplace=True)
+                combined.reset_index(drop=True, inplace=True)
+            # After outer concat, rows from one header have NaN for the other's columns;
+            # only require Step to be valid - other NaNs are kept so X/Y from same header still plots.
+            if 'Step' in combined.columns:
+                combined = combined.dropna(subset=['Step'])
+                # Ensure numeric for any columns that may have been upcast via concat
+                for col in combined.columns:
+                    if combined[col].dtype == object:
+                        combined[col] = pd.to_numeric(combined[col], errors='coerce')
+            return combined
         except Exception:
             return None
 
     @staticmethod
-    def parse_multiple_logs(log_files: List[Path]) -> Optional[pd.DataFrame]:
+    def parse_multiple_logs(log_files: List[Path], allowed_headers: Optional[set] = None) -> Optional[pd.DataFrame]:
         """
         Parses multiple LAMMPS log files, concatenates them, and removes duplicates.
+        If allowed_headers is set, only those header types are included.
         """
         all_dfs = []
         for log_file in log_files:
-            df = LogParser.extract_thermo_data(log_file)
+            df = LogParser.extract_thermo_data(log_file, allowed_headers=allowed_headers)
             if df is not None and not df.empty:
                 all_dfs.append(df)
 
         if not all_dfs:
             return None
 
-        combined_df = pd.concat(all_dfs, ignore_index=True)
+        combined_df = pd.concat(all_dfs, ignore_index=True, sort=False)
         
         # Final deduplication across all concatenated files
         if 'Step' in combined_df.columns:

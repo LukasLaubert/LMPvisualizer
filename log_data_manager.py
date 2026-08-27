@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import ast
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Set
 
 
 def split_indexed_token(token: str, known_names) -> Tuple[str, Optional[str]]:
@@ -95,9 +95,16 @@ class LogDataManager:
         self.warnings = []
         self.available_columns = []
         self.custom_properties = {} # Name -> Formula
+        self.allowed_headers: Optional[Set[Tuple[str, ...]]] = None  # None = all headers
 
     def set_custom_properties(self, props: Dict[str, str]):
         self.custom_properties = props
+
+    def set_allowed_headers(self, allowed: Optional[Set[Tuple[str, ...]]]):
+        self.allowed_headers = set(allowed) if allowed is not None else None
+
+    def get_allowed_headers(self) -> Optional[Set[Tuple[str, ...]]]:
+        return self.allowed_headers
 
     def _ensure_system_loaded(self, study, system):
         """Lazy loader: Parses log files into DataFrame only when accessed."""
@@ -113,7 +120,7 @@ class LogDataManager:
         # If it's a list (of paths), parse it now
         if isinstance(entry, list):
             from log_parser import LogParser
-            df = LogParser.parse_multiple_logs(entry)
+            df = LogParser.parse_multiple_logs(entry, allowed_headers=self.allowed_headers)
             if df is not None and not df.empty:
                 self.data[study][system] = df # Replace list with DF (Memoization)
                 return df
@@ -241,15 +248,17 @@ class LogDataManager:
             return True
         return False
 
-    def load_project_data(self, studies: Dict[str, List[str]], root_path, log_keywords: List[str] = None, file_map: Dict[str, Path] = None):
+    def load_project_data(self, studies: Dict[str, List[str]], root_path, log_keywords: List[str] = None, file_map: Dict[str, Path] = None, allowed_headers: Optional[Set[Tuple[str, ...]]] = None):
         """
         Discovers log files and stores them for lazy loading.
         Peeks at headers to populate available_columns immediately.
+        If allowed_headers is not None, only those header types are considered for columns.
         """
         from log_parser import LogParser # Local import
         self.data.clear()
         self.warnings = []
         self.available_columns = []
+        self.allowed_headers = set(allowed_headers) if allowed_headers is not None else None
         
         all_cols_found = set()
         successful_keywords = set()
@@ -288,12 +297,27 @@ class LogDataManager:
                 # STORE PATHS ONLY (Lazy Loading)
                 self.data[study_name][system_name] = log_files
                 
-                # Peek at the FIRST file to get columns
+                # Peek at the FIRST file to get columns (filtered by allowed_headers if set)
                 if log_files:
-                    cols = LogParser.peek_columns(log_files[0])
-                    for c in cols:
-                        all_cols_found.add(c)
+                    if self.allowed_headers is not None:
+                        # Collect only columns from allowed header types
+                        for hdr in self.allowed_headers:
+                            for c in hdr:
+                                all_cols_found.add(c)
+                    else:
+                        cols = LogParser.peek_columns(log_files[0])
+                        for c in cols:
+                            all_cols_found.add(c)
+                # Also add columns from allowed_headers directly (covers headers not in first file)
+                if self.allowed_headers is not None:
+                    for hdr in self.allowed_headers:
+                        for c in hdr:
+                            all_cols_found.add(c)
+                # If allowed_headers filter was used, we already have all needed cols;
+                # otherwise peek fallback above. If still empty (e.g., allowed but no file peek), ensure at least header cols.
 
+        # If allowed_headers was used, available columns already collected; if not, fallback to peek.
+        # For allowed case, we need to handle case where peeking didn't add anything - already added header cols.
         # Update available columns global list
         # Prioritize standard thermo keywords if present
         sorted_cols = sorted(list(all_cols_found))

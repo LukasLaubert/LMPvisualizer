@@ -25,6 +25,7 @@ from global_label_editor_dialog import GlobalLabelEditorDialog
 from custom_property_dialog import CustomPropertyDialog
 from popout_window import PopOutWindow
 from fit_dialog import FitFunctionDialog
+from header_selection_dialog import HeaderSelectionDialog
 
 class QuantizeDialog(QDialog):
     """Minimalist dialog for entering quantization points."""
@@ -112,6 +113,9 @@ class LogPlotPanel(QWidget):
         # study key -> {'path': <project path>, 'study': <raw folder name>}
         self.study_origins = {}
         self._is_internal_update = False
+        # Header selection: None = all headers, else set of header tuples
+        self.allowed_headers = None
+        self._header_groups_cache = None
 
         self._init_ui()
         self._connect_signals()
@@ -2257,11 +2261,95 @@ class LogPlotPanel(QWidget):
         self.system_label_widget.setVisible(True)
         self.system_combo.setVisible(True)
 
+        # --- Header selection: only if a single file has >1 header internally ---
+        # Group files that internally have multiple headers by their header set; each distinct set gets one dialog.
+        # Single-header files (even if headers differ across files) do not trigger a dialog.
+        batches = []
+        try:
+            batches = LogParser.get_files_with_multiple_headers(file_map) if file_map else []
+        except Exception:
+            batches = []
+        # Cache for save/restore; batches define what we showed
+        self._header_batches_cache = batches
+
+        # Decide whether to show dialogs
+        # - If no batch -> no dialog, include all (no filter)
+        # - If batches exist: on re-parse (force_reload) always re-prompt;
+        #   otherwise (initial load, session restore) reuse saved allowed_headers if valid.
+        show_dialog = len(batches) > 0
+        is_reparse = bool(force_reload)  # keywords/path/refresh set force_reload=True
+        if show_dialog and not is_reparse and self.allowed_headers is not None:
+            # Reuse saved choice silently if it covers all batches' headers
+            all_batch_headers = set()
+            for b in batches:
+                all_batch_headers.update(b['header_set'])
+            if all(h in all_batch_headers or h not in all_batch_headers for h in self.allowed_headers):
+                # Actually check if saved headers are subset of current all headers and still meaningful
+                # If saved headers still exist in current batches, reuse
+                if any(h in all_batch_headers for h in self.allowed_headers):
+                    # Check that at least one header per batch is still selected
+                    show_dialog = False
+                else:
+                    show_dialog = True
+            else:
+                show_dialog = True
+        # Also suppress dialog during session restore where keep_table=False and not force_reload but we have saved headers
+        if show_dialog and not is_reparse and self.allowed_headers is not None and len(batches) > 0:
+            # If we have a saved selection that matches current batches' header sets, reuse
+            # Compare saved set against current all headers
+            current_all = set()
+            for b in batches:
+                current_all.update(b['header_set'])
+            if self.allowed_headers.issubset(current_all) or self.allowed_headers == current_all:
+                # Saved selection still valid -> reuse without prompting
+                # But if batches differ from last cache, we must prompt; handled via is_reparse above
+                # Here is_reparse==False, so reuse
+                show_dialog = False
+
+        if len(batches) == 0:
+            self.allowed_headers = None
+            self.data_manager.set_allowed_headers(None)
+        elif show_dialog:
+            # Show one dialog per distinct header set (batch), sequential
+            final_allowed = set()
+            # Collect headers from single-header files (always allowed)
+            # They are not in batches, but their headers should stay allowed
+            # Gather all headers from all files, then subtract multi-header ones not selected?
+            # Simpler: start with all single-header files' headers automatically allowed
+            try:
+                all_groups = LogParser.get_header_groups_for_filemap(file_map) if file_map else {}
+                # Headers that appear only in single-header files are those not in any batch's set
+                multi_headers = set()
+                for b in batches:
+                    multi_headers.update(b['header_set'])
+                single_headers = set(all_groups.keys()) - multi_headers
+                final_allowed.update(single_headers)
+            except Exception:
+                final_allowed = set()
+
+            for batch in batches:
+                dlg = HeaderSelectionDialog(batch['groups'], self)
+                # Optional: set title to indicate batch
+                if len(batches) > 1:
+                    dlg.setWindowTitle(f"Select Thermo Headers - Batch {batches.index(batch)+1}/{len(batches)} ({len(batch['files'])} files)")
+                if dlg.exec():
+                    sel = dlg.get_selected_or_all()
+                else:
+                    # Cancel -> keep largest header in this batch
+                    max_hdr = max(batch['groups'].items(), key=lambda kv: kv[1].get('rows', 0))[0]
+                    sel = {max_hdr}
+                final_allowed.update(sel)
+            self.allowed_headers = final_allowed if final_allowed else None
+            self.data_manager.set_allowed_headers(self.allowed_headers)
+        else:
+            # Reuse saved
+            self.data_manager.set_allowed_headers(self.allowed_headers)
+
         if warnings and show_discovery_warnings:
              # Relax warning for flat mode
              pass
         
-        warnings, successful_keywords = self.data_manager.load_project_data(studies, paths, keywords, file_map)
+        warnings, successful_keywords = self.data_manager.load_project_data(studies, paths, keywords, file_map, allowed_headers=self.allowed_headers)
         
         self.main_window.chip_input.update_chip_styles(successful_keywords)
 
@@ -3447,6 +3535,7 @@ class LogPlotPanel(QWidget):
             'single_axis_view_ranges': self.single_axis_view_ranges,
             'fit_table_visible': self.fit_table_visible,
             'selected_row': self.plot_table.currentRow(),
+            'allowed_headers': [list(h) for h in self.allowed_headers] if self.allowed_headers else None,
             'plots': [],
             'fits': []
         }
@@ -3619,6 +3708,18 @@ class LogPlotPanel(QWidget):
         self.global_label_map = data.get('global_label_map', {})
         self.custom_properties = data.get('custom_properties', {})
         self.data_manager.set_custom_properties(self.custom_properties)
+        # Header selection must be restored BEFORE load_project so dialog can be suppressed on autoload
+        hdr = data.get('allowed_headers')
+        if hdr:
+            try:
+                self.allowed_headers = set(tuple(h) for h in hdr)
+                self.data_manager.set_allowed_headers(self.allowed_headers)
+            except Exception:
+                self.allowed_headers = None
+                self.data_manager.set_allowed_headers(None)
+        else:
+            self.allowed_headers = None
+            self.data_manager.set_allowed_headers(None)
 
         project_paths = self.main_window.session_paths(data)
         keywords = data.get('keywords', [])
@@ -3655,6 +3756,7 @@ class LogPlotPanel(QWidget):
             axes_locked = data.get('axes_lock', False)
             self.single_axis_view_lock_enabled = data.get('single_axis_view_lock', False)
             self.single_axis_view_ranges = data.get('single_axis_view_ranges')
+            # Header selection already restored before load_project; keep as is (may have been updated by dialog)
             self.plot_controller.toggle_axes_lock(axes_locked)
             self.plot_controller.toggle_scale_lock(self.scale_lock_enabled)
             self._update_lock_button_visuals()

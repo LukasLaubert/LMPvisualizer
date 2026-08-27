@@ -797,19 +797,39 @@ class LogController:
             
             _, y = item.getData()
             if y is not None and len(y) > 0:
-                found_data = True
-                global_min = min(global_min, np.min(y))
-                global_max = max(global_max, np.max(y))
+                try:
+                    y_min = np.nanmin(y)
+                    y_max = np.nanmax(y)
+                    if np.isfinite(y_min) and np.isfinite(y_max):
+                        found_data = True
+                        global_min = min(global_min, float(y_min))
+                        global_max = max(global_max, float(y_max))
+                except Exception:
+                    pass
                 
                 # Check error band if present
                 error_item = plot_info.get('error_item')
                 if error_item:
                     c1 = error_item.curves[0].getData()
                     c2 = error_item.curves[1].getData()
-                    if c1[1] is not None: global_min = min(global_min, np.min(c1[1]))
-                    if c2[1] is not None: global_max = max(global_max, np.max(c2[1]))
+                    if c1[1] is not None and len(c1[1]) > 0:
+                        try:
+                            c1_min = np.nanmin(c1[1])
+                            if np.isfinite(c1_min):
+                                found_data = True
+                                global_min = min(global_min, float(c1_min))
+                        except Exception:
+                            pass
+                    if c2[1] is not None and len(c2[1]) > 0:
+                        try:
+                            c2_max = np.nanmax(c2[1])
+                            if np.isfinite(c2_max):
+                                found_data = True
+                                global_max = max(global_max, float(c2_max))
+                        except Exception:
+                            pass
 
-        if not found_data:
+        if not found_data or not np.isfinite(global_min) or not np.isfinite(global_max):
             return None
         return global_min, global_max
 
@@ -983,19 +1003,41 @@ class LogController:
                 
                 _, y = item.getData()
                 if y is not None and len(y) > 0:
+                    # Use nan-aware min/max to handle outer-joined NaNs from multi-header files
+                    try:
+                        y_min = np.nanmin(y)
+                        y_max = np.nanmax(y)
+                    except (ValueError, RuntimeWarning):
+                        continue
+                    if not np.isfinite(y_min) or not np.isfinite(y_max):
+                        continue
                     has_data = True
-                    vmin = min(vmin, np.min(y))
-                    vmax = max(vmax, np.max(y))
+                    vmin = min(vmin, float(y_min))
+                    vmax = max(vmax, float(y_max))
                     
                     error_item = plot_info.get('error_item')
                     if error_item:
                         # FillBetweenItem stores curves. Check their data.
                         c1 = error_item.curves[0].getData()
                         c2 = error_item.curves[1].getData()
-                        if c1[1] is not None: vmin = min(vmin, np.min(c1[1]))
-                        if c2[1] is not None: vmax = max(vmax, np.max(c2[1]))
+                        if c1[1] is not None and len(c1[1]) > 0:
+                            try:
+                                c1_min = np.nanmin(c1[1])
+                                if np.isfinite(c1_min):
+                                    has_data = True
+                                    vmin = min(vmin, float(c1_min))
+                            except Exception:
+                                pass
+                        if c2[1] is not None and len(c2[1]) > 0:
+                            try:
+                                c2_max = np.nanmax(c2[1])
+                                if np.isfinite(c2_max):
+                                    has_data = True
+                                    vmax = max(vmax, float(c2_max))
+                            except Exception:
+                                pass
         
-        if not has_data:
+        if not has_data or not np.isfinite(vmin) or not np.isfinite(vmax):
             return None, None
         return vmin, vmax
 
