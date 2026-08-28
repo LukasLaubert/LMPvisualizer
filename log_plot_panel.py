@@ -127,6 +127,8 @@ class LogPlotPanel(QWidget):
         # New Data Processing Properties
         self.enforce_zero_start = False
         self.quantize_points = None # None means deactivated, integer > 1 means active
+        # When True, Mean window is applied per-system then averaged; otherwise average then smooth
+        self.smooth_before_averaging = False
         
         # Fit Feature Properties
         self.fit_dialogs = {} # row_id -> FitFunctionDialog instance
@@ -2000,8 +2002,25 @@ class LogPlotPanel(QWidget):
             ("Exponential Moving Average (EMA)", "ema"),
             ("Data Manipulation", None),
             ("Enforce Start at 0", "zero_start"),
-            (f"Quantize ({self.quantize_points} pts)" if self.quantize_points else "Quantize", "quantize")
+            (f"Quantize ({self.quantize_points} pts)" if self.quantize_points else "Quantize", "quantize"),
+            ("Averaging Order", None),
+            ("Smooth before averaging", "smooth_before_averaging"),
         ]
+
+        tooltips = {
+            "valid_window": "Centered rolling mean — windows that would exceed data borders are excluded (curve shortens by window-1).",
+            "symmetric_window": "Centered rolling mean — at borders the window shrinks symmetrically (curve keeps full length).",
+            "asymmetric_window": "Centered rolling mean — at borders use all available points asymmetrically (keeps length, slightly biased at edges).",
+            "gaussian": "Gaussian smoothing (scipy.ndimage.gaussian_filter1d) with sigma = window/2. Successive points are weighted by a Gaussian kernel.",
+            "savgol_2": "Savitzky-Golay smoothing (order 2, window made odd). Fits a 2nd-degree polynomial per window — preserves peaks better than plain mean.",
+            "savgol_3": "Savitzky-Golay smoothing (order 3, window made odd). 3rd-degree polynomial per window — more flexible, needs window > order.",
+            "savgol_4": "Savitzky-Golay smoothing (order 4, window made odd). 4th-degree polynomial per window — most flexible, most noise-sensitive.",
+            "bspline": "Smoothing B-spline (scipy.interpolate.UnivariateSpline). Window scales the smoothing factor s = N·var·(window/100).",
+            "ema": "Exponential moving average (pandas ewm, span = window, adjust=False). Weights decay exponentially — recent points dominate.",
+            "zero_start": "If checked, inserts a (0, 0) anchor at the origin when the (smoothed) curve does not already start there. Raw 'Orig' data is not altered.",
+            "quantize": "Resamples the smoothed curve to N evenly spaced X points via linear interpolation (np.linspace + np.interp). Enforce-zero expands span to 0..end.",
+            "smooth_before_averaging": "Only applies to \"average\" system dropdown selection. If checked, the Mean window is applied to each system separately, then averaged. If unchecked, systems are averaged first, then smoothed (via the options selected here).",
+        }
 
         actions_dict = {}
         for text, data in options:
@@ -2016,6 +2035,12 @@ class LogPlotPanel(QWidget):
                 action = QAction(text, self)
                 action.setCheckable(True)
                 action.setData(data)
+                if data in tooltips:
+                    action.setToolTip(tooltips[data])
+                    try:
+                        action.setStatusTip(tooltips[data])
+                    except Exception:
+                        pass
                 
                 # Custom check logic for special toggles
                 if data == "zero_start":
@@ -2024,6 +2049,14 @@ class LogPlotPanel(QWidget):
                 elif data == "quantize":
                     action.setChecked(self.quantize_points is not None)
                     action.triggered.connect(self._open_quantize_dialog)
+                elif data == "smooth_before_averaging":
+                    action.setChecked(self.smooth_before_averaging)
+                    action.triggered.connect(self._toggle_smooth_before_averaging)
+                    # Show tooltip also as WhatsThis for broader visibility
+                    try:
+                        action.setWhatsThis(tooltips[data])
+                    except Exception:
+                        pass
                 else:
                     group.addAction(action)
                     if data == self.running_mean_setting:
@@ -2042,6 +2075,10 @@ class LogPlotPanel(QWidget):
 
     def _toggle_enforce_zero(self, checked):
         self.enforce_zero_start = checked
+        self.update_plots()
+
+    def _toggle_smooth_before_averaging(self, checked):
+        self.smooth_before_averaging = bool(checked)
         self.update_plots()
 
     def _open_quantize_dialog(self, checked=False):
@@ -2887,61 +2924,86 @@ class LogPlotPanel(QWidget):
             current_x_ax = plot_info['x_ax']
 
             # --- Fetch Data ---
-            data = self.data_manager.get_plot_data(
-                plot_info['study'], 'average' if self._is_average_system(plot_info['system']) else plot_info['system'], current_x_ax, plot_info['y_ax'], 
-                compute_raw_std, user_choices
+            # Smooth-before-averaging mode only matters for average systems with a mean window
+            use_smooth_before = (
+                self.smooth_before_averaging
+                and self._is_average_system(plot_info['system'])
+                and plot_info['mean_window'] >= 1
             )
-            
-            if not data: continue
-
-            # [Fit Integration] Keep Orig data raw; enforce-0 belongs to the averaged line below.
-            try:
-                x_np = data['x'].to_numpy(dtype=float) if hasattr(data['x'], 'to_numpy') else np.array(data['x'], dtype=float)
-                y_np = data['y'].to_numpy(dtype=float) if hasattr(data['y'], 'to_numpy') else np.array(data['y'], dtype=float)
-            except ValueError:
-                continue 
-            plot_data_cache[plot_info['plot_id']] = {
-                'x': x_np,
-                'y': y_np,
-                'color': plot_info['color'],
-                'mean_window': plot_info['mean_window'],
-                'raw_x_ax': plot_info['x_ax'],
-                'raw_y_ax': plot_info['y_ax'],
-                'y_label': y_label,
-                'x_label': x_label
-            }
-
-            # [Fit Integration] Pre-calculate running mean if needed for fit (Mean Type)
-            running_mean_y = None
-            running_mean_x = None
-
-            if plot_info['mean_window'] >= 1:
-                running_mean_y = self._calculate_running_average(y_np, plot_info['mean_window'], 'mean')
-                # Calculate running std here to allow for quantization
-                running_std = None
-                if plot_info['show_std']:
-                    running_std = self._calculate_running_average(y_np, plot_info['mean_window'], 'std')
-
-                len_diff = len(x_np) - len(running_mean_y)
-                if len_diff > 0:
-                    start_idx = len_diff // 2
-                    end_idx = len(x_np) - (len_diff - start_idx)
-                    running_mean_x = x_np[start_idx:end_idx]
+            # For pale-band calculation we still need force_raw_std in both modes
+            # In smooth-before mode the inter-system std is computed on smoothed curves
+            if use_smooth_before:
+                # Fetch raw averaged data for Orig line and cache (no smoothing yet)
+                raw_compute_std = (
+                    self._is_average_system(plot_info['system']) and
+                    (plot_info['show_std'] or force_raw_std) and
+                    (plot_info['mean_window'] == 0 or force_raw_std)
+                )
+                # For smooth-before, Orig's pale band will be replaced by smoothed pale,
+                # so raw pale is only needed when there is NO mean window (handled above).
+                # We still fetch without smoothing for Orig display; for mean case we suppress raw std.
+                raw_data_for_orig = self.data_manager.get_plot_data(
+                    plot_info['study'], 'average' if self._is_average_system(plot_info['system']) else plot_info['system'],
+                    current_x_ax, plot_info['y_ax'],
+                    False if plot_info['mean_window'] >= 1 and force_raw_std else raw_compute_std,
+                    user_choices
+                )
+                if not raw_data_for_orig:
+                    # Fallback: at least need raw for Orig; if none, skip
+                    continue
+                data = raw_data_for_orig
+                # Keep raw for Orig plotting
+                try:
+                    x_np = data['x'].to_numpy(dtype=float) if hasattr(data['x'], 'to_numpy') else np.array(data['x'], dtype=float)
+                    y_np = data['y'].to_numpy(dtype=float) if hasattr(data['y'], 'to_numpy') else np.array(data['y'], dtype=float)
+                except ValueError:
+                    continue
+                plot_data_cache[plot_info['plot_id']] = {
+                    'x': x_np,
+                    'y': y_np,
+                    'color': plot_info['color'],
+                    'mean_window': plot_info['mean_window'],
+                    'raw_x_ax': plot_info['x_ax'],
+                    'raw_y_ax': plot_info['y_ax'],
+                    'y_label': y_label,
+                    'x_label': x_label
+                }
+                # Compute smoothed-averaged data
+                smooth_data = self._compute_smooth_before_average_data(
+                    plot_info['study'], current_x_ax, plot_info['y_ax'],
+                    plot_info['mean_window'], plot_info['show_std'], force_raw_std, user_choices
+                )
+                if smooth_data is None:
+                    # Fallback to regular smoothing (average-then-smooth) if per-system failed
+                    running_mean_y = self._calculate_running_average(y_np, plot_info['mean_window'], 'mean')
+                    running_std = None
+                    if plot_info['show_std']:
+                        running_std = self._calculate_running_average(y_np, plot_info['mean_window'], 'std')
+                    len_diff = len(x_np) - len(running_mean_y)
+                    if len_diff > 0:
+                        start_idx = len_diff // 2
+                        end_idx = len(x_np) - (len_diff - start_idx)
+                        running_mean_x = x_np[start_idx:end_idx]
+                    else:
+                        running_mean_x = x_np
+                    std_inter_smooth = None
                 else:
-                    running_mean_x = x_np
-                
-                # --- Quantization ---
+                    running_mean_x = smooth_data['x']
+                    running_mean_y = smooth_data['y']
+                    running_std = smooth_data.get('running_std')
+                    std_inter_smooth = smooth_data.get('std_inter')
+                # --- Quantization (shared x for both std bands) ---
                 if self.quantize_points and isinstance(self.quantize_points, int) and self.quantize_points > 1:
                     if len(running_mean_x) > 1:
-                        # If Enforce 0 is on, we wrap the entire span from 0 to the end
                         target_start_x = 0.0 if self.enforce_zero_start else running_mean_x[0]
                         x_quant = np.linspace(target_start_x, running_mean_x[-1], self.quantize_points)
                         y_quant = np.interp(x_quant, running_mean_x, running_mean_y)
                         if running_std is not None:
                             running_std = np.interp(x_quant, running_mean_x, running_std)
+                        if std_inter_smooth is not None:
+                            std_inter_smooth = np.interp(x_quant, running_mean_x, std_inter_smooth)
                         running_mean_x, running_mean_y = x_quant, y_quant
-
-                # --- Hard Anchor: Draw averaged data to the origin without changing Orig data ---
+                # --- Hard Anchor ---
                 if self.enforce_zero_start and len(running_mean_x) > 0:
                     starts_at_origin = running_mean_x[0] == 0 and running_mean_y[0] == 0
                     if not starts_at_origin:
@@ -2949,10 +3011,91 @@ class LogPlotPanel(QWidget):
                         running_mean_y = np.insert(running_mean_y, 0, 0.0)
                         if running_std is not None:
                             running_std = np.insert(running_std, 0, 0.0)
-
+                        if std_inter_smooth is not None:
+                            std_inter_smooth = np.insert(std_inter_smooth, 0, 0.0)
+                # Store for fit + x-range + plotting; keep smooth stds distinct
                 plot_data_cache[plot_info['plot_id']]['mean_x'] = running_mean_x
                 plot_data_cache[plot_info['plot_id']]['mean_y'] = running_mean_y
                 plot_data_cache[plot_info['plot_id']]['mean_std'] = running_std
+                # Keep smoothed inter-system std for pale band on smoothed curve
+                plot_data_cache[plot_info['plot_id']]['mean_std_inter'] = std_inter_smooth
+                # No longer needed as separate variable after branch, but keep for later draw check
+                # Use a flag to indicate we are in smooth-before path
+                _smooth_before_active = True
+                # For later draw logic we need to know std_inter_smooth exists
+                # Store it in local variable for Draw section
+                running_mean_y_sb = running_mean_y
+                running_mean_x_sb = running_mean_x
+                running_std_sb = running_std
+                # Keep std_inter in closure
+            else:
+                data = self.data_manager.get_plot_data(
+                    plot_info['study'], 'average' if self._is_average_system(plot_info['system']) else plot_info['system'], current_x_ax, plot_info['y_ax'], 
+                    compute_raw_std, user_choices
+                )
+                
+                if not data: continue
+
+                # [Fit Integration] Keep Orig data raw; enforce-0 belongs to the averaged line below.
+                try:
+                    x_np = data['x'].to_numpy(dtype=float) if hasattr(data['x'], 'to_numpy') else np.array(data['x'], dtype=float)
+                    y_np = data['y'].to_numpy(dtype=float) if hasattr(data['y'], 'to_numpy') else np.array(data['y'], dtype=float)
+                except ValueError:
+                    continue 
+                plot_data_cache[plot_info['plot_id']] = {
+                    'x': x_np,
+                    'y': y_np,
+                    'color': plot_info['color'],
+                    'mean_window': plot_info['mean_window'],
+                    'raw_x_ax': plot_info['x_ax'],
+                    'raw_y_ax': plot_info['y_ax'],
+                    'y_label': y_label,
+                    'x_label': x_label
+                }
+
+                # [Fit Integration] Pre-calculate running mean if needed for fit (Mean Type)
+                running_mean_y = None
+                running_mean_x = None
+
+                if plot_info['mean_window'] >= 1:
+                    running_mean_y = self._calculate_running_average(y_np, plot_info['mean_window'], 'mean')
+                    # Calculate running std here to allow for quantization
+                    running_std = None
+                    if plot_info['show_std']:
+                        running_std = self._calculate_running_average(y_np, plot_info['mean_window'], 'std')
+
+                    len_diff = len(x_np) - len(running_mean_y)
+                    if len_diff > 0:
+                        start_idx = len_diff // 2
+                        end_idx = len(x_np) - (len_diff - start_idx)
+                        running_mean_x = x_np[start_idx:end_idx]
+                    else:
+                        running_mean_x = x_np
+                    
+                    # --- Quantization ---
+                    if self.quantize_points and isinstance(self.quantize_points, int) and self.quantize_points > 1:
+                        if len(running_mean_x) > 1:
+                            # If Enforce 0 is on, we wrap the entire span from 0 to the end
+                            target_start_x = 0.0 if self.enforce_zero_start else running_mean_x[0]
+                            x_quant = np.linspace(target_start_x, running_mean_x[-1], self.quantize_points)
+                            y_quant = np.interp(x_quant, running_mean_x, running_mean_y)
+                            if running_std is not None:
+                                running_std = np.interp(x_quant, running_mean_x, running_std)
+                            running_mean_x, running_mean_y = x_quant, y_quant
+
+                    # --- Hard Anchor: Draw averaged data to the origin without changing Orig data ---
+                    if self.enforce_zero_start and len(running_mean_x) > 0:
+                        starts_at_origin = running_mean_x[0] == 0 and running_mean_y[0] == 0
+                        if not starts_at_origin:
+                            running_mean_x = np.insert(running_mean_x, 0, 0.0)
+                            running_mean_y = np.insert(running_mean_y, 0, 0.0)
+                            if running_std is not None:
+                                running_std = np.insert(running_std, 0, 0.0)
+
+                    plot_data_cache[plot_info['plot_id']]['mean_x'] = running_mean_x
+                    plot_data_cache[plot_info['plot_id']]['mean_y'] = running_mean_y
+                    plot_data_cache[plot_info['plot_id']]['mean_std'] = running_std
+                _smooth_before_active = False
 
             # [Fit Integration] Barrier: If plot is hidden in table, stop here.
             if not plot_info['is_active']:
@@ -2989,37 +3132,90 @@ class LogPlotPanel(QWidget):
 
             # --- 2. Draw Running Mean / Std Deviation ---
             if plot_info['mean_window'] >= 1:
-                if plot_info['show_std']:
-                    if running_std is not None and len(running_std) == len(running_mean_y):
-                        std_data = {
-                            'x': running_mean_x, 'y': running_mean_y, 'std': running_std, 
+                if _smooth_before_active:
+                    # Smoothed inter-system band (pale) for 'average & std' when smooth-before is active
+                    # This is the std across per-system smoothed curves, centered on the averaged smoothed mean.
+                    # It replaces the raw pale band (which now stays off the Orig line).
+                    std_inter_smooth = plot_data_cache[plot_info['plot_id']].get('mean_std_inter')
+                    if force_raw_std and std_inter_smooth is not None and len(std_inter_smooth) == len(running_mean_y):
+                        pale_data = {
+                            'x': running_mean_x, 'y': running_mean_y, 'std': std_inter_smooth,
                             'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
                             'y_col': plot_info['y_ax'], 'y_label': data['y_label']
                         }
-                        std_color = QColor(plot_info['color'])
-                        std_color.setHsv(std_color.hue(), int(std_color.saturation() * 0.66), int(std_color.value() * 0.5), int(std_color.alpha() * 0.5))
-                        
+                        pale_color = QColor(plot_info['color'])
+                        h, s, v, a = pale_color.getHsv()
+                        muted_s = int(s * 0.45)
+                        brightened_v = min(255, int(v + (255 - v) * 0.25))
+                        pale_color.setHsv(h, muted_s, brightened_v, a)
+                        pale_data['error_color'] = pale_color
+                        pale_data['error_alpha_multiplier'] = 0.5
+                        pale_data['error_layer_priority'] = -100
+                        # Use a distinct layer so pale stays behind running band
                         self.plot_controller.add_or_update_plot_with_custom_colors(
-                            legend_name + "_running_mean_std", std_data, std_color, 
-                            Qt.PenStyle.NoPen, layer_priority=1 + z_offset
+                            legend_name + "_running_mean_std_inter", pale_data, pale_color,
+                            Qt.PenStyle.NoPen, layer_priority=0 + z_offset
                         )
+                    if plot_info['show_std']:
+                        if running_std is not None and len(running_std) == len(running_mean_y):
+                            std_data = {
+                                'x': running_mean_x, 'y': running_mean_y, 'std': running_std,
+                                'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
+                                'y_col': plot_info['y_ax'], 'y_label': data['y_label']
+                            }
+                            std_color = QColor(plot_info['color'])
+                            std_color.setHsv(std_color.hue(), int(std_color.saturation() * 0.66), int(std_color.value() * 0.5), int(std_color.alpha() * 0.5))
+                            self.plot_controller.add_or_update_plot_with_custom_colors(
+                                legend_name + "_running_mean_std", std_data, std_color,
+                                Qt.PenStyle.NoPen, layer_priority=1 + z_offset
+                            )
+                else:
+                    if plot_info['show_std']:
+                        if running_std is not None and len(running_std) == len(running_mean_y):
+                            std_data = {
+                                'x': running_mean_x, 'y': running_mean_y, 'std': running_std, 
+                                'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
+                                'y_col': plot_info['y_ax'], 'y_label': data['y_label']
+                            }
+                            std_color = QColor(plot_info['color'])
+                            std_color.setHsv(std_color.hue(), int(std_color.saturation() * 0.66), int(std_color.value() * 0.5), int(std_color.alpha() * 0.5))
+                            
+                            self.plot_controller.add_or_update_plot_with_custom_colors(
+                                legend_name + "_running_mean_std", std_data, std_color, 
+                                Qt.PenStyle.NoPen, layer_priority=1 + z_offset
+                            )
                 
                 if plot_info['mean_window'] > 0:
-                    mean_color = QColor(plot_info['color'])
-                    if plot_info['show_original']:
-                        mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.5, mean_color.alphaF())
-                    else:
-                        mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.8, mean_color.alphaF())
-                    
-                    mean_data = {
-                        'x': running_mean_x, 'y': running_mean_y, 'std': None, 
-                        'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
-                        'y_col': plot_info['y_ax'], 'y_label': data['y_label']
-                    }
-                    self.plot_controller.add_or_update_plot_with_custom_colors(
-                        legend_name + "_running_mean", mean_data, mean_color, 
-                        plot_info['style'], layer_priority=2 + z_offset, thickness=plot_info['thickness']
-                    )
+                    # Ensure running_mean_x/y are defined in both branches
+                    # (In smooth-before they were set above; in regular they were set in else-branch)
+                    try:
+                        _rmx = running_mean_x
+                        _rmy = running_mean_y
+                    except NameError:
+                        _rmx = plot_data_cache[plot_info['plot_id']].get('mean_x')
+                        _rmy = plot_data_cache[plot_info['plot_id']].get('mean_y')
+                    if _rmx is None or _rmy is None:
+                        _rmx = running_mean_x if 'running_mean_x' in locals() else None
+                        _rmy = running_mean_y if 'running_mean_y' in locals() else None
+                    # Prefer the cache values which are already quantized/zero-handled
+                    _rmx = plot_data_cache[plot_info['plot_id']].get('mean_x', _rmx)
+                    _rmy = plot_data_cache[plot_info['plot_id']].get('mean_y', _rmy)
+                    if _rmx is not None and _rmy is not None:
+                        mean_color = QColor(plot_info['color'])
+                        if plot_info['show_original']:
+                            mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.5, mean_color.alphaF())
+                        else:
+                            mean_color.setHsvF(mean_color.hueF(), mean_color.saturationF(), mean_color.valueF() * 0.8, mean_color.alphaF())
+                        
+                        mean_data = {
+                            'x': _rmx, 'y': _rmy, 'std': None, 
+                            'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
+                            'y_col': plot_info['y_ax'], 'y_label': data['y_label']
+                        }
+                        self.plot_controller.add_or_update_plot_with_custom_colors(
+                            legend_name + "_running_mean", mean_data, mean_color, 
+                            plot_info['style'], layer_priority=2 + z_offset, thickness=plot_info['thickness']
+                        )
 
         # Keep the fetched data around: "Add Fit" seeds its x-range from the source row.
         self._plot_data_cache = plot_data_cache
@@ -3383,6 +3579,218 @@ class LogPlotPanel(QWidget):
 
         return data_np
 
+    def _compute_smooth_before_average_data(self, study: str, x_col: str, y_col: str,
+                                            mean_window: int, show_std: bool,
+                                            force_raw_std: bool,
+                                            user_choices: dict = None):
+        """Per-system smoothing then averaging. Returns dict or None.
+
+        For 'Smooth before averaging' mode: each system's y is smoothed independently
+        with the current running_mean_setting, then the smoothed y's are averaged.
+        - x_mean: mean of per-system smoothed x (handles valid_window truncation)
+        - y_mean: mean of per-system smoothed y
+        - std_inter: std across per-system smoothed y (for 'average & std' pale band)
+        - running_std: mean of per-system running stds (for Std column when show_std)
+        Quantization / enforce_zero are NOT applied here — caller does that on the
+        final averaged curve so all std bands share the same x.
+        """
+        if study not in self.data_manager.data:
+            return None
+        if mean_window is None or mean_window < 1:
+            return None
+
+        # Ensure all systems loaded
+        for sys_name in list(self.data_manager.data[study].keys()):
+            self.data_manager._ensure_system_loaded(study, sys_name)
+
+        study_dfs = self.data_manager.data[study]
+        # Build filtered list mirroring LogDataManager.get_plot_data
+        dfs_to_process = []
+        if user_choices:
+            truncate_len = user_choices.get('truncate_len')
+            exclude_systems = set(user_choices.get('exclude', []))
+            for sys_name, entry in study_dfs.items():
+                if sys_name in exclude_systems:
+                    continue
+                if isinstance(entry, pd.DataFrame):
+                    if truncate_len is not None:
+                        dfs_to_process.append(entry.iloc[:truncate_len])
+                    else:
+                        dfs_to_process.append(entry)
+        else:
+            dfs_to_process = [df for df in study_dfs.values() if isinstance(df, pd.DataFrame)]
+
+        if not dfs_to_process:
+            return None
+
+        # Determine alignment column
+        align_col = 'Step'
+        if not all(align_col in df.columns for df in dfs_to_process):
+            align_col = 'index'
+
+        # Preprocess each df like manager: de-duplicate + set index
+        processed_dfs = []
+        for df in dfs_to_process:
+            temp = df.copy()
+            if align_col == 'index':
+                temp = temp.reset_index()
+            temp = temp.drop_duplicates(subset=[align_col], keep='last')
+            temp = temp.set_index(align_col)
+            processed_dfs.append(temp)
+
+        y_list = []
+        x_list = []
+        std_running_list = []
+
+        for p_df in processed_dfs:
+            x_s = self.data_manager._get_series(p_df, x_col)
+            y_s = self.data_manager._get_series(p_df, y_col)
+            if x_s is None or y_s is None:
+                continue
+            # Convert to numpy
+            try:
+                y_np = y_s.to_numpy(dtype=float) if hasattr(y_s, 'to_numpy') else np.array(y_s, dtype=float)
+                x_np = x_s.to_numpy(dtype=float) if hasattr(x_s, 'to_numpy') else np.array(x_s, dtype=float)
+            except Exception:
+                continue
+            if len(y_np) == 0 or len(x_np) == 0:
+                continue
+
+            # Smooth y
+            try:
+                y_smooth = self._calculate_running_average(y_np, mean_window, 'mean')
+            except Exception as e:
+                print(f"Smooth-before-avg y failed: {e}")
+                continue
+
+            # Slice x / index to match y_smooth length (valid_window shortens)
+            len_diff = len(x_np) - len(y_smooth)
+            if len_diff > 0:
+                start_idx = len_diff // 2
+                end_idx = len(x_np) - (len_diff - start_idx)
+                try:
+                    x_smooth = x_np[start_idx:end_idx]
+                    idx_smooth = y_s.index[start_idx:end_idx]
+                except Exception:
+                    # Fallback to simple slice
+                    x_smooth = x_np[start_idx:end_idx]
+                    idx_smooth = y_s.index[start_idx:end_idx] if len(y_s.index) >= end_idx else y_s.index[:len(y_smooth)]
+            else:
+                x_smooth = x_np
+                idx_smooth = y_s.index
+
+            # Guard length after slicing
+            if len(x_smooth) != len(y_smooth) or len(y_smooth) == 0:
+                # If mismatch, trim to min length
+                min_len = min(len(x_smooth), len(y_smooth), len(idx_smooth))
+                y_smooth = y_smooth[:min_len]
+                x_smooth = x_smooth[:min_len]
+                idx_smooth = idx_smooth[:min_len]
+
+            try:
+                y_series = pd.Series(y_smooth, index=idx_smooth)
+                x_series = pd.Series(x_smooth, index=idx_smooth)
+            except Exception:
+                continue
+
+            y_list.append(y_series)
+            x_list.append(x_series)
+
+            if show_std:
+                try:
+                    std_np = self._calculate_running_average(y_np, mean_window, 'std')
+                except Exception as e:
+                    print(f"Smooth-before-avg std failed: {e}")
+                    continue
+                # Align std length to y_smooth length
+                # For methods where std keeps full length while y_smooth is truncated (valid_window),
+                # std_np will be truncated similarly; for others lengths match. If mismatch, slice.
+                if len(std_np) != len(y_smooth):
+                    # Bring std_np to same indexing as y_smooth
+                    # For valid_window both truncated same amount -> lengths already equal
+                    # For other mismatches, slice std_np same as x_np was sliced
+                    if len(std_np) > len(y_smooth):
+                        # std longer -> slice middle like x
+                        sd_diff = len(std_np) - len(y_smooth)
+                        s_start = sd_diff // 2
+                        s_end = len(std_np) - (sd_diff - s_start)
+                        std_np = std_np[s_start:s_end]
+                    else:
+                        # std shorter (should not happen) -> pad? just truncate y
+                        min_l = min(len(std_np), len(y_smooth))
+                        std_np = std_np[:min_l]
+                        y_smooth = y_smooth[:min_l]
+                        x_smooth = x_smooth[:min_l]
+                        idx_smooth = idx_smooth[:min_l]
+                        # Rebuild y/x series already added, need to adjust last entries
+                        # For simplicity, skip this rare case
+                        if len(std_np) != len(idx_smooth):
+                            idx_smooth = idx_smooth[:len(std_np)]
+                try:
+                    std_series = pd.Series(std_np, index=idx_smooth)
+                except Exception:
+                    continue
+                std_running_list.append(std_series)
+
+        if not y_list or not x_list:
+            return None
+
+        try:
+            y_df = pd.concat(y_list, axis=1, join='inner')
+            x_df = pd.concat(x_list, axis=1, join='inner')
+        except Exception as e:
+            print(f"Smooth-before-avg concat failed: {e}")
+            return None
+
+        if y_df.empty or x_df.empty:
+            return None
+
+        y_mean = y_df.mean(axis=1)
+        x_mean = x_df.mean(axis=1)
+
+        # Ensure alignment of x_mean and y_mean (inner join already ensures common index)
+        # Reindex to common index
+        common_idx = y_mean.index.intersection(x_mean.index)
+        if len(common_idx) == 0:
+            return None
+        y_mean = y_mean.reindex(common_idx)
+        x_mean = x_mean.reindex(common_idx)
+
+        result = {
+            'x': x_mean.to_numpy(dtype=float) if hasattr(x_mean, 'to_numpy') else np.array(x_mean, dtype=float),
+            'y': y_mean.to_numpy(dtype=float) if hasattr(y_mean, 'to_numpy') else np.array(y_mean, dtype=float),
+            'index': common_idx,
+        }
+
+        # Inter-system std of smoothed (for average & std pale band)
+        if force_raw_std:
+            try:
+                std_inter = y_df.reindex(common_idx).std(axis=1)
+                result['std_inter'] = std_inter.to_numpy(dtype=float) if hasattr(std_inter, 'to_numpy') else np.array(std_inter, dtype=float)
+            except Exception:
+                result['std_inter'] = None
+        else:
+            result['std_inter'] = None
+
+        # Running std: mean of per-system running stds
+        if show_std and std_running_list:
+            try:
+                std_df = pd.concat(std_running_list, axis=1, join='inner')
+                std_df = std_df.reindex(common_idx)
+                # Some methods produce NaNs at edges (valid) already dropped; for those keeping length,
+                # bfill/ffill already done. But after inner join we may still have NaNs.
+                avg_std = std_df.mean(axis=1)
+                # Fill NaNs that may remain
+                avg_std = avg_std.fillna(0)
+                result['running_std'] = avg_std.to_numpy(dtype=float) if hasattr(avg_std, 'to_numpy') else np.array(avg_std, dtype=float)
+            except Exception as e:
+                print(f"Smooth-before-avg avg std failed: {e}")
+                result['running_std'] = None
+        else:
+            result['running_std'] = None
+
+        return result
+
     def _update_axis_properties(self, visible_plots_info, selected_x_ax: str = None):
         # Build comma-separated X label: unique, selected-first, mapped through global_label_map
         unique_x_labels = []
@@ -3737,6 +4145,7 @@ class LogPlotPanel(QWidget):
             'running_mean_setting': self.running_mean_setting,
             'enforce_zero_start': self.enforce_zero_start,
             'quantize_points': self.quantize_points,
+            'smooth_before_averaging': self.smooth_before_averaging,
             'global_label_map': self.global_label_map,
             'custom_properties': self.custom_properties,
             'scale_lock': self.scale_lock_enabled,
@@ -3963,6 +4372,7 @@ class LogPlotPanel(QWidget):
             self.running_mean_setting = data.get('running_mean_setting', 'symmetric_window')
             self.enforce_zero_start = data.get('enforce_zero_start', False)
             self.quantize_points = data.get('quantize_points', None)
+            self.smooth_before_averaging = bool(data.get('smooth_before_averaging', False))
             self.scale_lock_enabled = data.get('scale_lock', False)
             axes_locked = data.get('axes_lock', False)
             self.single_axis_view_lock_enabled = data.get('single_axis_view_lock', False)
