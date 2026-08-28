@@ -296,7 +296,9 @@ class LogController:
             'view_box': view_box,
             'layer_priority': layer_priority,
             'y_col': y_col_name,  # Store y_col for export
-            'y_label': data.get('y_label', y_col_name)
+            'y_label': data.get('y_label', y_col_name),
+            'x_col': data.get('x_col', ''),
+            'x_label': data.get('x_label', data.get('x_col', ''))
         }
         self.update_views()
 
@@ -663,7 +665,8 @@ class LogController:
                     break
 
             if target_group is None:
-                target_group = {'x': x_values, 'datasets': []}
+                x_label = plot_info.get('x_label', plot_info.get('x_col', self.x_axis_label))
+                target_group = {'x': x_values, 'x_label': x_label, 'datasets': []}
                 target_positions = list(range(len(x_values)))
                 x_groups.append(target_group)
 
@@ -689,7 +692,7 @@ class LogController:
             max_rows = max(max_rows, rows_in_group)
 
             header_row_1.append('x')
-            header_row_2.append(self.x_axis_label)
+            header_row_2.append(group.get('x_label', self.x_axis_label))
             header_row_3.append('')
             data_columns.append([group['x'][i] for i in order])
 

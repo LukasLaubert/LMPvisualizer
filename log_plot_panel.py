@@ -27,6 +27,38 @@ from popout_window import PopOutWindow
 from fit_dialog import FitFunctionDialog
 from header_selection_dialog import HeaderSelectionDialog
 
+
+def _system_pattern_tokenize(name: str):
+    """Collapse each maximal digit run into a single None token."""
+    tokens = []
+    i = 0
+    n = len(name)
+    while i < n:
+        ch = name[i]
+        if ch.isdigit():
+            tokens.append(None)
+            i += 1
+            while i < n and name[i].isdigit():
+                i += 1
+        else:
+            tokens.append(ch)
+            i += 1
+    return tokens
+
+
+def _find_pattern_matched_system(prev: str, candidates: list[str]):
+    """First candidate with identical non-digit chars, digit groups counted as one."""
+    if not prev or prev == "Select System":
+        return None
+    prev_toks = _system_pattern_tokenize(prev)
+    for cand in candidates:
+        if cand == "Select System":
+            continue
+        if _system_pattern_tokenize(cand) == prev_toks:
+            return cand
+    return None
+
+
 class QuantizeDialog(QDialog):
     """Minimalist dialog for entering quantization points."""
     def __init__(self, current_points, parent=None):
@@ -113,6 +145,11 @@ class LogPlotPanel(QWidget):
         # study key -> {'path': <project path>, 'study': <raw folder name>}
         self.study_origins = {}
         self._is_internal_update = False
+        # Explicit system sequence memory (real systems only, 0-based). Updated only
+        # on manual system picks, never on auto fallback. Used as final fallback
+        # when single/exact/pattern all fail.
+        self._explicit_system_seq = None
+        self._prev_study = None
         # Header selection: None = all headers, else set of header tuples
         self.allowed_headers = None
         self._header_groups_cache = None
@@ -354,7 +391,7 @@ class LogPlotPanel(QWidget):
         self.view_lock_btn.toggled.connect(self._on_view_lock_toggled)
         
         self.study_combo.currentTextChanged.connect(self.on_study_selected)
-        self.system_combo.currentTextChanged.connect(lambda text: self._update_selected_row_name_component('system', text))
+        self.system_combo.currentTextChanged.connect(self._on_system_combo_changed)
         # Use _handle_axis_change for axis combos to intercept "Custom" selection
         self.xaxis_combo.currentTextChanged.connect(lambda text: self._handle_axis_change(self.xaxis_combo, 'x_axis', text))
         self.yaxis_combo.currentTextChanged.connect(lambda text: self._handle_axis_change(self.yaxis_combo, 'y_axis', text))
@@ -363,6 +400,19 @@ class LogPlotPanel(QWidget):
         self.plot_table.cellDoubleClicked.connect(self._on_table_double_click)
         
         self.popout_btn.clicked.connect(self.launch_popout_window)
+
+    def _on_system_combo_changed(self, text: str):
+        # Manual pick → lock sequence number (real systems only, 0-based).
+        if not self._is_internal_update and text and text != "Select System":
+            study = self.study_combo.currentText()
+            if study and study != "Select Study":
+                try:
+                    systems = self.data_manager.get_system_names(study)
+                    if text in systems:
+                        self._explicit_system_seq = systems.index(text)
+                except Exception:
+                    pass
+        self._update_selected_row_name_component('system', text)
 
     def _toggle_fit_ui(self):
         self.fit_table_visible = not self.fit_table_visible
@@ -1749,10 +1799,7 @@ class LogPlotPanel(QWidget):
     def _finish_row_name_update(self):
         self.update_plots()
         self._update_plot_labels()
-        
-        # Reset view to ensure new data fits unless the independent view lock is active.
-        if self.plot_controller and not self.single_axis_view_lock_enabled:
-            self.plot_controller.reset_view()
+        # Global fitting handled inside update_plots (as before via apply_current_locks).
 
     def _connect_signals(self):
         self.add_btn.clicked.connect(self.add_new_plot_row)
@@ -2481,10 +2528,21 @@ class LogPlotPanel(QWidget):
         3. Update the selected row(s) Study/System components.
         """
         study = self.study_combo.currentText()
+        prev_study = getattr(self, '_prev_study', None)
+        # For derived sequence when no explicit global yet, remember where current_sys stood.
+        prev_seq_target = None
+        current_sys = self.system_combo.currentText() if hasattr(self, 'system_combo') else "Select System"
+        if getattr(self, '_explicit_system_seq', None) is None and prev_study and current_sys and current_sys != "Select System":
+            try:
+                prev_systems = self.data_manager.get_system_names(prev_study) if prev_study != "Select Study" else []
+                if current_sys in prev_systems:
+                    prev_seq_target = prev_systems.index(current_sys)
+            except Exception:
+                prev_seq_target = None
         
         # 1. Reset and filter the system combo
         self.system_combo.blockSignals(True)
-        current_sys = self.system_combo.currentText()
+        # current_sys already captured before clear
         self.system_combo.clear()
         self.system_combo.addItem("Select System")
         
@@ -2505,10 +2563,31 @@ class LogPlotPanel(QWidget):
             final_sys = current_sys
             self.system_combo.setCurrentText(final_sys)
         else:
-            # Fallback to placeholder
-            self.system_combo.setCurrentIndex(0)
+            # No exact match and not single -> pattern fallback (digit groups = 1 token)
+            avg_opts = self._get_average_system_options(systems)
+            candidates_ordered = avg_opts + systems  # dropdown order
+            matched = _find_pattern_matched_system(current_sys, candidates_ordered)
+            if matched is not None:
+                final_sys = matched
+                self.system_combo.setCurrentText(final_sys)
+            else:
+                # Sequence fallback: remembered explicit index or derived from previous study.
+                target_idx = None
+                if getattr(self, '_explicit_system_seq', None) is not None:
+                    target_idx = self._explicit_system_seq
+                elif prev_seq_target is not None:
+                    target_idx = prev_seq_target
+                if target_idx is not None and len(systems) > 0:
+                    # Count only real systems, clamp to closest smaller (or exact).
+                    clamped = max(0, min(int(target_idx), len(systems) - 1))
+                    final_sys = systems[clamped]
+                    self.system_combo.setCurrentText(final_sys)
+                else:
+                    self.system_combo.setCurrentIndex(0)
             
         self.system_combo.blockSignals(False)
+        # Remember this study for next switch's derived fallback
+        self._prev_study = study if study != "Select Study" else None
         
         # 3. Update the selected row(s) - ONLY if this was a manual user change
         if not self._is_internal_update:
@@ -2598,6 +2677,8 @@ class LogPlotPanel(QWidget):
         finally:
             self._is_internal_update = False
         
+        # As before: unlocked row click fits global union (all visible X), not
+        # selected-only/group. The X values are still per-row raw.
         # Trigger plot update because x-axis might need to change
         self.update_plots()
 
@@ -2740,20 +2821,21 @@ class LogPlotPanel(QWidget):
             except (ValueError, AttributeError, IndexError):
                 continue
         
-        # --- Determine Preferred Axes (for View Locking) ---
-        preferred_x_ax = None
-        selected_y_ax = None 
+        # --- Determine Selected Y for draw ordering ---
+        selected_y_ax = None
+        selected_x_ax = None
 
         if selected_row_idx != -1 and selected_row_idx < len(all_plot_info):
             selected_plot_info = all_plot_info[selected_row_idx]
             if selected_plot_info['is_active'] and selected_plot_info['is_valid']:
-                preferred_x_ax = selected_plot_info['x_ax']
+                selected_x_ax = selected_plot_info['x_ax']
                 selected_y_ax = selected_plot_info['y_ax']
 
-        if not preferred_x_ax:
+        # Fallback for X label ordering when nothing selected
+        if not selected_x_ax:
             for info in all_plot_info:
                 if info['is_active'] and info['is_valid']:
-                    preferred_x_ax = info['x_ax']
+                    selected_x_ax = info['x_ax']
                     break
         
         # Sort plots: Selected Y-axis plots draw last (on top)
@@ -2801,7 +2883,8 @@ class LogPlotPanel(QWidget):
                 (plot_info['mean_window'] == 0 or force_raw_std)
             )
             
-            current_x_ax = preferred_x_ax or plot_info['x_ax']
+            # Each row uses its OWN x column raw values on the shared ViewBox
+            current_x_ax = plot_info['x_ax']
 
             # --- Fetch Data ---
             data = self.data_manager.get_plot_data(
@@ -2822,8 +2905,10 @@ class LogPlotPanel(QWidget):
                 'y': y_np,
                 'color': plot_info['color'],
                 'mean_window': plot_info['mean_window'],
+                'raw_x_ax': plot_info['x_ax'],
                 'raw_y_ax': plot_info['y_ax'],
-                'y_label': y_label
+                'y_label': y_label,
+                'x_label': x_label
             }
 
             # [Fit Integration] Pre-calculate running mean if needed for fit (Mean Type)
@@ -2874,6 +2959,8 @@ class LogPlotPanel(QWidget):
                 continue
 
             # --- Visualization Preparation ---
+            data['x_col'] = plot_info['x_ax']
+            data['x_label'] = x_label if x_label else plot_info['x_ax']
             data['y_col'] = plot_info['y_ax']
             data['y_label'] = y_label if y_label else plot_info['y_ax']
             
@@ -2906,6 +2993,7 @@ class LogPlotPanel(QWidget):
                     if running_std is not None and len(running_std) == len(running_mean_y):
                         std_data = {
                             'x': running_mean_x, 'y': running_mean_y, 'std': running_std, 
+                            'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
                             'y_col': plot_info['y_ax'], 'y_label': data['y_label']
                         }
                         std_color = QColor(plot_info['color'])
@@ -2925,6 +3013,7 @@ class LogPlotPanel(QWidget):
                     
                     mean_data = {
                         'x': running_mean_x, 'y': running_mean_y, 'std': None, 
+                        'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
                         'y_col': plot_info['y_ax'], 'y_label': data['y_label']
                     }
                     self.plot_controller.add_or_update_plot_with_custom_colors(
@@ -3020,11 +3109,15 @@ class LogPlotPanel(QWidget):
                             
                             fit_y_col = src_data.get('raw_y_ax', 'N/A')
                             fit_y_label = src_data.get('y_label', 'N/A')
+                            fit_x_col = src_data.get('raw_x_ax', src_data.get('x_label', 'N/A'))
+                            fit_x_label = src_data.get('x_label', fit_x_col)
                             
                             fit_plot_data = {
                                 'x': res['x_fit'],
                                 'y': res['y_fit'],
                                 'std': None,
+                                'x_col': fit_x_col,
+                                'x_label': fit_x_label,
                                 'y_col': fit_y_col,
                                 'y_label': fit_y_label
                             }
@@ -3040,10 +3133,10 @@ class LogPlotPanel(QWidget):
                     continue
 
         # --- Finalize View ---
-        self.current_x_axis = preferred_x_ax
+        self.current_x_axis = selected_x_ax
         visible_plots = [p for p in all_plot_info if p['is_active'] and p['is_valid']]
         
-        self._update_axis_properties(visible_plots, preferred_x_ax)
+        self._update_axis_properties(visible_plots, selected_x_ax)
         
         for row in range(self.plot_table.rowCount()):
             self._update_row_visual_state(row)
@@ -3054,7 +3147,13 @@ class LogPlotPanel(QWidget):
                 self._capture_single_axis_view_range()
             self._apply_single_axis_view_range()
         else:
+            # As before: unlocked, every update (including row click) fits
+            # global X union of all visible plots; per-row X values are still
+            # plotted as-is on the single shared ViewBox.
             self.plot_controller.apply_current_locks()
+            self._apply_x_range_global(visible_plots, plot_data_cache)
+            if hasattr(self, '_pending_x_mode'):
+                delattr(self, '_pending_x_mode')
 
     def _update_fit_type_combos(self):
         """
@@ -3284,9 +3383,18 @@ class LogPlotPanel(QWidget):
 
         return data_np
 
-    def _update_axis_properties(self, visible_plots_info, x_label_override: str = None):
-        # x_label_override is the x-property from the selected row.
-        x_label = self.global_label_map.get(x_label_override, x_label_override) if x_label_override else ""
+    def _update_axis_properties(self, visible_plots_info, selected_x_ax: str = None):
+        # Build comma-separated X label: unique, selected-first, mapped through global_label_map
+        unique_x_labels = []
+        if selected_x_ax:
+            lbl = self.global_label_map.get(selected_x_ax, selected_x_ax)
+            if lbl not in unique_x_labels:
+                unique_x_labels.append(lbl)
+        for info in visible_plots_info:
+            lbl = self.global_label_map.get(info['x_ax'], info['x_ax'])
+            if lbl not in unique_x_labels:
+                unique_x_labels.append(lbl)
+        x_label = ", ".join(unique_x_labels)
 
         y_labels = {}
         for info in visible_plots_info:
@@ -3310,6 +3418,109 @@ class LogPlotPanel(QWidget):
         
         # Update view-lock and multi-axis alignment/scale lock button visibility.
         self._update_lock_button_visuals()
+
+    def _apply_x_range_selected_group(self, visible_plots_info, plot_data_cache, selected_x_ax):
+        """Set main ViewBox X range to the single clicked row's X data (when unlocked)."""
+        # Find the single selected row's plot_id via visible_plots_info
+        # visible_plots_info is filtered to active/valid; caller also supplies
+        # selected_x_ax but we now zoom to the row itself, not the group.
+        selected_pid = None
+        # The panel tracks current selection via table currentRow
+        try:
+            sel_row = self.plot_table.currentRow()
+            item = self.plot_table.item(sel_row, 1) if sel_row != -1 else None
+            if item is not None:
+                selected_pid = item.data(Qt.ItemDataRole.UserRole + 1)
+        except Exception:
+            selected_pid = None
+        # Fallback to first visible with matching x_ax if pid not in cache
+        if selected_pid is None:
+            if not visible_plots_info or not selected_x_ax:
+                self._apply_x_range_global(visible_plots_info, plot_data_cache)
+                return
+            for info in visible_plots_info:
+                if info.get('x_ax') == selected_x_ax:
+                    selected_pid = info.get('plot_id')
+                    break
+        cache = plot_data_cache.get(selected_pid) if selected_pid is not None else None
+        if not cache:
+            self._apply_x_range_global(visible_plots_info, plot_data_cache)
+            return
+        gmin, gmax = float('inf'), float('-inf')
+        found = False
+        for key in ('x', 'mean_x'):
+            arr = cache.get(key)
+            if arr is None or len(arr) == 0:
+                continue
+            try:
+                cur_min = float(np.nanmin(arr))
+                cur_max = float(np.nanmax(arr))
+            except Exception:
+                continue
+            if not (np.isfinite(cur_min) and np.isfinite(cur_max)):
+                continue
+            gmin = min(gmin, cur_min)
+            gmax = max(gmax, cur_max)
+            found = True
+        if not found:
+            self._apply_x_range_global(visible_plots_info, plot_data_cache)
+            return
+        if gmax == gmin:
+            pad = 1.0
+            gmin -= pad
+            gmax += pad
+        else:
+            pad = (gmax - gmin) * 0.05
+            gmin -= pad
+            gmax += pad
+        self._suppress_single_axis_range_capture = True
+        try:
+            vb = self.plot_widget.getPlotItem().getViewBox()
+            vb.setXRange(gmin, gmax, padding=0)
+        finally:
+            pass
+
+    def _apply_x_range_global(self, visible_plots_info, plot_data_cache):
+        """Set X range to union of all visible plots (global auto-range)."""
+        if not visible_plots_info:
+            return
+        gmin, gmax = float('inf'), float('-inf')
+        found = False
+        pid_to_info = {info['plot_id']: info for info in visible_plots_info if info.get('plot_id') is not None}
+        for pid in pid_to_info:
+            cache = plot_data_cache.get(pid)
+            if not cache:
+                continue
+            for key in ('x', 'mean_x'):
+                arr = cache.get(key)
+                if arr is None or len(arr) == 0:
+                    continue
+                try:
+                    cur_min = float(np.nanmin(arr))
+                    cur_max = float(np.nanmax(arr))
+                except Exception:
+                    continue
+                if not (np.isfinite(cur_min) and np.isfinite(cur_max)):
+                    continue
+                gmin = min(gmin, cur_min)
+                gmax = max(gmax, cur_max)
+                found = True
+        if not found:
+            return
+        if gmax == gmin:
+            pad = 1.0
+            gmin -= pad
+            gmax += pad
+        else:
+            pad = (gmax - gmin) * 0.05
+            gmin -= pad
+            gmax += pad
+        self._suppress_single_axis_range_capture = True
+        try:
+            vb = self.plot_widget.getPlotItem().getViewBox()
+            vb.setXRange(gmin, gmax, padding=0)
+        finally:
+            pass
 
     def delete_plot_row(self):
         button = self.sender()

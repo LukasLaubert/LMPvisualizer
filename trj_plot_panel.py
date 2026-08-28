@@ -23,6 +23,38 @@ from log_parser import LogParser
 from global_label_editor_dialog import GlobalLabelEditorDialog
 from auto_index_dialog import AutoIndexDialog
 
+
+def _system_pattern_tokenize(name: str):
+    """Collapse each maximal digit run into a single None token."""
+    tokens = []
+    i = 0
+    n = len(name)
+    while i < n:
+        ch = name[i]
+        if ch.isdigit():
+            tokens.append(None)
+            i += 1
+            while i < n and name[i].isdigit():
+                i += 1
+        else:
+            tokens.append(ch)
+            i += 1
+    return tokens
+
+
+def _find_pattern_matched_system(prev: str, candidates: list[str]):
+    """First candidate with identical non-digit chars, digit groups counted as one."""
+    if not prev or prev == "Select System":
+        return None
+    prev_toks = _system_pattern_tokenize(prev)
+    for cand in candidates:
+        if cand == "Select System":
+            continue
+        if _system_pattern_tokenize(cand) == prev_toks:
+            return cand
+    return None
+
+
 class TrjPlotPanel(QWidget):
     def __init__(self, main_window_ref):
         super().__init__()
@@ -43,6 +75,10 @@ class TrjPlotPanel(QWidget):
         # Set while load_project() rebuilds the data manager, so on_system_changed()
         # forces the controller to re-derive its timestep lists and reset the range.
         self._force_system_reload = False
+        # Explicit system sequence memory (real systems only, 0-based), per-mode global.
+        self._explicit_system_seq = None
+        self._prev_study = None
+        self._suppress_seq_update = False
 
         # Track last selected row to save state before switching
         self.last_selected_row = -1
@@ -588,19 +624,64 @@ class TrjPlotPanel(QWidget):
         
         if current and current in items:
             combo.setCurrentText(current)
-        elif len(items) == 1 and placeholder == "Select Study":
+        elif len(items) == 1 and placeholder in ("Select Study", "Select System"):
             combo.setCurrentIndex(1)
+        elif placeholder == "Select System" and current and current != "Select System" and len(items) > 1:
+            matched = _find_pattern_matched_system(current, items)
+            if matched is not None:
+                combo.setCurrentText(matched)
+            else:
+                combo.setCurrentIndex(0)
         else:
             combo.setCurrentIndex(0)
         combo.blockSignals(False)
 
     def on_study_changed(self, text):
+        # Study switch: remember previous study for derived fallback when no explicit global.
+        prev_study = getattr(self, '_prev_study', None)
         current_system = self.system_combo.currentText()
         systems = self.data_manager.get_system_names(text) if text != "Select Study" else []
-        self._populate_combo(self.system_combo, "Select System", systems, current_system)
-        self.on_system_changed(self.system_combo.currentText())
+        # Derived target when no explicit global yet.
+        prev_seq_target = None
+        if getattr(self, '_explicit_system_seq', None) is None and prev_study and current_system and current_system != "Select System":
+            try:
+                prev_systems = self.data_manager.get_system_names(prev_study) if prev_study != "Select Study" else []
+                if current_system in prev_systems:
+                    prev_seq_target = prev_systems.index(current_system)
+            except Exception:
+                prev_seq_target = None
+        self._suppress_seq_update = True
+        try:
+            self._populate_combo(self.system_combo, "Select System", systems, current_system)
+            # Sequence fallback: only if still placeholder and previous checks failed (single/exact/pattern already tried).
+            if self.system_combo.currentText() == "Select System" and len(systems) > 0:
+                target_idx = None
+                if getattr(self, '_explicit_system_seq', None) is not None:
+                    target_idx = self._explicit_system_seq
+                elif prev_seq_target is not None:
+                    target_idx = prev_seq_target
+                if target_idx is not None:
+                    clamped = max(0, min(int(target_idx), len(systems) - 1))
+                    final = systems[clamped]
+                    self.system_combo.blockSignals(True)
+                    self.system_combo.setCurrentText(final)
+                    self.system_combo.blockSignals(False)
+            self.on_system_changed(self.system_combo.currentText())
+        finally:
+            self._suppress_seq_update = False
+            self._prev_study = text if text != "Select Study" else None
 
     def on_system_changed(self, text):
+        # Manual system pick locks the sequence number (count only real systems).
+        if text and text != "Select System" and not self._updating_from_code and not getattr(self, '_suppress_seq_update', False):
+            study_tmp = self.study_combo.currentText()
+            if study_tmp and study_tmp != "Select Study":
+                try:
+                    _systems_tmp = self.data_manager.get_system_names(study_tmp)
+                    if text in _systems_tmp:
+                        self._explicit_system_seq = _systems_tmp.index(text)
+                except Exception:
+                    pass
         if text != "Select System":
             study = self.study_combo.currentText()
             
