@@ -68,6 +68,11 @@ class LogController:
         self.axes_locked = False
         self.scale_locked = False
         self._is_syncing_axes = False # Flag to prevent recursive signal handling
+        self._in_update_views = False
+        try:
+            self.plot_item.getViewBox().sigResized.connect(self.update_views)
+        except Exception:
+            pass
 
     def toggle_axes_lock(self, locked: bool, reset_view: bool = True):
         """Connects or disconnects the synchronization signal for all active Y-axes."""
@@ -298,7 +303,8 @@ class LogController:
             'y_col': y_col_name,  # Store y_col for export
             'y_label': data.get('y_label', y_col_name),
             'x_col': data.get('x_col', ''),
-            'x_label': data.get('x_label', data.get('x_col', ''))
+            'x_label': data.get('x_label', data.get('x_col', '')),
+            'row': data.get('row', 1_000_000)  # table row for legend order; fits use large default
         }
         self.update_views()
 
@@ -353,22 +359,28 @@ class LogController:
         
         # Note: axes_locked and scale_locked flags are preserved
 
-    def update_views(self):
+    def update_views(self, *args):
         """Updates the geometry of all viewboxes to match the main one."""
-        main_vb = self.plot_item.getViewBox()
-        if not main_vb or not main_vb.scene():
+        if getattr(self, '_in_update_views', False):
             return
+        self._in_update_views = True
+        try:
+            main_vb = self.plot_item.getViewBox()
+            if not main_vb or not main_vb.scene():
+                return
+                
+            # Ensure the main viewbox geometry is correct first
+            main_vb_rect = self.plot_item.vb.sceneBoundingRect()
+            main_vb.setGeometry(main_vb_rect)
             
-        # Ensure the main viewbox geometry is correct first
-        main_vb_rect = self.plot_item.vb.sceneBoundingRect()
-        main_vb.setGeometry(main_vb_rect)
-        
-        # Update all other viewboxes to match this geometry
-        for axis_info in self.y_axes.values():
-            vb = axis_info['viewbox']
-            if vb is not main_vb:
-                vb.setGeometry(main_vb_rect)
-                vb.linkedViewChanged(main_vb, vb.XAxis)
+            # Update all other viewboxes to match this geometry
+            for axis_info in self.y_axes.values():
+                vb = axis_info['viewbox']
+                if vb is not main_vb:
+                    vb.setGeometry(main_vb_rect)
+                    vb.linkedViewChanged(main_vb, vb.XAxis)
+        finally:
+            self._in_update_views = False
 
     def set_axis_labels(self, x_label: str, y_labels: Dict[str, str]):
         self.plot_item.setLabel('bottom', text=x_label)
@@ -520,9 +532,8 @@ class LogController:
                 vb = self.y_axes[y_col]['viewbox']
                 ax.set_ylim(self._oriented_range(vb.viewRange()[1], self._y_inverted(y_col)))
 
-        # Plot Curves
-        all_handles = []
-        all_labels = []
+        # Plot Curves - legend = table row order, selected at bottom (most top plot last)
+        legend_entries = []  # (is_selected, row, sub_prio, handle, label)
         
         for y_col in y_axis_order:
             ax = matplotlib_axes[y_col]
@@ -547,25 +558,24 @@ class LogController:
                 error_item = plot_info.get('error_item')
                 has_error_band = error_item is not None
                 
-                # Z-order derived from priority (Orig=0, Std=1, Mean=2)
-                # + 2.0 ensures we are above default grid (0.5) and patches (1.0)
-                z_val = 2.0 + plot_info.get('layer_priority', 0)
+                prio = plot_info.get('layer_priority', 0)
+                is_sel = 1 if prio >= 100 else 0
+                row = plot_info.get('row', 1_000_000)
+                sub_prio = prio % 100 if prio < 200 else 200
+                z_val = 2.0 + prio
 
                 if has_error_band:
-                    # ONLY plot the error band.
                     c1 = error_item.curves[0].getData()
                     c2 = error_item.curves[1].getData()
                     if all(d is not None for d in c1) and all(d is not None for d in c2):
-                        fill = ax.fill_between(c1[0], c1[1], c2[1], color=color, 
-                                             alpha=0.25, linewidth=0, label=name, zorder=z_val)
-                        all_handles.append(fill)
-                        all_labels.append(name)
+                        fill = ax.fill_between(c1[0], c1[1], c2[1], color=color, alpha=0.25, linewidth=0, label=name, zorder=z_val)
+                        legend_entries.append((is_sel, row, sub_prio, fill, name))
                 else:
-                    # Plot normal line (no error band)
-                    line, = ax.plot(data[0], data[1], color=color, label=name, 
-                                  linewidth=width, linestyle=linestyle, zorder=z_val)
-                    all_handles.append(line)
-                    all_labels.append(name)
+                    line, = ax.plot(data[0], data[1], color=color, label=name, linewidth=width, linestyle=linestyle, zorder=z_val)
+                    legend_entries.append((is_sel, row, sub_prio, line, name))
+        legend_entries.sort(key=lambda x: (x[0], x[1], x[2]))
+        all_handles = [h for _,_,_,h,_ in legend_entries]
+        all_labels = [l for _,_,_,_,l in legend_entries]
         
         ax_primary.set_xlabel(self.x_axis_label)
         ax_primary.spines['bottom'].set_edgecolor('black')
@@ -574,10 +584,9 @@ class LogController:
         ax_primary.grid(True, alpha=0.3)
         
         if all_handles:
-            # Place legend on the last added axis (top of stack) to ensure z-order
             target_ax = matplotlib_axes[y_axis_order[-1]]
             leg = target_ax.legend(all_handles, all_labels, loc='best')
-            leg.set_zorder(10000) # Ensure legend is on top of everything
+            leg.set_zorder(10000)
         
         fig.tight_layout()
         try:
@@ -778,7 +787,8 @@ class LogController:
                 'linestyle_qt': pen.style(), # Raw Enum/Int for debug/qt use
                 'linestyle_matlab': self._get_mpl_linestyle(pen.style()), # Translated string
                 'width': pen.width(),
-                'layer_priority': plot_info.get('layer_priority', 0)
+                'layer_priority': plot_info.get('layer_priority', 0),
+                'row': plot_info.get('row', 1_000_000)
             }
             state['y_axes'][y_col]['series'].append(series_entry)
         
@@ -959,6 +969,12 @@ class LogController:
             for d in axes_data:
                 d['vb'].enableAutoRange(axis='y')
 
+        # keep aux geometry in sync, O(1) per axis, no extra layout pass
+        try:
+            self.update_views()
+        except Exception:
+            pass
+
     def get_view_ranges(self) -> Dict[str, Any]:
         """Returns a dictionary of view ranges for all active axes."""
         ranges = {}
@@ -1052,8 +1068,9 @@ class LogController:
         else:
             style_int = int(qt_style)
         
-        # 1: Solid, 2: Dash, 3: Dot, 4: DashDot, 5: DashDotDot
+        # 0: NoPen, 1: Solid, 2: Dash, 3: Dot, 4: DashDot, 5: DashDotDot
         mapping = {
+            0: 'None',
             1: '-', 
             2: '--', 
             3: ':', 

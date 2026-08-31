@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QCheckBox, QLabel, QSplitter, QGridLayout, QSizePolicy, 
     QMenu, QFileDialog, QDialog, QSpinBox
 )
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtCore import Qt, QPoint, QTimer
 from PyQt6.QtGui import QColor, QIntValidator, QAction, QActionGroup, QFont
 import pyqtgraph as pg
 import random
@@ -123,6 +123,7 @@ class LogPlotPanel(QWidget):
         self.single_axis_view_ranges = None
         self._applying_single_axis_lock = False
         self._suppress_single_axis_range_capture = False
+        self._update_views_pending = False
         
         # New Data Processing Properties
         self.enforce_zero_start = False
@@ -553,7 +554,7 @@ class LogPlotPanel(QWidget):
         self.fit_table.setCellWidget(row, 5, color_btn)
         
         style_combo = self._create_style_combo()
-        style_combo.setCurrentText("Dash")
+        style_combo.setCurrentText("--")
         style_combo.currentTextChanged.connect(self.update_plots)
         self.fit_table.setCellWidget(row, 6, style_combo)
         
@@ -1847,6 +1848,22 @@ class LogPlotPanel(QWidget):
     def _is_multi_axis_lock_active(self):
         return self._is_multi_axis_lock_mode() and (self.plot_controller.axes_locked or self.scale_lock_enabled)
 
+    def _schedule_update_views(self):
+        if self._update_views_pending or not hasattr(self, 'plot_controller') or not self.plot_controller:
+            return
+        if len(getattr(self.plot_controller, 'y_axes', {})) <= 1:
+            return
+        self._update_views_pending = True
+        QTimer.singleShot(0, self._do_update_views)
+
+    def _do_update_views(self):
+        self._update_views_pending = False
+        try:
+            if hasattr(self, 'plot_controller') and self.plot_controller:
+                self.plot_controller.update_views()
+        except Exception:
+            pass
+
     def _update_lock_button_position(self):
         if not hasattr(self, 'plot_widget'):
             return
@@ -1965,6 +1982,7 @@ class LogPlotPanel(QWidget):
             if self.single_axis_view_lock_enabled:
                 self._capture_single_axis_view_range()
         self._update_lock_button_visuals()
+        self._schedule_update_views()
 
     def _on_scale_lock_toggled(self):
         """Handle multi-axis scale lock."""
@@ -1972,6 +1990,7 @@ class LogPlotPanel(QWidget):
             return
         self.scale_lock_enabled = not self.scale_lock_enabled
         self.plot_controller.toggle_scale_lock(self.scale_lock_enabled)
+        self._schedule_update_views()
         if self.single_axis_view_lock_enabled:
             self._capture_single_axis_view_range()
         self._update_lock_button_visuals()
@@ -2680,8 +2699,9 @@ class LogPlotPanel(QWidget):
             self._update_selected_row_name_component('system', text)
 
     def on_table_selection_changed(self):
-        # Update dropdowns to match selected row
+        # Update dropdowns to match selected row; clear priority when nothing selected
         if not self.plot_table.selectedItems() or self.plot_table.currentRow() == -1:
+            self.update_plots()
             return
 
         selected_row = self.plot_table.currentRow()
@@ -2744,7 +2764,7 @@ class LogPlotPanel(QWidget):
             'mean': "0",
             'std': False,
             'color': new_color.name(),
-            'style': "Solid",
+            'style': "-",
             'thickness': "1",
             'plot_id': self.next_plot_id
         }
@@ -2804,7 +2824,10 @@ class LogPlotPanel(QWidget):
         # [Fit Integration] Logic Change: Update available "Types" based on Source "Mean" availability
         self._update_fit_type_combos()
         
-        selected_row_idx = self.plot_table.currentRow()
+        # Only honour currentRow when it is actually selected - deselected table must not keep priority
+        _sel = self.plot_table.selectionModel().selectedRows() if self.plot_table.selectionModel() else []
+        selected_row_idx = self.plot_table.currentRow() if _sel else -1
+        selected_rows_set = set(idx.row() for idx in _sel) if _sel else set()
         all_plot_info = []
         
         # [Fit Integration] Cache to store source data (x, y) so fits can run even if source is hidden
@@ -2829,7 +2852,7 @@ class LogPlotPanel(QWidget):
                 show_std = self.plot_table.cellWidget(row, 4).findChild(QCheckBox).isChecked()
                 color = self.plot_table.cellWidget(row, 5).color()
                 style_text = self.plot_table.cellWidget(row, 6).currentText()
-                style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
+                style = {'Solid': Qt.PenStyle.SolidLine, '-': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, '--': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine, ':': Qt.PenStyle.DotLine, '-.': Qt.PenStyle.DashDotLine, 'DashDot': Qt.PenStyle.DashDotLine}.get(style_text, Qt.PenStyle.SolidLine)
                 thickness = float(self.plot_table.cellWidget(row, 7).findChild(QLineEdit).text())
 
                 is_active = show_original or (mean_window > 0) or show_std
@@ -2875,8 +2898,9 @@ class LogPlotPanel(QWidget):
                     selected_x_ax = info['x_ax']
                     break
         
-        # Sort plots: Selected Y-axis plots draw last (on top)
-        all_plot_info.sort(key=lambda x: (x['y_ax'] == selected_y_ax if selected_y_ax else False, x['row']))
+        # Sort plots: legend = table row order, selected rows at bottom (most top plot last)
+        # previous y-axis grouping caused table 0:y1,1:y2,2:y1 → legend y1:0,2 then y2:1. Now interleaved.
+        all_plot_info.sort(key=lambda x: (x['row'] in selected_rows_set, x['row']))
 
         # --- B. Main Loop: Data Fetching, Caching, and Plotting ---
         for plot_info in all_plot_info:
@@ -2890,7 +2914,7 @@ class LogPlotPanel(QWidget):
             x_label = self.global_label_map.get(plot_info['x_ax'], plot_info['x_ax'])
             y_label = self.global_label_map.get(plot_info['y_ax'], plot_info['y_ax'])
             
-            z_offset = 100 if plot_info['row'] == selected_row_idx else 0
+            z_offset = 100 if plot_info['row'] in selected_rows_set else 0
             
             # --- Consistency Check (Original Logic) ---
             user_choices = None
@@ -3114,6 +3138,7 @@ class LogPlotPanel(QWidget):
             # --- 1. Draw Original Data ---
             if plot_info['show_original']:
                 plot_data = data.copy()
+                plot_data['row'] = plot_info['row']
                 if not compute_raw_std: plot_data['std'] = None
                 if force_raw_std:
                     pale_std_color = QColor(plot_info['color'])
@@ -3141,7 +3166,8 @@ class LogPlotPanel(QWidget):
                         pale_data = {
                             'x': running_mean_x, 'y': running_mean_y, 'std': std_inter_smooth,
                             'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
-                            'y_col': plot_info['y_ax'], 'y_label': data['y_label']
+                            'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
+                            'row': plot_info['row']
                         }
                         pale_color = QColor(plot_info['color'])
                         h, s, v, a = pale_color.getHsv()
@@ -3161,7 +3187,8 @@ class LogPlotPanel(QWidget):
                             std_data = {
                                 'x': running_mean_x, 'y': running_mean_y, 'std': running_std,
                                 'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
-                                'y_col': plot_info['y_ax'], 'y_label': data['y_label']
+                                'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
+                                'row': plot_info['row']
                             }
                             std_color = QColor(plot_info['color'])
                             std_color.setHsv(std_color.hue(), int(std_color.saturation() * 0.66), int(std_color.value() * 0.5), int(std_color.alpha() * 0.5))
@@ -3175,7 +3202,8 @@ class LogPlotPanel(QWidget):
                             std_data = {
                                 'x': running_mean_x, 'y': running_mean_y, 'std': running_std, 
                                 'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
-                                'y_col': plot_info['y_ax'], 'y_label': data['y_label']
+                                'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
+                                'row': plot_info['row']
                             }
                             std_color = QColor(plot_info['color'])
                             std_color.setHsv(std_color.hue(), int(std_color.saturation() * 0.66), int(std_color.value() * 0.5), int(std_color.alpha() * 0.5))
@@ -3210,7 +3238,8 @@ class LogPlotPanel(QWidget):
                         mean_data = {
                             'x': _rmx, 'y': _rmy, 'std': None, 
                             'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
-                            'y_col': plot_info['y_ax'], 'y_label': data['y_label']
+                            'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
+                            'row': plot_info['row']
                         }
                         self.plot_controller.add_or_update_plot_with_custom_colors(
                             legend_name + "_running_mean", mean_data, mean_color, 
@@ -3259,7 +3288,7 @@ class LogPlotPanel(QWidget):
                     
                     fit_color = color_btn.color()
                     style_text = self.fit_table.cellWidget(r, 6).currentText()
-                    style = {'Solid': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine}.get(style_text)
+                    style = {'Solid': Qt.PenStyle.SolidLine, '-': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, '--': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine, ':': Qt.PenStyle.DotLine, '-.': Qt.PenStyle.DashDotLine, 'DashDot': Qt.PenStyle.DashDotLine}.get(style_text, Qt.PenStyle.SolidLine)
                     thickness = float(self.fit_table.cellWidget(r, 7).findChild(QLineEdit).text())
 
                     # Data Push (only if source is valid and we are not in preview/loading)
@@ -3350,6 +3379,13 @@ class LogPlotPanel(QWidget):
             self._apply_x_range_global(visible_plots, plot_data_cache)
             if hasattr(self, '_pending_x_mode'):
                 delattr(self, '_pending_x_mode')
+        # geometry may have changed (new axis, new ranges, window resize) - keep aux VBs aligned
+        try:
+            if len(getattr(self.plot_controller, 'y_axes', {})) > 1:
+                self.plot_controller.update_views()
+                QTimer.singleShot(50, self._do_update_views)
+        except Exception:
+            pass
 
     def _update_fit_type_combos(self):
         """
@@ -4068,7 +4104,7 @@ class LogPlotPanel(QWidget):
 
     def _create_style_combo(self) -> QComboBox:
         combo = QComboBox()
-        combo.addItems(["Solid", "Dash", "Dot"])
+        combo.addItems(["-", "--", ":", "-."])
         font_metrics = combo.fontMetrics()
         max_width = 0
         for i in range(combo.count()):
@@ -4395,13 +4431,15 @@ class LogPlotPanel(QWidget):
                 if isinstance(saved_id, int) and saved_id > max_loaded_id:
                     max_loaded_id = saved_id
                 
+                # Back-compat: Solid/Dash/Dot -> -/--/:
+                _old_to_new = {"Solid": "-", "Dash": "--", "Dot": ":"}
                 plot_data = {
                     'plot_name': plot_info.get('name', "N/A | N/A | N/A | N/A"),
                     'show': plot_info.get('show', True),
                     'mean': plot_info.get('mean', "0"),
                     'std': plot_info.get('std', False),
                     'color': plot_info.get('color', QColor("black").name()),
-                    'style': plot_info.get('style', "Solid"),
+                    'style': _old_to_new.get(plot_info.get('style', "-"), plot_info.get('style', "-")),
                     'thickness': plot_info.get('thickness', "1"),
                     'plot_id': saved_id,
                     'origin': plot_info.get('origin')
@@ -4453,7 +4491,8 @@ class LogPlotPanel(QWidget):
                                              fit_info.get('source', ''))
                     self.fit_table.cellWidget(row, 2).setCurrentText(fit_info.get('type', 'Orig'))
                     self.fit_table.cellWidget(row, 5).set_color(QColor(fit_info.get('color', 'gray')))
-                    self.fit_table.cellWidget(row, 6).setCurrentText(fit_info.get('style', 'Dash'))
+                    _f_old_new = {"Solid": "-", "Dash": "--", "Dot": ":"}
+                    self.fit_table.cellWidget(row, 6).setCurrentText(_f_old_new.get(fit_info.get('style', '--'), fit_info.get('style', '--')))
                     self.fit_table.cellWidget(row, 7).findChild(QLineEdit).setText(fit_info.get('thickness', '1'))
                     
                     if saved_id in self.fit_dialogs:

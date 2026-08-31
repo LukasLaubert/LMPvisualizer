@@ -49,7 +49,7 @@ class LinePropertiesWidget(QGroupBox):
         # half the vertical space of the previous one-control-per-row form.
         layout = QGridLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
-        layout.setHorizontalSpacing(6)
+        layout.setHorizontalSpacing(4)
         layout.setVerticalSpacing(5)
         layout.setColumnStretch(1, 1)
 
@@ -105,8 +105,11 @@ class LinePropertiesWidget(QGroupBox):
             self.width_spin = _spin(0.1, 20.0, initial_props.get('linewidth', 1.5), step=0.5)
 
             self.style_combo = QComboBox()
-            self.style_combo.addItems(['-', '--', ':', '-.'])
-            self.style_combo.setCurrentText(initial_props.get('linestyle', '-'))
+            self.style_combo.addItems(['None', '-', '--', ':', '-.'])
+            cur_ls = initial_props.get('linestyle', '-')
+            if cur_ls not in ['None', '-', '--', ':', '-.']:
+                cur_ls = '-'
+            self.style_combo.setCurrentText(cur_ls)
             self.style_combo.currentTextChanged.connect(self.propertiesChanged)
             self.style_combo.setMaximumWidth(90)
 
@@ -165,6 +168,158 @@ class LinePropertiesWidget(QGroupBox):
             
         return props
 
+
+class AggregatedLogPropertiesWidget(QGroupBox):
+    """One box per table row: main line + optional smooth/avg std bands (fill only)."""
+    propertiesChanged = pyqtSignal()
+
+    def __init__(self, base_id, base_name, main_props, std_props=None, inter_props=None, parent=None):
+        fm = QFontMetrics(QFont())
+        elided = fm.elidedText(base_name, Qt.TextElideMode.ElideMiddle, 250)
+        super().__init__(elided, parent)
+        self.setToolTip(base_name)
+        self.series_id = base_id
+        self.base_name = base_name
+        self.has_std = std_props is not None
+        self.has_inter = inter_props is not None
+        self.setCheckable(True)
+        self.setChecked(main_props.get('visible', True))
+        self.toggled.connect(self.propertiesChanged)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 8, 6, 6)
+        layout.setSpacing(6)
+
+        # Legend row: independent QHBox so color right-aligned regardless of Width/Style columns
+        legend_row = QHBoxLayout()
+        legend_row.setContentsMargins(0, 0, 0, 0)
+        legend_row.setSpacing(6)
+        self.main_legend_check = QCheckBox("Legend:")
+        self.main_legend_check.setChecked(main_props.get('show_legend', True))
+        self.main_legend_check.setToolTip("Show in legend")
+        self.main_legend_check.toggled.connect(self.propertiesChanged)
+        legend_row.addWidget(self.main_legend_check)
+        self.main_label = QLineEdit(main_props.get('name', base_name))
+        self.main_label.editingFinished.connect(self.propertiesChanged)
+        legend_row.addWidget(self.main_label, 1)
+        self.main_color = ColorButton(main_props.get('color', QColor("red")))
+        self.main_color.colorChanged.connect(lambda: self.propertiesChanged.emit())
+        side = self.main_label.sizeHint().height()
+        self.main_color.setFixedSize(side, side)
+        legend_row.addWidget(self.main_color)
+        layout.addLayout(legend_row)
+        # main grid: Width|Style Marker|Size (independent of Legend row)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(5)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        # Width | Style (one line)
+        def _spin(lo, hi, val, step=None):
+            sp = QDoubleSpinBox(); sp.setRange(lo, hi)
+            if step is not None: sp.setSingleStep(step)
+            sp.setValue(float(val)); sp.valueChanged.connect(self.propertiesChanged)
+            sp.setMaximumWidth(90); return sp
+        self.width_spin = _spin(0.1, 20.0, main_props.get('linewidth', 1.5), step=0.5)
+        self.style_combo = QComboBox()
+        self.style_combo.addItems(['None', '-', '--', ':', '-.'])
+        cur = main_props.get('linestyle', '-')
+        if cur not in ['None', '-', '--', ':', '-.']: cur = '-'
+        self.style_combo.setCurrentText(cur)
+        self.style_combo.currentTextChanged.connect(self.propertiesChanged)
+        self.style_combo.setMaximumWidth(90)
+        grid.addWidget(QLabel("Width:"), 0, 0)
+        grid.addWidget(self.width_spin, 0, 1)
+        grid.addWidget(QLabel("Style:"), 0, 2)
+        grid.addWidget(self.style_combo, 0, 3)
+        # Marker | Size (one line)
+        self.marker_combo = QComboBox()
+        self.marker_combo.addItems(['None', 'o', 'x', '+', 'v', '^', '<', '>', 's', 'p', '*', 'h', 'H', 'D', 'd'])
+        cur_m = main_props.get('marker', 'None')
+        if cur_m is None: cur_m = 'None'
+        self.marker_combo.setCurrentText(cur_m)
+        self.marker_combo.currentTextChanged.connect(self.propertiesChanged)
+        self.marker_combo.setMaximumWidth(90)
+        self.size_spin = _spin(1.0, 200.0, main_props.get('size', 6))
+        grid.addWidget(QLabel("Marker:"), 1, 0)
+        grid.addWidget(self.marker_combo, 1, 1)
+        grid.addWidget(QLabel("Size:"), 1, 2)
+        grid.addWidget(self.size_spin, 1, 3)
+        self.sync_btn = QPushButton("⇄")
+        self.sync_btn.setCheckable(True)
+        self.sync_btn.setToolTip("Sync Width/Style/Marker/Size across all main lines")
+        self.sync_btn.setFixedWidth(22)
+        self.sync_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.sync_btn.setStyleSheet("QPushButton:checked { background-color: #4a90e2; color: white; }")
+        grid.addWidget(self.sync_btn, 0, 4, 2, 1)
+        layout.addLayout(grid)
+        # bands
+        self.std_group = None
+        self.inter_group = None
+        if self.has_std:
+            self.std_group = self._make_band("smooth std", std_props, layout)
+        if self.has_inter:
+            self.inter_group = self._make_band("avg std", inter_props, layout)
+
+    def _make_band(self, title, props, parent_layout):
+        box = QGroupBox(title, self)
+        box.setCheckable(True)
+        box.setChecked(props.get('show_std', True))
+        box.toggled.connect(self.propertiesChanged)
+        bl = QGridLayout(box)
+        bl.setContentsMargins(6, 6, 6, 6)
+        bl.setHorizontalSpacing(4)
+        bl.setVerticalSpacing(4)
+        bl.setColumnStretch(1, 1)
+        # Legend row: check left of Legend, field extends to swatch at very right
+        lc = QCheckBox("Legend:")
+        lc.setChecked(props.get('show_legend', True))
+        lc.setToolTip("Show in legend")
+        lc.toggled.connect(self.propertiesChanged)
+        bl.addWidget(lc, 0, 0)
+        le = QLineEdit(props.get('name', title))
+        le.editingFinished.connect(self.propertiesChanged)
+        bl.addWidget(le, 0, 1, 1, 2)
+        cb = ColorButton(props.get('color', QColor("red")))
+        cb.colorChanged.connect(lambda: self.propertiesChanged.emit())
+        side = le.sizeHint().height()
+        cb.setFixedSize(side, side)
+        bl.addWidget(cb, 0, 3)
+        # keep refs
+        box._le = le
+        box._lc = lc
+        box._cb = cb
+        parent_layout.addWidget(box)
+        return box
+
+    def get_properties(self):
+        # main
+        m_marker = self.marker_combo.currentText()
+        if m_marker == 'None': m_marker = None
+        props = {
+            'visible': self.isChecked(),
+            'label': self.main_label.text(),
+            'show_legend': self.main_legend_check.isChecked(),
+            'color': self.main_color.color(),
+            'linestyle': self.style_combo.currentText(),
+            'linewidth': self.width_spin.value(),
+            'marker': m_marker,
+            'size': self.size_spin.value(),
+        }
+        if self.has_std and self.std_group:
+            props['std_visible'] = self.std_group.isChecked()
+            props['std_label'] = self.std_group._le.text()
+            props['std_show_legend'] = self.std_group._lc.isChecked()
+            props['std_color'] = self.std_group._cb.color()
+            props['std_show'] = self.std_group.isChecked()
+        if self.has_inter and self.inter_group:
+            props['inter_visible'] = self.inter_group.isChecked()
+            props['inter_label'] = self.inter_group._le.text()
+            props['inter_show_legend'] = self.inter_group._lc.isChecked()
+            props['inter_color'] = self.inter_group._cb.color()
+            props['inter_show'] = self.inter_group.isChecked()
+        return props
+
 class PopOutWindow(QMainWindow):
     # Static class variable to store LaTeX state across different popout instances
     # within the same application session. Resets to False when app restarts.
@@ -177,6 +332,8 @@ class PopOutWindow(QMainWindow):
         
         self.plot_data = copy.deepcopy(plot_state_data)
         self.line_widgets = {} 
+        self._main_sync_enabled = False
+        self._in_sync = False
         self.initial_figsize = figsize 
         
         self._init_ui()
@@ -284,7 +441,7 @@ class PopOutWindow(QMainWindow):
         # Text props
         self.title_edit = QLineEdit(self.plot_data.get('title', ''))
         self.title_edit.editingFinished.connect(self.redraw_plot)
-        self.title_edit.setMaximumWidth(160)
+        self.title_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addRow("Title:", self.title_edit)
 
         # Show Grid and Use LaTeX share one row (LaTeX on the right).
@@ -343,83 +500,180 @@ class PopOutWindow(QMainWindow):
 
     def _init_axis_settings(self):
         group = QGroupBox("Axes")
-        layout = QFormLayout(group)
-
-        # Use the custom global label passed from controller if available
+        layout = QVBoxLayout(group)
+        layout.setSpacing(6)
+        layout.setContentsMargins(6, 8, 6, 6)
+        # X-Axis header with Log on same line
         default_x = self.plot_data.get('x_label', '')
+        x_header = QHBoxLayout()
+        x_header.setContentsMargins(0, 0, 0, 0)
+        x_header.addWidget(QLabel(f"<b>X-Axis: {default_x}</b>"))
+        x_header.addStretch(1)
+        self.x_log_check = QCheckBox("Log")
+        self.x_log_check.setToolTip("Log scale X")
+        self.x_log_check.toggled.connect(self.redraw_plot)
+        x_header.addWidget(self.x_log_check)
+        layout.addLayout(x_header)
+        x_row = QHBoxLayout()
+        x_row.setContentsMargins(0, 0, 0, 0)
+        x_row.addWidget(QLabel("Label:"))
         self.x_label_edit = QLineEdit(default_x)
         self.x_label_edit.editingFinished.connect(self.redraw_plot)
-        self.x_label_edit.setMaximumWidth(200)
-        layout.addRow("X Label:", self.x_label_edit)
-        
-        self.x_log_check = QCheckBox("Log Scale X")
-        self.x_log_check.toggled.connect(self.redraw_plot)
-        layout.addRow(self.x_log_check)
+        x_row.addWidget(self.x_label_edit, 1)
+        layout.addLayout(x_row)
 
         self.y_configs = {}
         for y_col, axis_data in self.plot_data['y_axes'].items():
-            lbl = QLabel(f"<b>Y-Axis: {y_col}</b>")
-            layout.addRow(lbl)
-            
-            # Use the custom global label passed from controller if available
+            y_header = QHBoxLayout()
+            y_header.setContentsMargins(0, 6, 0, 0)
+            y_header.addWidget(QLabel(f"<b>Y-Axis: {y_col}</b>"))
+            y_header.addStretch(1)
+            log_check = QCheckBox("Log")
+            log_check.setToolTip("Log scale Y")
+            log_check.toggled.connect(self.redraw_plot)
+            y_header.addWidget(log_check)
+            layout.addLayout(y_header)
+            y_row = QHBoxLayout()
+            y_row.setContentsMargins(0, 0, 0, 0)
+            y_row.addWidget(QLabel("Label:"))
             default_y = axis_data.get('label', y_col)
             label_edit = QLineEdit(default_y)
             label_edit.editingFinished.connect(self.redraw_plot)
-            label_edit.setMaximumWidth(200)
-            layout.addRow("Label:", label_edit)
-            
-            log_check = QCheckBox("Log Scale Y")
-            log_check.toggled.connect(self.redraw_plot)
-            layout.addRow(log_check)
-            
-            self.y_configs[y_col] = {'label_edit': label_edit, 'log_check': log_check}
+            y_row.addWidget(label_edit, 1)
+            layout.addLayout(y_row)
+            self.y_configs[y_col] = {'label_edit': label_edit, 'log_check': log_check, 'header': y_header}
 
         self.form_layout.addWidget(group)
 
     def _init_legend_settings(self):
         group = QGroupBox("Legend")
-        layout = QFormLayout(group)
-        
+        layout = QGridLayout(group)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(5)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
         self.show_legend_check = QCheckBox("Show Legend")
         self.show_legend_check.setChecked(True)
         self.show_legend_check.toggled.connect(self.redraw_plot)
-        layout.addRow(self.show_legend_check)
-
+        layout.addWidget(self.show_legend_check, 0, 0)
+        loc_box = QHBoxLayout()
+        loc_box.setContentsMargins(0, 0, 0, 0)
+        loc_box.setSpacing(4)
+        loc_box.addWidget(QLabel("Location:"))
         self.legend_loc = QComboBox()
         self.legend_loc.addItems(['best', 'upper right', 'upper left', 'lower left', 'lower right', 'center left', 'center right', 'upper center', 'lower center'])
         self.legend_loc.currentTextChanged.connect(self.redraw_plot)
         self.legend_loc.setMaximumWidth(140)
-        layout.addRow("Location:", self.legend_loc)
-
+        loc_box.addWidget(self.legend_loc)
+        loc_box.addStretch(1)
+        loc_w = QWidget()
+        loc_w.setLayout(loc_box)
+        layout.addWidget(loc_w, 0, 1)
         self.legend_frame = QCheckBox("Frame")
         self.legend_frame.setChecked(True)
         self.legend_frame.toggled.connect(self.redraw_plot)
-        layout.addRow(self.legend_frame)
-        
+        layout.addWidget(self.legend_frame, 1, 0)
         self.legend_draggable = QCheckBox("Draggable")
         self.legend_draggable.setChecked(True)
         self.legend_draggable.toggled.connect(self.redraw_plot)
-        layout.addRow(self.legend_draggable)
-
+        layout.addWidget(self.legend_draggable, 1, 1)
         self.form_layout.addWidget(group)
 
     def _populate_line_widgets(self):
         for i in reversed(range(self.lines_layout.count())): 
             self.lines_layout.itemAt(i).widget().setParent(None)
         self.line_widgets.clear()
-
+        self._aggregated_bases = {}
+        # collect all entries first so widget order = table row order (row asc) even with multi-y
+        pending = []  # (row, kind, payload)
         for y_col, axis_data in self.plot_data['y_axes'].items():
-            for series in axis_data['series']:
+            series_list = axis_data['series']
+            has_log_suffix = any(s['name'].endswith(('_running_mean_std_inter','_running_mean_std','_running_mean')) for s in series_list)
+            if has_log_suffix:
+                base_map = {}
+                def _base_layer(name):
+                    if name.endswith('_running_mean_std_inter'): return name[:-len('_running_mean_std_inter')], 'inter'
+                    if name.endswith('_running_mean_std'): return name[:-len('_running_mean_std')], 'std'
+                    if name.endswith('_running_mean'): return name[:-len('_running_mean')], 'mean'
+                    return name, 'orig'
+                for s in series_list:
+                    base, layer = _base_layer(s['name'])
+                    key = (y_col, base)
+                    if key not in base_map:
+                        base_map[key] = {'y_col': y_col, 'base': base, 'orig': None, 'mean': None, 'std': None, 'inter': None}
+                    base_map[key][layer] = s
+                for (y_col_key, base), layers in base_map.items():
+                    main = layers['mean'] if layers['mean'] is not None else layers['orig']
+                    if main is None:
+                        continue
+                    row = main.get('row', 1_000_000)
+                    pending.append((row, 'agg', (y_col_key, base, layers)))
+            else:
+                for series in axis_data['series']:
+                    row = series.get('row', 1_000_000)
+                    pending.append((row, 'simple', series))
+        # sort by table row so left panel matches table sequence (not y_col grouping)
+        pending.sort(key=lambda x: x[0])
+        for row, kind, payload in pending:
+            if kind == 'agg':
+                y_col_key, base, layers = payload
+                main = layers['mean'] if layers['mean'] is not None else layers['orig']
+                std_s = layers['std']
+                inter_s = layers['inter']
+                has_std = std_s is not None and std_s.get('std') is not None
+                has_inter = inter_s is not None and inter_s.get('std') is not None
+                sid = f"{y_col_key}_{base}"
+                main_color = main['color']
+                if main.get('colors'):
+                    try: main_color = main['colors'][0]
+                    except: pass
+                main_props = {
+                    'name': base,
+                    'visible': True,
+                    'color': main_color,
+                    'linestyle': main.get('linestyle_matlab', '-'),
+                    'linewidth': main.get('width', 1.5),
+                    'marker': main.get('marker', 'None'),
+                    'size': main.get('size', 10),
+                }
+                std_props = None
+                if has_std:
+                    c = std_s['color']
+                    if std_s.get('colors'):
+                        try: c = std_s['colors'][0]
+                        except: pass
+                    std_props = {'name': base + ' (smooth std)', 'visible': True, 'color': c, 'show_std': True, 'show_legend': True}
+                inter_props = None
+                if has_inter:
+                    c = inter_s['color']
+                    if inter_s.get('colors'):
+                        try: c = inter_s['colors'][0]
+                        except: pass
+                    inter_props = {'name': base + ' (avg std)', 'visible': True, 'color': c, 'show_std': True, 'show_legend': True}
+                widget = AggregatedLogPropertiesWidget(sid, base, main_props, std_props, inter_props)
+                widget.propertiesChanged.connect(self.redraw_plot)
+                widget.sync_btn.toggled.connect(lambda checked, w=widget: self._on_main_sync_toggled(checked, w))
+                widget.width_spin.valueChanged.connect(lambda v, w=widget: self._on_main_style_changed(w))
+                widget.style_combo.currentTextChanged.connect(lambda t, w=widget: self._on_main_style_changed(w))
+                widget.marker_combo.currentTextChanged.connect(lambda t, w=widget: self._on_main_style_changed(w))
+                widget.size_spin.valueChanged.connect(lambda v, w=widget: self._on_main_style_changed(w))
+                widget.sync_btn.blockSignals(True)
+                widget.sync_btn.setChecked(self._main_sync_enabled)
+                widget.sync_btn.blockSignals(False)
+                self.lines_layout.addWidget(widget)
+                self.line_widgets[sid] = widget
+                self._aggregated_bases[(y_col_key, base)] = layers
+            else:
+                series = payload
                 sid = series['id']
                 is_scatter = series.get('mode') == 'scatter'
-                
                 initial_color = series['color']
                 if series.get('colors'):
                      try:
                          initial_color = series['colors'][0]
                      except IndexError:
                          pass
-
                 initial_props = {
                     'name': series['name'],
                     'visible': True,
@@ -433,11 +687,65 @@ class PopOutWindow(QMainWindow):
                     'size': series.get('size', 20) if is_scatter else 10,
                     'colors': series.get('colors')
                 }
-                
                 widget = LinePropertiesWidget(sid, initial_props)
                 widget.propertiesChanged.connect(self.redraw_plot)
                 self.lines_layout.addWidget(widget)
                 self.line_widgets[sid] = widget
+
+    def _on_main_sync_toggled(self, checked, source):
+        if self._in_sync:
+            return
+        self._main_sync_enabled = checked
+        for w in self.line_widgets.values():
+            if not hasattr(w, 'sync_btn'):
+                continue
+            w.sync_btn.blockSignals(True)
+            w.sync_btn.setChecked(checked)
+            w.sync_btn.blockSignals(False)
+        if checked and source is not None:
+            self._sync_main_styles_from(source)
+
+    def _on_main_style_changed(self, source):
+        if not self._main_sync_enabled or self._in_sync:
+            return
+        # only propagate if source is aggregated main
+        if not hasattr(source, 'sync_btn'):
+            return
+        self._sync_main_styles_from(source)
+
+    def _sync_main_styles_from(self, source):
+        if self._in_sync:
+            return
+        self._in_sync = True
+        try:
+            src = source.get_properties()
+            for sid, w in self.line_widgets.items():
+                if w is source or not hasattr(w, 'sync_btn'):
+                    continue
+                w.width_spin.blockSignals(True)
+                w.style_combo.blockSignals(True)
+                w.marker_combo.blockSignals(True)
+                w.size_spin.blockSignals(True)
+                try:
+                    w.width_spin.setValue(src['linewidth'])
+                    idx = w.style_combo.findText(src['linestyle'])
+                    if idx != -1:
+                        w.style_combo.setCurrentIndex(idx)
+                    m = src['marker']
+                    if m is None:
+                        m = 'None'
+                    idx = w.marker_combo.findText(m)
+                    if idx != -1:
+                        w.marker_combo.setCurrentIndex(idx)
+                    w.size_spin.setValue(src['size'])
+                finally:
+                    w.width_spin.blockSignals(False)
+                    w.style_combo.blockSignals(False)
+                    w.marker_combo.blockSignals(False)
+                    w.size_spin.blockSignals(False)
+            self.redraw_plot()
+        finally:
+            self._in_sync = False
 
     def _apply_initial_figsize(self, figsize):
         """
@@ -699,14 +1007,51 @@ class PopOutWindow(QMainWindow):
         
         ax_primary.tick_params(axis='both', labelsize=font_tick, direction='in')
         
-        # Apply X Limits: Saved > Initial Data
-        if saved_xlim:
-            ax_primary.set_xlim(saved_xlim)
-        elif 'x_limits' in self.plot_data:
-            ax_primary.set_xlim(self._oriented_limits(self.plot_data['x_limits'], self.plot_data.get('x_inverted', False)))
+        # Apply X Limits: Saved > Initial Data (clamp for log)
+        def _clamp_log(lim, is_log):
+            if not is_log or lim is None or len(lim)!=2:
+                return lim
+            lo, hi = lim
+            if lo <= 0:
+                # find smallest positive in data
+                try:
+                    all_x = []
+                    for yc in self.plot_data.get('y_axes', {}).values():
+                        for s in yc.get('series', []):
+                            all_x.extend([v for v in s.get('x', []) if v is not None and v>0])
+                    lo = float(np.min(all_x)) if all_x else 1e-9
+                    if lo <=0: lo = 1e-9
+                except Exception:
+                    lo = 1e-9
+                return (lo, hi)
+            return lim
+        x_is_log = self.x_log_check.isChecked()
+        # when linear, prefer initial limits to restore 0 after log; when log, prefer saved then initial
+        if x_is_log:
+            if saved_xlim:
+                saved_xlim = _clamp_log(saved_xlim, True)
+                ax_primary.set_xlim(saved_xlim)
+            elif 'x_limits' in self.plot_data:
+                lim = self._oriented_limits(self.plot_data['x_limits'], self.plot_data.get('x_inverted', False))
+                lim = _clamp_log(lim, True)
+                ax_primary.set_xlim(lim)
+        else:
+            if 'x_limits' in self.plot_data:
+                lim = self._oriented_limits(self.plot_data['x_limits'], self.plot_data.get('x_inverted', False))
+                ax_primary.set_xlim(lim)
+            elif saved_xlim:
+                ax_primary.set_xlim(saved_xlim)
         
-        if self.x_log_check.isChecked():
-            ax_primary.set_xscale('log')
+        if x_is_log:
+            try:
+                ax_primary.set_xscale('log')
+            except Exception:
+                pass
+            # keep x alignment if needed (tight)
+            try:
+                self.figure.tight_layout()
+            except Exception:
+                pass
         
         if self.grid_check.isChecked():
             ax_primary.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
@@ -732,15 +1077,44 @@ class PopOutWindow(QMainWindow):
         # Configure Primary Y-Axis
         config_prim = self.y_configs[y_cols[0]]
         ax_primary.set_ylabel(config_prim['label_edit'].text(), fontsize=font_label)
-        if config_prim['log_check'].isChecked():
-            ax_primary.set_yscale('log')
-            
-        # Apply Y Limits: Saved > Initial Data
-        if saved_ylim_prim:
-            ax_primary.set_ylim(saved_ylim_prim)
-        elif 'y_limits' in self.plot_data['y_axes'][y_cols[0]]:
-            y_axis_data = self.plot_data['y_axes'][y_cols[0]]
-            ax_primary.set_ylim(self._oriented_limits(y_axis_data['y_limits'], y_axis_data.get('y_inverted', False)))
+        # Apply Y Limits: clamp for log, prefer initial when linear to restore 0 after log
+        y_is_log = config_prim['log_check'].isChecked()
+        y_lim = None
+        if y_is_log:
+            if saved_ylim_prim:
+                y_lim = saved_ylim_prim
+            elif 'y_limits' in self.plot_data['y_axes'][y_cols[0]]:
+                y_axis_data = self.plot_data['y_axes'][y_cols[0]]
+                y_lim = self._oriented_limits(y_axis_data['y_limits'], y_axis_data.get('y_inverted', False))
+        else:
+            if 'y_limits' in self.plot_data['y_axes'][y_cols[0]]:
+                y_axis_data = self.plot_data['y_axes'][y_cols[0]]
+                y_lim = self._oriented_limits(y_axis_data['y_limits'], y_axis_data.get('y_inverted', False))
+            elif saved_ylim_prim:
+                y_lim = saved_ylim_prim
+        if y_lim is not None:
+            if y_is_log and y_lim[0] <= 0:
+                try:
+                    ys = []
+                    for s in self.plot_data['y_axes'][y_cols[0]]['series']:
+                        ys.extend([v for v in s.get('y', []) if v is not None and v>0])
+                    lo = float(np.min(ys)) if ys else 1e-9
+                    if lo <=0: lo = 1e-9
+                    y_lim = (lo, y_lim[1])
+                except Exception:
+                    y_lim = (1e-9, y_lim[1] if y_lim[1]>0 else 1)
+            ax_primary.set_ylim(y_lim)
+            # when log deselected, re-apply view alignment if needed
+            if not y_is_log:
+                try:
+                    self.figure.tight_layout()
+                except Exception:
+                    pass
+        if y_is_log:
+            try:
+                ax_primary.set_yscale('log')
+            except Exception:
+                pass
             
         # Apply Axis Colors (Primary)
         y_data_prim = self.plot_data['y_axes'][y_cols[0]]
@@ -776,17 +1150,29 @@ class PopOutWindow(QMainWindow):
             ax_new.set_ylabel(config['label_edit'].text(), fontsize=font_label)
             ax_new.tick_params(axis='y', labelsize=font_tick, direction='in')
             
-            if config['log_check'].isChecked():
-                ax_new.set_yscale('log')
-                
-            # Apply Y Limits (Secondary)
-            # We need to have saved them. Since we didn't implement complex mapping above, 
-            # let's fallback to initial limits for secondaries OR try to map by index if feasible.
-            # Better strategy: We can't easily map back without robust ID tracking.
-            # But we can try: 
+            # Apply Y Limits (Secondary) with log clamp, then set scale
+            y_is_log = config['log_check'].isChecked()
+            y_lim = None
             if 'y_limits' in self.plot_data['y_axes'][y_col]:
                  y_axis_data = self.plot_data['y_axes'][y_col]
-                 ax_new.set_ylim(self._oriented_limits(y_axis_data['y_limits'], y_axis_data.get('y_inverted', False)))
+                 y_lim = self._oriented_limits(y_axis_data['y_limits'], y_axis_data.get('y_inverted', False))
+            if y_lim is not None:
+                if y_is_log and y_lim[0] <= 0:
+                    try:
+                        ys = []
+                        for s in self.plot_data['y_axes'][y_col]['series']:
+                            ys.extend([v for v in s.get('y', []) if v is not None and v>0])
+                        lo = float(np.min(ys)) if ys else 1e-9
+                        if lo <=0: lo = 1e-9
+                        y_lim = (lo, y_lim[1])
+                    except Exception:
+                        y_lim = (1e-9, y_lim[1] if y_lim[1]>0 else 1)
+                ax_new.set_ylim(y_lim)
+            if y_is_log:
+                try:
+                    ax_new.set_yscale('log')
+                except Exception:
+                    pass
             
             # Apply Axis Colors (Secondary)
             y_data_sec = self.plot_data['y_axes'][y_col]
@@ -799,101 +1185,142 @@ class PopOutWindow(QMainWindow):
             
             axes_map[y_col] = ax_new
 
-        all_handles = []
-        all_labels = []
+        # legend = table row order, selected rows at bottom (most top plot last)
+        legend_entries = []  # (is_selected, row, sub_prio, handle, label)
         
-        # Iterate axes
+        # Iterate axes for drawing (z-order); collect legend_entries separately sorted by row
         for y_col, axis_data in self.plot_data['y_axes'].items():
             ax = axes_map[y_col]
-            
-            # Explicitly sort by layer_priority to match the desired Z-order logic
+            agg_for_col = []
+            if hasattr(self, '_aggregated_bases'):
+                agg_for_col = [(b, l) for (yc, b), l in self._aggregated_bases.items() if yc == y_col]
+            if agg_for_col:
+                def _agg_prio(item):
+                    _, layers = item
+                    m = layers.get('mean') if layers.get('mean') is not None else layers.get('orig')
+                    return m.get('layer_priority', 0) if m else 0
+                agg_for_col.sort(key=_agg_prio)
+                for base, layers in agg_for_col:
+                    sid = f"{y_col}_{base}"
+                    if sid not in self.line_widgets: continue
+                    props = self.line_widgets[sid].get_properties()
+                    if not props.get('visible', True):
+                        continue
+                    main = layers.get('mean') if layers.get('mean') is not None else layers.get('orig')
+                    if main is None:
+                        continue
+                    all_x = main['x']
+                    all_y = main['y']
+                    prio = main.get('layer_priority', 0)
+                    is_sel = 1 if prio >= 100 else 0  # selected row has +100 z_offset -> bottom of legend
+                    row = main.get('row', 1_000_000)
+                    z_val = 2.0 + prio
+                    if props.get('show_legend', True):
+                        main_label = props.get('label')
+                    else:
+                        main_label = None
+                    c_main = props.get('color', main['color'])
+                    color_tuple_main = (c_main.redF(), c_main.greenF(), c_main.blueF(), c_main.alphaF())
+                    std_s = layers.get('std')
+                    inter_s = layers.get('inter')
+                    all_std = std_s.get('std') if std_s else None
+                    all_inter = inter_s.get('std') if inter_s else None
+                    if props.get('std_visible', False) and props.get('std_show', True) and all_std is not None:
+                        try:
+                            sd_c = props.get('std_color', c_main)
+                            fill_label = props.get('std_label') if props.get('std_show_legend', True) else None
+                            if fill_label == "": fill_label = None
+                            lower = all_y - all_std
+                            upper = all_y + all_std
+                            fill = ax.fill_between(all_x, lower, upper, color=(sd_c.redF(), sd_c.greenF(), sd_c.blueF(), sd_c.alphaF()), alpha=0.25, linewidth=0, label=fill_label, zorder=z_val - 0.05)
+                            if fill_label:
+                                # sub_prio 0 = avg std pale, 1 = smooth std, keep interleaving per row
+                                legend_entries.append((is_sel, row, 1, fill, fill_label))
+                        except Exception:
+                            pass
+                    if props.get('inter_visible', False) and props.get('inter_show', True) and all_inter is not None:
+                        try:
+                            ic = props.get('inter_color', c_main)
+                            fill_label = props.get('inter_label') if props.get('inter_show_legend', True) else None
+                            if fill_label == "": fill_label = None
+                            lower = all_y - all_inter
+                            upper = all_y + all_inter
+                            fill = ax.fill_between(all_x, lower, upper, color=(ic.redF(), ic.greenF(), ic.blueF(), ic.alphaF()), alpha=0.18, linewidth=0, label=fill_label, zorder=z_val - 0.1)
+                            if fill_label:
+                                legend_entries.append((is_sel, row, 0, fill, fill_label))
+                        except Exception:
+                            pass
+                    mode = main.get('mode', 'line')
+                    if mode == 'scatter':
+                        if main.get('colors') is not None:
+                            colors_to_use = [(c.redF(), c.greenF(), c.blueF(), c.alphaF()) for c in main['colors']]
+                            scatter_h = ax.scatter(all_x, all_y, label=main_label, c=colors_to_use, s=props.get('size', 10)**2, marker=props.get('marker', 'o') if props.get('marker') else 'o', edgecolors='none', zorder=z_val)
+                        else:
+                            scatter_h = ax.scatter(all_x, all_y, label=main_label, color=color_tuple_main, s=props.get('size', 10)**2, marker=props.get('marker', 'None') if props.get('marker') not in (None, 'None') else 'o', edgecolors='none', zorder=z_val)
+                        if main_label:
+                            legend_entries.append((is_sel, row, 2, scatter_h, main_label))
+                        continue
+                    lstyle = props.get('linestyle', '-')
+                    marker = props.get('marker', 'None')
+                    if lstyle == 'None' and (marker is None or marker == 'None'):
+                        continue
+                    if lstyle == 'None':
+                        lstyle = 'None'
+                    line, = ax.plot(all_x, all_y, label=main_label, color=color_tuple_main, linestyle=lstyle, linewidth=props.get('linewidth', 1.5), marker=marker if marker not in (None, 'None') else 'None', markersize=props.get('size', 6), zorder=z_val)
+                    if main_label:
+                        legend_entries.append((is_sel, row, 2, line, main_label))
+                continue
             sorted_series = sorted(axis_data['series'], key=lambda s: s.get('layer_priority', 0))
-            
             for series in sorted_series:
                 sid = series['id']
                 if sid not in self.line_widgets: continue
-                
                 props = self.line_widgets[sid].get_properties()
                 if not props['visible']: continue
-
-                # Calculate explicit z-order: Orig(~2) < Std(~3) < Mean(~4)	 
-                z_val = 2.0 + series.get('layer_priority', 0)
-
+                prio = series.get('layer_priority', 0)
+                is_sel = 1 if prio >= 100 else 0
+                # fits have prio 200 and row 1M -> after selected table rows (bottom)
+                row = series.get('row', 1_000_000)
+                sub_prio = prio % 100 if prio < 200 else 200
+                z_val = 2.0 + prio
                 all_x = series['x']
                 all_y = series['y']
                 all_std = series.get('std')
-                
                 c = props['color']
                 color_tuple = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
-                
-                # Plot the error band if present and enabled
                 if props.get('show_std', True) and all_std is not None:
                     try:
                         lower = all_y - all_std
                         upper = all_y + all_std
                         fill_label = f"{props['label']} (Std)" if props['label'] else None
-                        fill = ax.fill_between(all_x, lower, upper, color=color_tuple, 
-                                             alpha=0.25, linewidth=0, label=fill_label, zorder=z_val - 0.1)
+                        fill = ax.fill_between(all_x, lower, upper, color=color_tuple, alpha=0.25, linewidth=0, label=fill_label, zorder=z_val - 0.1)
                         if fill_label:
-                            all_handles.append(fill)
-                            all_labels.append(fill_label)
+                            legend_entries.append((is_sel, row, sub_prio - 0.5, fill, fill_label))
                     except Exception:
                         pass
-
-                # Plot the data (scatter or line)
                 if series.get('mode') == 'scatter':
-                    # Explicit Scatter rendering (colors, discrete points)
                     if series.get('colors') is not None:
-                        # Use 'c' for array of colors
                         colors_to_use = []
                         for c_item in series['colors']:
                             colors_to_use.append((c_item.redF(), c_item.greenF(), c_item.blueF(), c_item.alphaF()))
-                        
-                        scatter_h = ax.scatter(
-                            all_x, all_y,
-                            label=props['label'],
-                            c=colors_to_use,
-                            s=props['size']**2,
-                            marker=props['marker'],
-                            edgecolors='none',
-                            zorder=z_val
-                        )
+                        scatter_h = ax.scatter(all_x, all_y, label=props['label'], c=colors_to_use, s=props['size']**2, marker=props['marker'], edgecolors='none', zorder=z_val)
                     else:
-                        # Use 'color' for single color to avoid ambiguity with value mapping
-                        scatter_h = ax.scatter(
-                            all_x, all_y,
-                            label=props['label'],
-                            color=color_tuple,
-                            s=props['size']**2,
-                            marker=props['marker'],
-                            edgecolors='none',
-                            zorder=z_val
-                        )
-                    
+                        scatter_h = ax.scatter(all_x, all_y, label=props['label'], color=color_tuple, s=props['size']**2, marker=props['marker'], edgecolors='none', zorder=z_val)
                     if props['label']:
-                        all_handles.append(scatter_h)
-                        all_labels.append(props['label'])
+                        legend_entries.append((is_sel, row, sub_prio, scatter_h, props['label']))
                 else:
-                    # Standard Line rendering (with optional markers)
                     lstyle = props.get('linestyle', '-')
+                    marker = props.get('marker', 'None')
+                    if lstyle == 'None' and (marker is None or marker == 'None'):
+                        continue
                     if lstyle == 'None':
                         lstyle = 'None'
-
-                    line, = ax.plot(
-                        all_x, all_y, 
-                        label=props['label'],
-                        color=color_tuple,
-                        linestyle=lstyle,
-                        linewidth=props.get('linewidth', 1.5),
-                        marker=props.get('marker', 'None'),
-                        markersize=props.get('size', 6),
-                        zorder=z_val
-                    )
-                    
+                    line, = ax.plot(all_x, all_y, label=props['label'], color=color_tuple, linestyle=lstyle, linewidth=props.get('linewidth', 1.5), marker=marker, markersize=props.get('size', 6), zorder=z_val)
                     if props['label']:
-                        all_handles.append(line)
-                        all_labels.append(props['label'])
-
+                        legend_entries.append((is_sel, row, sub_prio, line, props['label']))
+        # sort legend exactly as table rows: non-selected in row order, selected at bottom (most top plot last)
+        legend_entries.sort(key=lambda x: (x[0], x[1], x[2]))
+        all_handles = [h for _,_,_,h,_ in legend_entries]
+        all_labels = [l for _,_,_,_,l in legend_entries]
         if self.show_legend_check.isChecked() and all_handles:
             loc = self.legend_loc.currentText()
             frame = self.legend_frame.isChecked()
