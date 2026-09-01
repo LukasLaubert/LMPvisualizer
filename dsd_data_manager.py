@@ -55,7 +55,19 @@ class DSDDataManager:
 
         if file_map is None: file_map = {}
 
-        for study_name, system_list in studies.items():
+        try:
+            from log_parser import LogParser as _LP
+            _is_virtual = _LP._is_virtual_study_key
+            _wildcard = _LP._wildcard_pattern
+        except Exception:
+            _is_virtual = lambda x: "*" in x and "/" in x
+            _wildcard = lambda x: x
+        # TRJ/DSD displayed System is the file stem when several files share one
+        # folder, so folder-based virtual from LogParser would be wrong. Build only
+        # from real studies and recompute virtual from the actual stem list.
+        real_studies = {k: v for k, v in studies.items() if not _is_virtual(k)}
+
+        for study_name, system_list in real_studies.items():
             self.parsers[study_name] = {}
             for system_name in system_list:
                 key = f"{study_name}|{system_name}"
@@ -79,6 +91,84 @@ class DSDDataManager:
                     
                     for kw in keywords:
                         if kw in fpath.name: successful_keywords.add(kw)
+
+        # --- Virtual wildcard studies from actual displayed systems ---
+        # For single-system studies the displayed System is the folder name, but the
+        # actual file stem may be the correct token. Try file stem and use it only
+        # if its wildcard matches another stem.
+        try:
+            from collections import defaultdict
+            study_entries = {}
+            all_stem_wildcards = set()
+            for study, sys_dict in list(self.parsers.items()):
+                lst = []
+                for disp_sys, entry in sys_dict.items():
+                    fpath = entry if isinstance(entry, Path) else getattr(entry, 'file_path', None)
+                    if fpath is None:
+                        try:
+                            fpath = Path(str(entry))
+                        except Exception:
+                            continue
+                    try:
+                        file_stem = Path(fpath).stem
+                    except Exception:
+                        file_stem = disp_sys
+                    lst.append((disp_sys, file_stem, fpath))
+                    all_stem_wildcards.add(_wildcard(file_stem))
+                study_entries[study] = lst
+
+            effective_joints = []
+            for study, lst in study_entries.items():
+                if len(lst) == 1:
+                    disp_sys, file_stem, fpath = lst[0]
+                    if disp_sys != file_stem:
+                        fs_wild = _wildcard(file_stem)
+                        found = False
+                        for other_study, other_lst in study_entries.items():
+                            if other_study == study:
+                                continue
+                            for _, other_stem, _ in other_lst:
+                                if _wildcard(other_stem) == fs_wild:
+                                    found = True
+                                    break
+                            if found:
+                                break
+                        if found:
+                            effective_joints.append((study, file_stem, fpath))
+                            continue
+                    effective_joints.append((study, disp_sys, fpath))
+                else:
+                    for disp_sys, file_stem, fpath in lst:
+                        effective_joints.append((study, disp_sys, fpath))
+
+            joints = []
+            for study, eff_sys, fpath in effective_joints:
+                if " › " in study:
+                    label, raw = study.split(" › ", 1)
+                    pat = f"{label} › {_wildcard(raw)}/{_wildcard(eff_sys)}"
+                else:
+                    pat = f"{_wildcard(study)}/{_wildcard(eff_sys)}"
+                if "*" not in pat:
+                    continue
+                joints.append((study, eff_sys, pat, fpath))
+            groups = defaultdict(list)
+            for s, sys, pat, fpath in joints:
+                groups[pat].append((s, sys, fpath))
+            for pat, members in groups.items():
+                if len(members) < 2:
+                    continue
+                if pat in self.parsers:
+                    continue
+                sys_union = sorted({m[1] for m in members})
+                if not sys_union:
+                    continue
+                self.parsers[pat] = {}
+                for study, sys, fpath in members:
+                    if sys in self.parsers[pat]:
+                        continue
+                    self.parsers[pat][sys] = fpath
+        except Exception as e:
+            print(f"[System] DSD virtual grouping failed: {e}")
 
         if not self.parsers:
              warnings.append("No valid trajectory files found.")

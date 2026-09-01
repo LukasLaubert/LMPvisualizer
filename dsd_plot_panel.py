@@ -669,13 +669,19 @@ class DSDPlotPanel(QWidget):
             self.system_combo.setEnabled(True)
             self.add_btn.setEnabled(True)
 
-            studies = sorted(list(self.data_manager.parsers.keys()))
+            try:
+                from log_parser import LogParser as _LP
+                studies = sorted(list(self.data_manager.parsers.keys()),
+                                 key=lambda k: (_LP._is_virtual_study_key(k), k))
+            except Exception:
+                studies = sorted(list(self.data_manager.parsers.keys()))
             # Preserve the current selection across a reload/refresh. Without this the
             # combo falls back to the "Select Study" placeholder, which cascades into an
             # empty system combo and leaves Add without atom types or axis bounds.
             # _pending_study_key follows the selection through a re-qualified key.
             self._populate_combo(self.study_combo, "Select Study", studies,
                                  self._pending_study_key or self.study_combo.currentText())
+            self._style_study_combo(self.study_combo)
             self._pending_study_key = None
 
             # Force trigger because _populate_combo blocks signals
@@ -687,6 +693,19 @@ class DSDPlotPanel(QWidget):
             # signals, so this resets the labels without triggering a re-plot.
             self._populate_combo(self.study_combo, "Select Study", [])
             self._populate_combo(self.system_combo, "Select System", [])
+
+    def _style_study_combo(self, combo):
+        """Bold the virtual wildcard studies (Study/System pattern with *)."""
+        try:
+            model = combo.model()
+            for i in range(combo.count()):
+                text = combo.itemText(i)
+                is_virtual = LogParser._is_virtual_study_key(text)
+                font = QFont(combo.font())
+                font.setBold(is_virtual)
+                model.setData(model.index(i, 0), font, Qt.ItemDataRole.FontRole)
+        except Exception:
+            pass
 
     def _populate_combo(self, combo, placeholder, items, current=None):
         combo.blockSignals(True)
@@ -701,6 +720,17 @@ class DSDPlotPanel(QWidget):
             combo.setCurrentIndex(1)
         else:
             combo.setCurrentIndex(0)
+        if placeholder == "Select Study":
+            try:
+                model = combo.model()
+                for i in range(combo.count()):
+                    text = combo.itemText(i)
+                    is_virtual = LogParser._is_virtual_study_key(text)
+                    font = QFont(combo.font())
+                    font.setBold(is_virtual)
+                    model.setData(model.index(i, 0), font, Qt.ItemDataRole.FontRole)
+            except Exception:
+                pass
         combo.blockSignals(False)
             
     def on_study_changed(self, text):

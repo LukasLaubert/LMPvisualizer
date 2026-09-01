@@ -327,7 +327,12 @@ class LogDataManager:
         return self.warnings, successful_keywords
 
     def get_study_names(self) -> List[str]:
-        return sorted(list(self.data.keys()))
+        # Virtual wildcard studies (Study/System with *) at the end, bold in UI
+        try:
+            from log_parser import LogParser as _LP
+            return sorted(self.data.keys(), key=lambda k: (_LP._is_virtual_study_key(k), k))
+        except Exception:
+            return sorted(list(self.data.keys()))
 
     def get_system_names(self, study: str) -> List[str]:
         if study in self.data:

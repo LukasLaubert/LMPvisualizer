@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QFileDialog, QAbstractItemView, QWidget
 )
 from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import QColor, QIntValidator
+from PyQt6.QtGui import QColor, QIntValidator, QFont
 import pyqtgraph as pg
 import numpy as np
 
@@ -506,6 +506,19 @@ class TrjPlotPanel(QWidget):
                 if index != -1:
                     self.system_combo.setCurrentIndex(index)
 
+    def _style_study_combo(self, combo):
+        """Bold the virtual wildcard studies (Study/System pattern with *)."""
+        try:
+            model = combo.model()
+            for i in range(combo.count()):
+                text = combo.itemText(i)
+                is_virtual = LogParser._is_virtual_study_key(text)
+                font = QFont(combo.font())
+                font.setBold(is_virtual)
+                model.setData(model.index(i, 0), font, Qt.ItemDataRole.FontRole)
+        except Exception:
+            pass
+
     def _study_origin_fields(self, study_key):
         """The (path, raw study) a study key came from, for storing in a row."""
         origin = (getattr(self, 'study_origins', None) or {}).get(study_key)
@@ -519,6 +532,7 @@ class TrjPlotPanel(QWidget):
         Study keys gain or lose their path prefix as chips come and go, so a row's
         stored key is not stable - the stable identity is (source_path, raw study).
         Rows whose path chip is gone are removed; everything else is re-pointed.
+        Virtual wildcard studies (containing *) are kept as-is if still present.
         """
         origins = getattr(self, 'study_origins', None) or {}
 
@@ -528,6 +542,11 @@ class TrjPlotPanel(QWidget):
             if not state:
                 continue
 
+            study = state.get('study', '')
+            if LogParser._is_virtual_study_key(study):
+                if study not in self.data_manager.parsers:
+                    continue
+                continue
             source = state.get('source_path')
             if source is None:
                 # Row from a single-path session: adopt the origin of its study key.
@@ -559,6 +578,13 @@ class TrjPlotPanel(QWidget):
             item = self.plot_table.item(row, 1)
             state = item.data(Qt.ItemDataRole.UserRole) if item else None
             source = (state or {}).get('source_path')
+            study = (state or {}).get('study', '')
+            if LogParser._is_virtual_study_key(study):
+                if study not in self.data_manager.parsers:
+                    dropped += 1
+                    continue
+                survivors.append(self._extract_row_data(row))
+                continue
             if source is None or LogParser.path_key(source) in loaded:
                 survivors.append(self._extract_row_data(row))
             else:
@@ -606,6 +632,7 @@ class TrjPlotPanel(QWidget):
             # _pending_study_key follows the selection through a re-qualified key.
             self._populate_combo(self.study_combo, "Select Study", studies,
                                  self._pending_study_key or self.study_combo.currentText())
+            self._style_study_combo(self.study_combo)
             self._pending_study_key = None
             self.on_study_changed(self.study_combo.currentText())
 
@@ -634,6 +661,18 @@ class TrjPlotPanel(QWidget):
                 combo.setCurrentIndex(0)
         else:
             combo.setCurrentIndex(0)
+        # Bold virtual studies in the study combo
+        if placeholder == "Select Study":
+            try:
+                model = combo.model()
+                for i in range(combo.count()):
+                    text = combo.itemText(i)
+                    is_virtual = LogParser._is_virtual_study_key(text)
+                    font = QFont(combo.font())
+                    font.setBold(is_virtual)
+                    model.setData(model.index(i, 0), font, Qt.ItemDataRole.FontRole)
+            except Exception:
+                pass
         combo.blockSignals(False)
 
     def on_study_changed(self, text):
@@ -835,7 +874,8 @@ class TrjPlotPanel(QWidget):
         if "Select" in s_study: s_study = "N/A"
         if "Select" in s_system: s_system = "N/A"
         
-        item = QTableWidgetItem(f"{s_study} | {s_system}")
+        disp_study = LogParser.display_study_for_virtual(s_study, s_system)
+        item = QTableWidgetItem(f"{disp_study} | {s_system}")
         item.setData(Qt.ItemDataRole.UserRole, state)
         self.plot_table.setItem(row, 1, item)
 
@@ -1338,7 +1378,8 @@ class TrjPlotPanel(QWidget):
         s_system = state.get('system', 'N/A')
         if "Select" in s_study: s_study = "N/A"
         if "Select" in s_system: s_system = "N/A"
-        item.setText(f"{s_study} | {s_system}")
+        disp_study = LogParser.display_study_for_virtual(s_study, s_system)
+        item.setText(f"{disp_study} | {s_system}")
         
         is_heatmap = state['h_col'] != "No Heatmap"
         curr_widget = self.plot_table.cellWidget(row, 2)

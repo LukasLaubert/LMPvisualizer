@@ -232,7 +232,128 @@ class LogParser:
                     if src:
                         file_map.setdefault(f"{key}|{system}", []).extend(src)
 
+        # --- Virtual wildcard studies ----------------------------------------
+        # Build one bold entry per digit-wildcard pattern (≥2 members) exactly
+        # like the v0.6.3 system-switch matcher, but on the joint Study/System
+        # string. Nothing else changes: real studies stay, virtual ones are added.
+        try:
+            virt_studies, virt_fm = LogParser._group_virtual_studies(studies, file_map)
+            for pat, sys_list in virt_studies.items():
+                if pat not in studies:
+                    studies[pat] = sys_list
+            for k, v in virt_fm.items():
+                if k not in file_map:
+                    file_map[k] = v
+        except Exception as e:
+            print(f"[System] Virtual study grouping failed: {e}")
+
         return studies, warnings, file_map, origins
+
+    # --- Wildcard virtual studies -----------------------------------------------
+    # Joint Study/System strings are collapsed by digit groups (each maximal digit
+    # run → one "*") exactly like the v0.6.3 system-switch fallback
+    # (_system_pattern_tokenize). Every joint that shares a wildcard pattern is
+    # grouped; each pattern with ≥2 members becomes a bold virtual study whose
+    # name is the pattern itself (e.g. Silica_cmBut_*pb_*_*/output_cm_*).
+    # Its system list is the union of the literal system names in the group and
+    # its file_map entries aggregate the real files per literal.
+
+    @staticmethod
+    def _wildcard_pattern(text: str) -> str:
+        """Replace each maximal digit run with a single '*'."""
+        out = []
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch.isdigit():
+                out.append("*")
+                i += 1
+                while i < n and text[i].isdigit():
+                    i += 1
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out)
+
+    @staticmethod
+    def _is_virtual_study_key(name: str) -> bool:
+        return "*" in name and "/" in name
+
+    @staticmethod
+    def display_study_for_virtual(study: str, system: str) -> str:
+        """Plot label helper: for virtual Study/System the part after '/' is
+        the system wildcard and is replaced by the chosen literal System.
+        Keeps wildcard for synthetic 'average' systems."""
+        if not study or not system:
+            return study
+        if not LogParser._is_virtual_study_key(study):
+            return study
+        if system in ("average", "average & std", "Strain average"):
+            return study
+        if system.startswith("Select "):
+            return study
+        if "/" not in study:
+            return study
+        # Qualified: 'label › Study_*/System_*' -> keep label literal, replace only tail
+        return f"{study.rsplit('/', 1)[0]}/{system}"
+
+    @staticmethod
+    def _group_virtual_studies(studies: Dict[str, List[str]],
+                               file_map: Dict[str, List[Path]]):
+        """Return (virtual_studies, virtual_file_map) for the current discovery."""
+        # Build joints from real studies only (skip already-virtual to avoid recursion)
+        # For qualified studies (label › raw) keep the label literal - only the
+        # raw folder names participate in the digit-wildcard matching.
+        joints = []  # (study, system, joint, pattern)
+        for study, systems in list(studies.items()):
+            if LogParser._is_virtual_study_key(study):
+                continue
+            for system in systems:
+                if "*" in system:
+                    continue
+                if LogParser.STUDY_SEP in study:
+                    label, raw = study.split(LogParser.STUDY_SEP, 1)
+                    pat = f"{label}{LogParser.STUDY_SEP}{LogParser._wildcard_pattern(raw)}/{LogParser._wildcard_pattern(system)}"
+                else:
+                    pat = f"{LogParser._wildcard_pattern(study)}/{LogParser._wildcard_pattern(system)}"
+                if "*" not in pat:
+                    continue
+                joints.append((study, system, f"{study}/{system}", pat))
+
+        if not joints:
+            return {}, {}
+
+        from collections import defaultdict
+        groups: Dict[str, list] = defaultdict(list)
+        for entry in joints:
+            groups[entry[3]].append(entry)
+
+        virtual_studies: Dict[str, List[str]] = {}
+        virtual_file_map: Dict[str, List[Path]] = {}
+        for pat, members in groups.items():
+            if len(members) < 2:
+                continue
+            if pat in studies or pat in virtual_studies:
+                continue
+            # Distinct literal system names that belong to this pattern
+            sys_union = sorted({m[1] for m in members})
+            if not sys_union:
+                continue
+            virtual_studies[pat] = sys_union
+            # Aggregate files per literal system
+            agg: Dict[str, List[Path]] = defaultdict(list)
+            for study, system, _joint, _pat in members:
+                key = f"{study}|{system}"
+                src = file_map.get(key, [])
+                if src:
+                    agg[system].extend(src)
+            for sys_lit, files in agg.items():
+                # de-duplicate, keep sorted for determinism
+                uniq = sorted({str(p): p for p in files}.values(), key=lambda p: str(p))
+                virtual_file_map[f"{pat}|{sys_lit}"] = uniq
+
+        return virtual_studies, virtual_file_map
 
     @staticmethod
     def qualify_study(origins: Dict[str, dict], path: str, study: str):

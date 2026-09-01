@@ -1387,7 +1387,15 @@ class LogPlotPanel(QWidget):
             for row in range(rowCount):
                 item = self.plot_table.item(row, 1)
                 if item and item.data(Qt.ItemDataRole.UserRole):
-                    item.setText(item.data(Qt.ItemDataRole.UserRole))
+                    full = item.data(Qt.ItemDataRole.UserRole)
+                    parts = full.split(' | ')
+                    if len(parts) >= 2:
+                        disp_study = LogParser.display_study_for_virtual(parts[0], parts[1])
+                        # Rebuild with display study but keep other parts
+                        disp_full = f"{disp_study} | {' | '.join(parts[1:])}"
+                        item.setText(disp_full)
+                    else:
+                        item.setText(full)
             return
 
         full_names = []
@@ -1399,10 +1407,17 @@ class LogPlotPanel(QWidget):
         
         if not full_names: return
 
-        studies = [name.split(' | ')[0] for name in full_names]
+        # For virtual Study/System the part after '/' in Study is the system wildcard
+        # and is replaced by the literal System for display.
+        display_studies = []
+        for name in full_names:
+            parts = name.split(' | ')
+            study = parts[0] if len(parts) > 0 else ""
+            system = parts[1] if len(parts) > 1 else ""
+            display_studies.append(LogParser.display_study_for_virtual(study, system))
         systems = [name.split(' | ')[1] for name in full_names]
         
-        shortened_studies = LogPlotPanel._shorten_labels(studies)
+        shortened_studies = LogPlotPanel._shorten_labels(display_studies)
         shortened_systems = LogPlotPanel._shorten_labels(systems)
 
         for row in range(rowCount):
@@ -1410,7 +1425,8 @@ class LogPlotPanel(QWidget):
             if item and row < len(full_names):
                 parts = full_names[row].split(' | ')
                 if len(parts) == 4:
-                    short_study = shortened_studies[row] if row < len(shortened_studies) else parts[0]
+                    # Use the shortened display study (with replaced suffix)
+                    short_study = shortened_studies[row] if row < len(shortened_studies) else LogParser.display_study_for_virtual(parts[0], parts[1])
                     
                     # Get the shortened system name, and handle 'average' -> 'ave'
                     system_name = parts[1]
@@ -1544,12 +1560,26 @@ class LogPlotPanel(QWidget):
         combo.setCurrentIndex(0)
         return combo
 
+    def _style_study_combo(self, combo):
+        """Bold the virtual wildcard studies (Study/System pattern with *)."""
+        try:
+            model = combo.model()
+            for i in range(combo.count()):
+                text = combo.itemText(i)
+                is_virtual = LogParser._is_virtual_study_key(text)
+                font = QFont(combo.font())
+                font.setBold(is_virtual)
+                model.setData(model.index(i, 0), font, Qt.ItemDataRole.FontRole)
+        except Exception:
+            pass
+
     def _resync_rows_to_paths(self, paths):
         """Re-points rows at the current study keys and drops orphaned ones.
 
         Study keys gain or lose their path prefix as chips come and go, so a row's
         stable identity is the (source path, raw study folder) pair kept in UserRole+2.
         Rows whose path chip is gone are removed; everything else is re-pointed.
+        Virtual wildcard studies (containing *) are kept as-is if they still exist.
         """
         origins = getattr(self, 'study_origins', None) or {}
 
@@ -1560,6 +1590,13 @@ class LogPlotPanel(QWidget):
 
             name = item.data(Qt.ItemDataRole.UserRole) or item.text()
             study, system, x_axis, y_axis = self._parse_plot_name(name)
+            # Virtual studies are not tied to a single path - keep them if still present
+            if LogParser._is_virtual_study_key(study):
+                if study not in self.data_manager.data:
+                    # will be dropped in _drop
+                    continue
+                # No re-qualification for virtual
+                continue
             origin = item.data(Qt.ItemDataRole.UserRole + 2)
 
             if not origin:
@@ -1590,6 +1627,16 @@ class LogPlotPanel(QWidget):
             item = self.plot_table.item(row, 1)
             origin = item.data(Qt.ItemDataRole.UserRole + 2) if item else None
             source = (origin or {}).get('path')
+            name = item.data(Qt.ItemDataRole.UserRole) or item.text() if item else ""
+            study = self._parse_plot_name(name)[0] if name else ""
+            # Virtual wildcard studies have no single origin - drop only if the
+            # pattern no longer exists in the current discovery
+            if LogParser._is_virtual_study_key(study):
+                if study not in self.data_manager.data:
+                    dropped_ids.append(item.data(Qt.ItemDataRole.UserRole + 1) if item else None)
+                    continue
+                survivors.append(self._extract_row_data(row))
+                continue
             if source is None or LogParser.path_key(source) in loaded:
                 survivors.append(self._extract_row_data(row))
             else:
@@ -1641,7 +1688,12 @@ class LogPlotPanel(QWidget):
         x_display = self.global_label_map.get(x_prop, x_prop)
         y_display = self.global_label_map.get(y_prop, y_prop)
         
-        return f"{study} | {system} | {x_display} | {y_display}"
+        # Virtual wildcard: Study's suffix after '/' is the system wildcard and
+        # is replaced by the chosen literal System so the Plot label stays
+        # consistent with the System tab.
+        display_study = LogParser.display_study_for_virtual(study, system)
+        
+        return f"{display_study} | {system} | {x_display} | {y_display}"
 
     def _update_row_display(self, row: int):
         """Update the displayed text in the table for a row."""
@@ -2551,6 +2603,7 @@ class LogPlotPanel(QWidget):
             self.add_btn.setEnabled(True)
 
             reset_combo(self.study_combo, "Select Study", self.data_manager.get_study_names())
+            self._style_study_combo(self.study_combo)
             reset_combo(self.system_combo, "Select System", self.data_manager.get_all_system_names())
             
             # Refresh axis choices while preserving valid selections on keyword refresh.
@@ -3133,7 +3186,8 @@ class LogPlotPanel(QWidget):
             
             display_x = x_label if x_label else plot_info['x_ax']
             display_y = y_label if y_label else plot_info['y_ax']
-            legend_name = f"{plot_info['study']} | {plot_info['system']} | {display_x} | {display_y}"
+            display_study = LogParser.display_study_for_virtual(plot_info['study'], plot_info['system'])
+            legend_name = f"{display_study} | {plot_info['system']} | {display_x} | {display_y}"
 
             # --- 1. Draw Original Data ---
             if plot_info['show_original']:

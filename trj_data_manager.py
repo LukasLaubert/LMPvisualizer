@@ -23,7 +23,20 @@ class TrjDataManager:
         if file_map is None: file_map = {}
         all_cols_found = set()
 
-        for study_name, system_list in studies.items():
+        # For TRJ the displayed System is the file stem when several files share
+        # one folder, so the folder-based virtual from LogParser would be wrong.
+        # Build parsers only from real studies and recompute virtual from the
+        # actual stem list afterwards.
+        try:
+            from log_parser import LogParser as _LP
+            _is_virtual = _LP._is_virtual_study_key
+            _wildcard = _LP._wildcard_pattern
+        except Exception:
+            _is_virtual = lambda x: "*" in x and "/" in x
+            _wildcard = lambda x: x
+        real_studies = {k: v for k, v in studies.items() if not _is_virtual(k)}
+
+        for study_name, system_list in real_studies.items():
             self.parsers[study_name] = {}
             for system_name in system_list:
                 key = f"{study_name}|{system_name}"
@@ -59,6 +72,89 @@ class TrjDataManager:
                                     all_cols_found.add(col)
                         except: pass
 
+        # --- Virtual wildcard studies from actual displayed systems ---
+        # For single-system studies the displayed System is the folder name, but the
+        # actual file stem may be the correct token. Try file stem and use it only
+        # if its wildcard matches another stem (so the Study with one system joins the
+        # group formed by multi-system Studies). Display stays as folder.
+        try:
+            from collections import defaultdict
+            # Collect file stems for matching decision
+            study_entries = {}  # study -> list of (disp_sys, file_stem, fpath)
+            all_stem_wildcards = set()
+            for study, sys_dict in list(self.parsers.items()):
+                lst = []
+                for disp_sys, entry in sys_dict.items():
+                    fpath = entry if isinstance(entry, Path) else getattr(entry, 'file_path', None)
+                    if fpath is None:
+                        # Fallback: try to get from entry if it's a Parser with .file ?
+                        try:
+                            fpath = Path(str(entry))
+                        except Exception:
+                            continue
+                    try:
+                        file_stem = Path(fpath).stem
+                    except Exception:
+                        file_stem = disp_sys
+                    lst.append((disp_sys, file_stem, fpath))
+                    all_stem_wildcards.add(_wildcard(file_stem))
+                study_entries[study] = lst
+
+            # Build effective joints: for single-system studies try file stem if it matches
+            effective_joints = []  # (study, eff_sys, fpath)
+            for study, lst in study_entries.items():
+                if len(lst) == 1:
+                    disp_sys, file_stem, fpath = lst[0]
+                    if disp_sys != file_stem:
+                        # Does fileStem wildcard occur elsewhere (other study)?
+                        fs_wild = _wildcard(file_stem)
+                        found = False
+                        for other_study, other_lst in study_entries.items():
+                            if other_study == study:
+                                continue
+                            for _, other_stem, _ in other_lst:
+                                if _wildcard(other_stem) == fs_wild:
+                                    found = True
+                                    break
+                            if found:
+                                break
+                        if found:
+                            effective_joints.append((study, file_stem, fpath))
+                            continue
+                    effective_joints.append((study, disp_sys, fpath))
+                else:
+                    for disp_sys, file_stem, fpath in lst:
+                        effective_joints.append((study, disp_sys, fpath))
+
+            joints = []
+            for study, eff_sys, fpath in effective_joints:
+                if " › " in study:
+                    label, raw = study.split(" › ", 1)
+                    pat = f"{label} › {_wildcard(raw)}/{_wildcard(eff_sys)}"
+                else:
+                    pat = f"{_wildcard(study)}/{_wildcard(eff_sys)}"
+                if "*" not in pat:
+                    continue
+                joints.append((study, eff_sys, pat, fpath))
+            groups = defaultdict(list)
+            for s, sys, pat, fpath in joints:
+                groups[pat].append((s, sys, fpath))
+            for pat, members in groups.items():
+                if len(members) < 2:
+                    continue
+                if pat in self.parsers:
+                    continue
+                sys_union = sorted({m[1] for m in members})
+                if not sys_union:
+                    continue
+                self.parsers[pat] = {}
+                for study, sys, fpath in members:
+                    if sys in self.parsers[pat]:
+                        continue
+                    self.parsers[pat][sys] = fpath
+        except Exception as e:
+            print(f"[System] TRJ virtual grouping failed: {e}")
+
         if not self.parsers:
              self.warnings.append("No valid trajectory files found with provided keywords.")
 
@@ -92,7 +188,11 @@ class TrjDataManager:
         return entry
 
     def get_study_names(self) -> List[str]:
-        return sorted(list(self.parsers.keys()))
+        try:
+            from log_parser import LogParser as _LP
+            return sorted(self.parsers.keys(), key=lambda k: (_LP._is_virtual_study_key(k), k))
+        except Exception:
+            return sorted(list(self.parsers.keys()))
 
     def get_system_names(self, study: str) -> List[str]:
         if study in self.parsers:
