@@ -2602,9 +2602,52 @@ class LogPlotPanel(QWidget):
                 combo.setEnabled(True)
             self.add_btn.setEnabled(True)
 
+            # Preserve selections before reset (reset_combo with get_all_system_names
+            # loses "average"/"average & std" and pattern-matched virtual names).
+            _prev_study_text = self.study_combo.currentText()
+            _prev_system_text = self.system_combo.currentText()
             reset_combo(self.study_combo, "Select Study", self.data_manager.get_study_names())
             self._style_study_combo(self.study_combo)
             reset_combo(self.system_combo, "Select System", self.data_manager.get_all_system_names())
+            # keep_table reload re-parses but must keep the system dropdown filtered to the
+            # currently selected study — otherwise "Select System" shows every system from
+            # every study (the screenshot bug: average plus all bb/bd systems) and must
+            # not de-select "average"/"average & std" or a bold "*" virtual.
+            if keep_table and self.study_combo.currentIndex() > 0:
+                study = self.study_combo.currentText()
+                systems = self.data_manager.get_system_names(study)
+                # Use the pre-reset value: after the generic reset above "average"
+                # is gone (not in get_all_system_names) and would be lost.
+                cur_sys = _prev_system_text
+                # If study text was re-qualified (label › raw) the stored system
+                # text is still valid — only the study key changed.
+                self.system_combo.blockSignals(True)
+                self.system_combo.clear()
+                self.system_combo.addItem("Select System")
+                avg_opts = self._get_average_system_options(systems)
+                self.system_combo.addItems(avg_opts)
+                self.system_combo.addItems(systems)
+                if cur_sys in systems or cur_sys in avg_opts:
+                    self.system_combo.setCurrentText(cur_sys)
+                else:
+                    # Keep average selections even if the study's system set changed
+                    # slightly on re-parse (e.g. virtual sys_union recomputed).
+                    if self._is_average_system(cur_sys):
+                        # avg / avg & std are always valid for a multi-system study
+                        # (and for a virtual with its union) — force-keep them.
+                        self.system_combo.addItem(cur_sys)
+                        self.system_combo.setCurrentText(cur_sys)
+                    else:
+                        matched = _find_pattern_matched_system(cur_sys, avg_opts + systems)
+                        if matched is not None:
+                            self.system_combo.setCurrentText(matched)
+                        else:
+                            # Last fallback: explicit sequence index from previous study
+                            # (handles virtual "*": digit groups counted as one).
+                            self.system_combo.setCurrentIndex(0)
+                self.system_combo.blockSignals(False)
+                # Also restore _prev_study so the next study change can do sequence fallback correctly
+                self._prev_study = study
             
             # Refresh axis choices while preserving valid selections on keyword refresh.
             if keep_table:
@@ -4414,7 +4457,6 @@ class LogPlotPanel(QWidget):
 
 
         # --- Load Logic ---
-        self.average_user_choices = data.get('average_choices', {})
         self.global_label_map = data.get('global_label_map', {})
         self.custom_properties = data.get('custom_properties', {})
         self.data_manager.set_custom_properties(self.custom_properties)
@@ -4433,6 +4475,7 @@ class LogPlotPanel(QWidget):
 
         project_paths = self.main_window.session_paths(data)
         keywords = data.get('keywords', [])
+        saved_average = data.get('average_choices', {})
 
         # Prevent global widgets from triggering a reload during update
         self.main_window.path_input.blockSignals(True)
@@ -4448,8 +4491,11 @@ class LogPlotPanel(QWidget):
                 self.main_window.set_project_paths(project_paths)
                 self.main_window.chip_input.set_chips(keywords)
 
-                # Internal load without UI warnings
+                # load_project clears for a fresh project — restore AFTER
                 self.load_project(project_paths, keywords, show_discovery_warnings=False, keep_table=False)
+                self.average_user_choices = saved_average
+            else:
+                self.average_user_choices = saved_average
                 # Refresh combos
                 self._refresh_axis_combos()
 

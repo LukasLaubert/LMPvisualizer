@@ -367,28 +367,37 @@ class LogParser:
     def peek_columns(logfile_path: Path) -> List[str]:
         """
         Reads the first chunk of the file to quickly extract column names.
-        Avoids parsing the entire dataset. 
+        Avoids parsing the entire dataset.
+        The chunk may end mid-line (header is 662 chars); a cut header would
+        contribute a truncated token like 'v_c'/'v_cauchy' which then appeared
+        as fake axis entries ('v_c', 'v_cau', ...). Extend to the next newline
+        so the last header is complete before splitting.
         """
         try:
-            # Read first 100KB (increased from 10KB) to handle long preambles
-            with open(logfile_path, 'r') as f:
-                chunk = f.read(102400) 
-                
+            with open(logfile_path, 'r', errors='ignore') as f:
+                chunk = f.read(102400)
+                # If the chunk ends inside a line, complete that line so a
+                # header is never split (otherwise the tail token is truncated).
+                if chunk and chunk[-1] != '\n':
+                    rest = f.readline()
+                    if rest:
+                        chunk += rest
+
             header_regex = re.compile(r'^\s*Step\s+', re.IGNORECASE)
             columns = set()
-            
+
             for line in chunk.splitlines():
                 if header_regex.match(line):
                     cols = line.strip().split()
                     columns.update(cols)
-                    
+
             col_list = sorted(list(columns))
             # Normalize 'Step' casing for list placement
             step_variants = [c for c in col_list if c.lower() == 'step']
             if step_variants:
                 for v in step_variants: col_list.remove(v)
                 col_list.insert(0, step_variants[0])
-                
+
             return col_list
         except Exception:
             return []

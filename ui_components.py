@@ -120,48 +120,132 @@ class InconsistentDataDialog(QDialog):
     def __init__(self, lengths: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Inconsistent Data Lengths")
-        
-        self.lengths = lengths
-        min_len = min(lengths.values())
-        
+
+        self.lengths = dict(lengths)
+        min_len = min(self.lengths.values()) if self.lengths else 1
+
         layout = QVBoxLayout(self)
-        
-        layout.addWidget(QLabel(
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinAndMaxSize)
+
+        lbl = QLabel(
             "The systems in this study have different numbers of data points.\n"
             "Please choose how to proceed with averaging."
-        ))
-        
-        self.table = QTableWidget(len(lengths), 3)
-        self.table.setHorizontalHeaderLabels(["System", "Timesteps", "Exclude"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        )
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+        self.table = QTableWidget(len(self.lengths), 3)
+        self.table.setHorizontalHeaderLabels(["System", "Timesteps", "Include"])
+        header = self.table.horizontalHeader()
+        # Every column is only as wide as its header/content needs — window
+        # scales with the table instead of truncating system names.
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(False)
         self.table.verticalHeader().hide()
-        
-        for i, (system, length) in enumerate(lengths.items()):
-            self.table.setItem(i, 0, QTableWidgetItem(system))
-            self.table.setItem(i, 1, QTableWidgetItem(str(length)))
+        self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table.setSizeAdjustPolicy(QTableWidget.SizeAdjustPolicy.AdjustToContents)
+        self.table.horizontalHeader().setHighlightSections(False)
+        # Include checkboxes centered, Timesteps numbers right-aligned
+        self.table.horizontalHeaderItem(1).setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.table.horizontalHeaderItem(2).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        for i, (system, length) in enumerate(self.lengths.items()):
+            sys_item = QTableWidgetItem(system)
+            sys_item.setFlags(sys_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(i, 0, sys_item)
+
+            num_item = QTableWidgetItem(str(length))
+            num_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            num_item.setFlags(num_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(i, 1, num_item)
+
             checkbox = QCheckBox()
-            self.table.setCellWidget(i, 2, checkbox)
-        
+            checkbox.setChecked(True)
+            checkbox.setStyleSheet("QCheckBox { spacing: 0px; }")
+            container = QWidget()
+            c_layout = QHBoxLayout(container)
+            c_layout.setContentsMargins(0, 0, 0, 0)
+            c_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            c_layout.addWidget(checkbox)
+            self.table.setCellWidget(i, 2, container)
+            checkbox.toggled.connect(self._update_truncate_range)
+
         layout.addWidget(self.table)
-        
+
         form_layout = QFormLayout()
         self.truncate_box = QSpinBox()
         self.truncate_box.setRange(1, min_len)
         self.truncate_box.setValue(min_len)
         form_layout.addRow("Truncate all data to length:", self.truncate_box)
         layout.addLayout(form_layout)
-        
+
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
+        self.table.resizeColumnsToContents()
+        if self.table.columnWidth(2) < 90:
+            self.table.setColumnWidth(2, 90)
+        else:
+            self.table.setColumnWidth(2, self.table.columnWidth(2) + 12)
+        self.table.resizeRowsToContents()
+        content_w = self.table.horizontalHeader().length()
+        self.adjustSize()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(2, max(self.table.columnWidth(2), 90))
+        # Minimal width = width needed for the first label line
+        # ("The systems in this study have different numbers of data points.")
+        # instead of a hard-coded 560, so the dialog is not wider than necessary.
+        fm = QFontMetrics(lbl.font())
+        label_needed = fm.horizontalAdvance("The systems in this study have different numbers of data points.") + 50
+        # Also ensure second line fits if it is longer
+        label_needed = max(label_needed, fm.horizontalAdvance("Please choose how to proceed with averaging.") + 50)
+        # Table content may still be wider (long system names)
+        min_w = max(content_w + 40, label_needed)
+        self.setMinimumWidth(min_w)
+        # Start at the minimal width — columns fill it, no empty right gap
+        self.resize(min_w, self.height())
+        self.setSizeGripEnabled(True)
+
+    def _included_lengths(self):
+        included = []
+        for i, (system, length) in enumerate(self.lengths.items()):
+            cont = self.table.cellWidget(i, 2)
+            cb = cont.findChild(QCheckBox) if cont else None
+            if cb is not None and cb.isChecked():
+                included.append(length)
+        return included
+
+    def _update_truncate_range(self):
+        included = self._included_lengths()
+        if not included:
+            new_max = max(self.lengths.values()) if self.lengths else 1
+        else:
+            new_max = min(included)
+        self.truncate_box.blockSignals(True)
+        self.truncate_box.setRange(1, new_max)
+        # Always jump to the max of the currently included systems (user
+        # expects the field to reflect the new limit immediately).
+        self.truncate_box.setValue(new_max)
+        self.truncate_box.blockSignals(False)
+
     def get_choices(self) -> dict:
         excluded = []
         for i in range(self.table.rowCount()):
-            if self.table.cellWidget(i, 2).isChecked():
-                excluded.append(self.table.item(i, 0).text())
-        
+            cont = self.table.cellWidget(i, 2)
+            cb = cont.findChild(QCheckBox) if cont else None
+            # Include = checked, so unchecked -> excluded
+            if cb is not None and not cb.isChecked():
+                item = self.table.item(i, 0)
+                if item:
+                    excluded.append(item.text())
+
         return {
             'truncate_len': self.truncate_box.value(),
             'exclude': excluded

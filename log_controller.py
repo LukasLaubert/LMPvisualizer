@@ -73,6 +73,19 @@ class LogController:
             self.plot_item.getViewBox().sigResized.connect(self.update_views)
         except Exception:
             pass
+        # The auto-scale 'A' button in the bottom-left only knows the main
+        # ViewBox. With several y axes it would re-enable auto-range for X
+        # (and Y of the main axis) but leave every auxiliary ViewBox untouched.
+        # Intercept the button so every Y axis is re-autoscaled, with the
+        # current alignment/scale locks honoured (reset_view already does).
+        try:
+            self.plot_item.autoBtn.clicked.disconnect(self.plot_item.autoBtnClicked)
+        except Exception:
+            pass
+        try:
+            self.plot_item.autoBtn.clicked.connect(self._on_auto_btn_clicked)
+        except Exception:
+            pass
 
     def toggle_axes_lock(self, locked: bool, reset_view: bool = True):
         """Connects or disconnects the synchronization signal for all active Y-axes."""
@@ -1059,6 +1072,31 @@ class LogController:
         if not has_data or not np.isfinite(vmin) or not np.isfinite(vmax):
             return None, None
         return vmin, vmax
+
+    def _on_auto_btn_clicked(self, *args):
+        """Replaces PlotItem.autoBtnClicked so every y axis is rescaled.
+
+        PlotItem's default only touches the main ViewBox (X + first Y). With
+        several y axes the extra ViewBoxes stay where they were, so only X
+        appears to auto-scale. Delegating to reset_view re-uses the same
+        lock-aware rescaling that the red/blue lock buttons already use
+        (global union / zero alignment / shared span / independent), and
+        afterwards hides the 'A' button like the original did.
+        """
+        try:
+            self.reset_view()
+        except Exception:
+            # Fallback: at least restore X auto-range like the original
+            try:
+                self.plot_item.enableAutoRange()
+            except Exception:
+                pass
+        try:
+            # Original autoBtnClicked hides the button after a successful auto-range
+            if hasattr(self.plot_item, 'autoBtn') and self.plot_item.autoBtn is not None:
+                self.plot_item.autoBtn.hide()
+        except Exception:
+            pass
 
     def _get_mpl_linestyle(self, qt_style):
         """Maps Qt PenStyle enums/ints to Matplotlib linestyle strings."""
