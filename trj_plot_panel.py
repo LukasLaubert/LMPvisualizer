@@ -22,6 +22,9 @@ from settings_manager import SettingsManager
 from log_parser import LogParser
 from global_label_editor_dialog import GlobalLabelEditorDialog
 from auto_index_dialog import AutoIndexDialog
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 def _system_pattern_tokenize(name: str):
@@ -435,7 +438,7 @@ class TrjPlotPanel(QWidget):
         try:
             self.plot_widget.getPlotItem().autoBtn.clicked.connect(self._on_auto_range_clicked)
         except Exception as e:
-            print(f"[System] Could not hook the auto-range button: {e}")
+            logger.warning("[System] Could not hook the auto-range button: %s", e)
 
         # Keep the header divider above the splitter handle while it is dragged
         self.main_splitter.splitterMoved.connect(lambda *_: self._sync_header_divider())
@@ -479,7 +482,7 @@ class TrjPlotPanel(QWidget):
         finally:
             self._force_system_reload = False
 
-        if previous and not any(LogParser.same_path(previous['path'], p) for p in paths):
+        if previous and not LogParser.path_is_loaded(previous['path'], paths):
             # The project the selection belonged to is gone. A different project can
             # carry the very same study/system folder names, so drop the controller's
             # identity - otherwise set_active_system() would short-circuit on the
@@ -529,10 +532,14 @@ class TrjPlotPanel(QWidget):
     def _resync_rows_to_paths(self, paths):
         """Re-points rows at the current study keys and drops orphaned ones.
 
-        Study keys gain or lose their path prefix as chips come and go, so a row's
-        stored key is not stable - the stable identity is (source_path, raw study).
-        Rows whose path chip is gone are removed; everything else is re-pointed.
-        Virtual wildcard studies (containing *) are kept as-is if still present.
+        Stable identity is (canonical source path, raw study folder) from the
+        row's state dict - the stored study key is not stable, it gains or
+        loses its path prefix as chips come and go. Rows are updated in place
+        here (setData/setText); only rows whose chip is gone are removed, and
+        only then, by _drop_rows_of_unloaded_paths below. Single-path rows
+        without a stored path adopt the origin of their study key, so old
+        sessions load unchanged. Virtual wildcard studies (containing *) are
+        kept as-is if still present.
         """
         origins = getattr(self, 'study_origins', None) or {}
 
@@ -557,7 +564,7 @@ class TrjPlotPanel(QWidget):
                     item.setData(Qt.ItemDataRole.UserRole, state)
                 continue
 
-            new_key = LogParser.qualify_study(origins, source, state.get('study_raw'))
+            new_key = LogParser.repoint_study_key(origins, source, state.get('study_raw'))
             if new_key and new_key != state.get('study'):
                 state['study'] = new_key
                 item.setData(Qt.ItemDataRole.UserRole, state)
@@ -568,11 +575,13 @@ class TrjPlotPanel(QWidget):
     def _drop_rows_of_unloaded_paths(self, paths):
         """Removes the rows of paths whose chip is gone, then rebuilds the survivors.
 
-        The rebuild is the point: every per-row cell widget captures its row index in
-        its signal handlers, so a bare removeRow() would leave each row below it wired
-        to the wrong index.
+        The rebuild only runs when at least one row was actually dropped -
+        otherwise the in-place re-pointing above is the whole update. The
+        rebuild itself cannot be avoided: every per-row cell widget captures
+        its row index in its signal handlers (the sync_row_visuals(row)
+        lambdas wired in _populate_row_data), so a bare removeRow() would
+        leave each row below it wired to the wrong index.
         """
-        loaded = {LogParser.path_key(p) for p in paths}
         survivors, dropped = [], 0
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
@@ -585,7 +594,7 @@ class TrjPlotPanel(QWidget):
                     continue
                 survivors.append(self._extract_row_data(row))
                 continue
-            if source is None or LogParser.path_key(source) in loaded:
+            if LogParser.path_is_loaded(source, paths):
                 survivors.append(self._extract_row_data(row))
             else:
                 dropped += 1
@@ -1641,7 +1650,7 @@ class TrjPlotPanel(QWidget):
         
         # Robustness check: Do not save if the state is empty/default
         if not self._is_session_valid():
-             print(f"[System] Save aborted: Session contains no valid data.")
+             logger.info("[System] Save aborted: Session contains no valid data.")
              return False
         
         paths = self.main_window.get_project_paths()
@@ -1673,12 +1682,12 @@ class TrjPlotPanel(QWidget):
         try:
             success = SettingsManager.save_state(path, session_data)
             if success:
-                print(f"[System] Saved session: {path} for mode Trajectory Plot")
+                logger.info("[System] Saved session: %s for mode Trajectory Plot", path)
             else:
-                print(f"[System] Failed to save session: {path}")
+                logger.warning("[System] Failed to save session: %s", path)
             return success
         except Exception as e:
-            print(f"[System] Error saving session: {e}")
+            logger.warning("[System] Error saving session: %s", e)
             return False
 
     def save_session(self):
@@ -1700,6 +1709,7 @@ class TrjPlotPanel(QWidget):
             
         data = SettingsManager.load_state(path)
         if not data:
+            logger.warning("Failed to load trj plot mode session file: %s", path)
             QMessageBox.critical(self, "Error", "Failed to load trj plot mode session file.")
             return
         
@@ -1734,12 +1744,13 @@ class TrjPlotPanel(QWidget):
                 return
             else:
                  # Unknown Type -> Error only
+                logger.warning("Invalid session file '%s' with unknown type: '%s'", path, file_type)
                 QMessageBox.warning(self.main_window, "Invalid Session File", 
                                     f"The file has an unknown or invalid type: '{file_type}'.\n"
                                     "Cannot load this session.")
                 return
 
-        print(f"[System] Loading session: {path} for mode Trajectory Plot")
+        logger.info("[System] Loading session: %s for mode Trajectory Plot", path)
 
         # --- Load Logic ---
         self.global_label_map = data.get('global_label_map', {})
@@ -1777,7 +1788,7 @@ class TrjPlotPanel(QWidget):
                 # If relocated and project was found, auto-update the session file
                 if relocated and self.data_manager.parsers:
                     if self.save_session_to_file(path):
-                        print(f"[System] Relocation successful. Session file updated: {path}")
+                        logger.info("[System] Relocation successful. Session file updated: %s", path)
             
             self.plot_table.setRowCount(0)
             for entry in data.get('rows', []):

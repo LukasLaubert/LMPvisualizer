@@ -7,6 +7,10 @@ import time
 from PyQt6.QtCore import QTimer, QObject, pyqtSignal
 from PyQt6.QtGui import QColor, QBrush
 from trj_data_manager import TrjDataManager
+import plot_model
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 class TrjController(QObject):
     """
@@ -598,8 +602,8 @@ class TrjController(QObject):
             x_data = self.scatter.data['x']
             y_data = self.scatter.data['y']
             if len(x_data) == 0: return
-            
-            colors = []
+
+            qcolors = []
             for b in self.last_render_brushes:
                 # Handle both QBrush and QColor objects safely
                 if hasattr(b, 'color'):
@@ -608,33 +612,39 @@ class TrjController(QObject):
                     c = b
                 else:
                     c = QColor(0, 0, 0)
-                colors.append((c.redF(), c.greenF(), c.blueF(), c.alphaF()))
-            
+                qcolors.append(c)
+
             size = self.view_config.get('size', 5)
-            
+
             # Get symbol and translate to marker
             pg_symbol = self.view_config.get('symbol', 'o')
             mpl_marker = self._get_mpl_marker(pg_symbol)
-            
-            ax.scatter(x_data, y_data, c=colors, s=size**2, 
-                       marker=mpl_marker, edgecolors='none')
-            
+
+            # Consume the single shared series model, then render it.
+            series = plot_model.make_series(
+                'trj_scatter', 'Trajectory Data',
+                np.asarray(x_data), np.asarray(y_data), None,
+                color=QColor('black'), marker=mpl_marker,
+                size=size, mode='scatter', colors=qcolors,
+            )
+            plot_model.render_series(ax, series, show_std=False)
+
             vb = self.plot_item.getViewBox()
             ax.set_xlim(vb.viewRange()[0])
             ax.set_ylim(vb.viewRange()[1])
-            
+
             x_lbl = self.view_config.get('x_label', self.view_config.get('x_col', ''))
             y_lbl = self.view_config.get('y_label', self.view_config.get('y_col', ''))
-            ax.set_xlabel(x_lbl)
-            ax.set_ylabel(y_lbl)
-            # Ticks inside the frame, matching the Pop Out window
-            ax.tick_params(axis='both', which='both', direction='in')
+            # Shared tick-direction-in + grid styling (export uses the
+            # live-scene alpha so popout/export converge on ticks).
+            plot_model.apply_axis_style(ax, xlabel=x_lbl, ylabel=y_lbl,
+                                        grid=True, grid_alpha=0.3)
 
             fig.savefig(filename, dpi=300, bbox_inches='tight')
             plt.close(fig)
-            print(f"Exported to {filename}")
+            logger.info("Exported to %s", filename)
         except Exception as e:
-            print(f"Export Error: {e}")
+            logger.warning("Export Error: %s", e)
 
     def _export_text_data(self, filename: str):
         """Exports the active trajectory data to CSV or TSV (X and Y only)."""
@@ -666,22 +676,40 @@ class TrjController(QObject):
                 for _, row in self.active_df[[x_col, y_col]].iterrows():
                     writer.writerow([str(val) for val in row.values])
         except Exception as e:
-            print(f"Export Error: {e}")
+            logger.warning("Export Error: %s", e)
 
     def get_current_plot_state(self):
         if not self.scatter.isVisible() or len(self.scatter.data) == 0:
             return {}
         colors_list = []
         for b in self.last_render_brushes:
-            colors_list.append(b.color())
-            
+            try:
+                if hasattr(b, 'color'):
+                    c = b.color() if callable(b.color) else b.color
+                    c = c() if callable(c) else c
+                elif hasattr(b, 'getRgbF'):
+                    c = b
+                else:
+                    c = QColor('black')
+            except Exception:
+                c = QColor('black')
+            colors_list.append(c)
+
         x_lbl = self.view_config.get('x_label', self.view_config.get('x_col', ''))
         y_lbl = self.view_config.get('y_label', self.view_config.get('y_col', ''))
-        
+
         # Translate symbol
         pg_symbol = self.view_config.get('symbol', 'o')
         mpl_marker = self._get_mpl_marker(pg_symbol)
-            
+
+        # Same dict shape as before, values sourced from the single builder.
+        series = plot_model.make_series(
+            'trj_scatter', 'Trajectory Data',
+            self.scatter.data['x'], self.scatter.data['y'], None,
+            color=QColor('black'), marker=mpl_marker,
+            size=self.view_config.get('size', 5),
+            mode='scatter', colors=colors_list,
+        )
         state = {
             'title': f"{self.current_study} | {self.current_system}",
             'x_label': x_lbl,
@@ -690,18 +718,7 @@ class TrjController(QObject):
                 'primary': {
                     'label': y_lbl,
                     'y_limits': self.plot_item.getViewBox().viewRange()[1],
-                    'series': [{
-                        'id': 'trj_scatter',
-                        'name': 'Trajectory Data',
-                        'mode': 'scatter',
-                        'x': self.scatter.data['x'],
-                        'y': self.scatter.data['y'],
-                        'colors': colors_list,
-                        'size': self.view_config.get('size', 5),
-                        'marker': mpl_marker, # Pass translated marker
-                        'std': None,
-                        'color': QColor('black')
-                    }]
+                    'series': [series]
                 }
             }
         }
@@ -709,20 +726,4 @@ class TrjController(QObject):
 
     def _get_mpl_marker(self, pg_symbol):
         """Maps PyQtGraph symbols to Matplotlib marker strings."""
-        # PyQtGraph symbols: o, s, t, t1, t2, t3, d, +, x, p, h, star
-        # 't' is usually triangle down (v) in pg, 't1' is up (^)
-        mapping = {
-            'o': 'o', 
-            's': 's', 
-            't': 'v',  # Triangle Down
-            't1': '^', # Triangle Up
-            't2': '>', # Triangle Right
-            't3': '<', # Triangle Left
-            'd': 'D',  # Diamond (Standard)
-            '+': '+', 
-            'x': 'x',
-            'p': 'p',  # Pentagon
-            'h': 'h',  # Hexagon
-            'star': '*'
-        }
-        return mapping.get(pg_symbol, 'o')
+        return plot_model.pg_symbol_to_mpl(pg_symbol)

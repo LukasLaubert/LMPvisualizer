@@ -6,6 +6,9 @@ import pandas as pd
 from pathlib import Path
 import ast
 from typing import Dict, Optional, Tuple, List, Set
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 def split_indexed_token(token: str, known_names) -> Tuple[str, Optional[str]]:
@@ -163,7 +166,7 @@ class LogDataManager:
                     index = evaluate_index_expression(index_expr, len(series))
                     series = series.iloc[index - 1]
                 except Exception as e:
-                    print(f"Error indexing token '{{{token}}}': {e}")
+                    logger.warning("Error indexing token '{%s}': %s", token, e)
                     return None
             local_env[token] = series
 
@@ -203,7 +206,7 @@ class LogDataManager:
                 return pd.Series([float(result)] * len(df), index=df.index)
             return result
         except Exception as e:
-            print(f"Error evaluating formula '{formula}': {e}")
+            logger.warning("Error evaluating formula '%s': %s", formula, e)
             return None
 
     def _get_series(self, df: pd.DataFrame, col_name: str, ignore_custom: bool = False) -> Optional[pd.Series]:
@@ -219,7 +222,7 @@ class LogDataManager:
                 index = evaluate_index_expression(index_expr, len(series))
                 return series.iloc[index - 1]
             except Exception as e:
-                print(f"Error indexing token '{{{col_name}}}': {e}")
+                logger.warning("Error indexing token '{%s}': %s", col_name, e)
                 return None
 
         if not ignore_custom and col_name in self.custom_properties:

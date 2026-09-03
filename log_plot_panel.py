@@ -26,6 +26,9 @@ from custom_property_dialog import CustomPropertyDialog
 from popout_window import PopOutWindow
 from fit_dialog import FitFunctionDialog
 from header_selection_dialog import HeaderSelectionDialog
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 def _system_pattern_tokenize(name: str):
@@ -474,7 +477,7 @@ class LogPlotPanel(QWidget):
                     if src_fit_id in self.fit_dialogs:
                         clone_data['dialog_state'] = self.fit_dialogs[src_fit_id].get_state()
         except Exception as e:
-            print(f"Clone extraction failed: {e}")
+            logger.warning("Clone extraction failed: %s", e)
 
         return clone_data
 
@@ -1142,6 +1145,7 @@ class LogPlotPanel(QWidget):
                 # Revert to previous value from table
                 self._revert_combo_selection(triggering_combo)
         except Exception as e:
+            logger.warning("An error occurred in the Custom Property Dialog: %s", e)
             QMessageBox.critical(self, "Error", f"An error occurred in the Custom Property Dialog:\n{e}")
             triggering_combo.setCurrentIndex(0)
         finally:
@@ -1576,10 +1580,14 @@ class LogPlotPanel(QWidget):
     def _resync_rows_to_paths(self, paths):
         """Re-points rows at the current study keys and drops orphaned ones.
 
-        Study keys gain or lose their path prefix as chips come and go, so a row's
-        stable identity is the (source path, raw study folder) pair kept in UserRole+2.
-        Rows whose path chip is gone are removed; everything else is re-pointed.
-        Virtual wildcard studies (containing *) are kept as-is if they still exist.
+        Stable identity is the (canonical source path, raw study folder) pair
+        kept in UserRole+2 - the stored study key is not stable, it gains or
+        loses its path prefix as chips come and go. Rows are updated in place
+        here (UserRole data plus display text); only rows whose chip is gone
+        are removed, and only then, by _drop_rows_of_unloaded_paths below.
+        Single-path rows without a stored origin adopt the origin of their
+        study key, so old sessions load unchanged. Virtual wildcard studies
+        (containing *) are kept as-is if they still exist.
         """
         origins = getattr(self, 'study_origins', None) or {}
 
@@ -1606,7 +1614,7 @@ class LogPlotPanel(QWidget):
                     item.setData(Qt.ItemDataRole.UserRole + 2, found)
                 continue
 
-            new_key = LogParser.qualify_study(origins, origin['path'], origin['study'])
+            new_key = LogParser.repoint_study_key(origins, origin['path'], origin['study'])
             if new_key and new_key != study:
                 item.setData(Qt.ItemDataRole.UserRole,
                              self._build_plot_name(new_key, system, x_axis, y_axis))
@@ -1617,11 +1625,13 @@ class LogPlotPanel(QWidget):
     def _drop_rows_of_unloaded_paths(self, paths):
         """Removes the rows of paths whose chip is gone, then rebuilds the survivors.
 
-        The rebuild is the point: every per-row cell widget captures its row index in
-        its signal handlers, so a bare removeRow() would leave each row below it wired
-        to the wrong index.
+        The rebuild only runs when at least one row was actually dropped -
+        otherwise the in-place re-pointing above is the whole update. The
+        rebuild itself cannot be avoided: every per-row cell widget captures
+        its row index in its signal handlers (the _handle_table_widget_change
+        lambdas wired in _populate_row_data), so a bare removeRow() would
+        leave each row below it wired to the wrong index.
         """
-        loaded = {LogParser.path_key(p) for p in paths}
         survivors, dropped_ids = [], []
         for row in range(self.plot_table.rowCount()):
             item = self.plot_table.item(row, 1)
@@ -1637,7 +1647,7 @@ class LogPlotPanel(QWidget):
                     continue
                 survivors.append(self._extract_row_data(row))
                 continue
-            if source is None or LogParser.path_key(source) in loaded:
+            if LogParser.path_is_loaded(source, paths):
                 survivors.append(self._extract_row_data(row))
             else:
                 dropped_ids.append(item.data(Qt.ItemDataRole.UserRole + 1))
@@ -2509,6 +2519,7 @@ class LogPlotPanel(QWidget):
         self.main_window.chip_input.update_chip_styles(successful_keywords)
 
         if warnings:
+            logger.warning("Data loading warnings: %s", "; ".join(warnings))
             QMessageBox.warning(self, "Data Loading Warning", "\n".join(warnings))
             
         self.main_window.studies_label.setText(f"Studies: {len(self.data_manager.get_study_names())}")
@@ -2663,6 +2674,7 @@ class LogPlotPanel(QWidget):
                 if self.data_manager.get_study_names() or self.data_manager.get_all_system_names():
                     self.add_new_plot_row()
                 else:
+                    logger.warning("Project loaded, but no valid study or system data was found.")
                     QMessageBox.warning(self, "No Data", "Project loaded, but no valid study or system data was found.")
 
         else:
@@ -3451,7 +3463,7 @@ class LogPlotPanel(QWidget):
                 except (ValueError, AttributeError, IndexError):
                     continue
                 except Exception as e:
-                    print(f"Fit Plotting Error row {r}: {e}")
+                    logger.warning("Fit Plotting Error row %s: %s", r, e)
                     continue
 
         # --- Finalize View ---
@@ -3683,7 +3695,7 @@ class LogPlotPanel(QWidget):
                 try:
                     return savgol_filter(data_np, window_length=window_len, polyorder=polyorder)
                 except Exception as e:
-                    print(f"Savgol failed: {e}")
+                    logger.warning("Savgol failed: %s", e)
                     return data_np
             else:
                 return series.rolling(window=window_size, center=True, min_periods=1).std().bfill().ffill().to_numpy()
@@ -3699,7 +3711,7 @@ class LogPlotPanel(QWidget):
                     spline = UnivariateSpline(np.arange(len(data_np)), data_np, s=s_val)
                     return spline(np.arange(len(data_np)))
                 except Exception as e:
-                    print(f"BSpline failed: {e}")
+                    logger.warning("BSpline failed: %s", e)
                     return data_np
             else:
                 return series.rolling(window=window_size, center=True, min_periods=1).std().bfill().ffill().to_numpy()
@@ -3793,7 +3805,7 @@ class LogPlotPanel(QWidget):
             try:
                 y_smooth = self._calculate_running_average(y_np, mean_window, 'mean')
             except Exception as e:
-                print(f"Smooth-before-avg y failed: {e}")
+                logger.warning("Smooth-before-avg y failed: %s", e)
                 continue
 
             # Slice x / index to match y_smooth length (valid_window shortens)
@@ -3833,7 +3845,7 @@ class LogPlotPanel(QWidget):
                 try:
                     std_np = self._calculate_running_average(y_np, mean_window, 'std')
                 except Exception as e:
-                    print(f"Smooth-before-avg std failed: {e}")
+                    logger.warning("Smooth-before-avg std failed: %s", e)
                     continue
                 # Align std length to y_smooth length
                 # For methods where std keeps full length while y_smooth is truncated (valid_window),
@@ -3872,7 +3884,7 @@ class LogPlotPanel(QWidget):
             y_df = pd.concat(y_list, axis=1, join='inner')
             x_df = pd.concat(x_list, axis=1, join='inner')
         except Exception as e:
-            print(f"Smooth-before-avg concat failed: {e}")
+            logger.warning("Smooth-before-avg concat failed: %s", e)
             return None
 
         if y_df.empty or x_df.empty:
@@ -3917,7 +3929,7 @@ class LogPlotPanel(QWidget):
                 avg_std = avg_std.fillna(0)
                 result['running_std'] = avg_std.to_numpy(dtype=float) if hasattr(avg_std, 'to_numpy') else np.array(avg_std, dtype=float)
             except Exception as e:
-                print(f"Smooth-before-avg avg std failed: {e}")
+                logger.warning("Smooth-before-avg avg std failed: %s", e)
                 result['running_std'] = None
         else:
             result['running_std'] = None
@@ -4362,18 +4374,18 @@ class LogPlotPanel(QWidget):
         """Saves session to a specific file path."""
         # Validate before saving to prevent overwriting good data with an empty state
         if not self._is_session_valid():
-            print(f"[System] Save aborted: Session contains no valid data.")
+            logger.info("[System] Save aborted: Session contains no valid data.")
             return False
 
         try:
             success = SettingsManager.save_state(path, self._get_current_state_dict())
             if success:
-                print(f"[System] Saved session: {path} for mode Log Plot")
+                logger.info("[System] Saved session: %s for mode Log Plot", path)
             else:
-                print(f"[System] Failed to save session: {path}")
+                logger.warning("[System] Failed to save session: %s", path)
             return success
         except Exception as e:
-            print(f"[System] Error saving session: {e}")
+            logger.warning("[System] Error saving session: %s", e)
             return False
 
     def _save_state_on_exit(self):
@@ -4391,6 +4403,7 @@ class LogPlotPanel(QWidget):
         if self.save_session_to_file(path):
             QMessageBox.information(self, "Success", "Session saved successfully.")
         else:
+            logger.warning("[System] Failed to save session: %s", path)
             QMessageBox.critical(self, "Error", "Failed to save session.")
             
     def load_state_on_startup(self):
@@ -4413,6 +4426,7 @@ class LogPlotPanel(QWidget):
 
         data = SettingsManager.load_state(path)
         if not data:
+            logger.warning("Failed to load log plot mode session file: %s", path)
             QMessageBox.critical(self, "Error", "Failed to load log plot mode session file.")
             return
 
@@ -4448,12 +4462,13 @@ class LogPlotPanel(QWidget):
                 return
             else:
                  # Unknown Type -> Error only
+                logger.warning("Invalid session file '%s' with unknown type: '%s'", path, file_type)
                 QMessageBox.warning(self.main_window, "Invalid Session File", 
                                     f"The file has an unknown or invalid type: '{file_type}'.\n"
                                     "Cannot load this session.")
                 return
 
-        print(f"[System] Loading session: {path} for mode Log Plot")
+        logger.info("[System] Loading session: %s for mode Log Plot", path)
 
 
         # --- Load Logic ---
@@ -4502,7 +4517,7 @@ class LogPlotPanel(QWidget):
                 # If relocated and project was found, auto-update the session file
                 if relocated and self.data_manager.data:
                     if self.save_session_to_file(path):
-                        print(f"[System] Relocation successful. Session file updated: {path}")
+                        logger.info("[System] Relocation successful. Session file updated: %s", path)
 
             # Restore Settings
             self.running_mean_setting = data.get('running_mean_setting', 'symmetric_window')
@@ -4669,6 +4684,7 @@ class LogPlotPanel(QWidget):
         try:
             import matplotlib
         except ImportError:
+            logger.warning("Matplotlib is required for the Pop Out feature.")
             QMessageBox.critical(self, "Error", "Matplotlib is required for the Pop Out feature.\nPlease install it via pip: pip install matplotlib")
             return
 

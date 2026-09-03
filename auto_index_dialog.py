@@ -12,6 +12,9 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QListWidget,
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QKeyEvent
 from trajectory_parser import TrajectoryParser
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 class BulkToggleListWidget(QListWidget):
     """Specialized list that forces Space/Enter to toggle ALL selected items."""
@@ -261,6 +264,7 @@ class AutoIndexDialog(QDialog):
                 tasks.append({'filepath': item.data(Qt.ItemDataRole.UserRole), 'mode': mode, 'dsd_config': self.dsd_config})
         
         if not tasks:
+            logger.warning("Auto preload started with no systems selected.")
             QMessageBox.warning(self, "No selection", "Please check at least one system.")
             return
             
@@ -322,6 +326,7 @@ class AutoIndexDialog(QDialog):
     @pyqtSlot(int, int)
     def _on_finished(self, success, failed):
         self.status_label.setText(f"Finished: {success} success, {failed} failed.")
+        logger.info("Preload finished: %s success, %s failed.", success, failed)
         self._set_ui_locked(False)
         self.btn_cancel.setText("Close")
         self.btn_cancel.clicked.disconnect()

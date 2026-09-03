@@ -7,12 +7,21 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 class TrajectoryParser:
     """
     High-performance parser for LAMMPS trajectory files (.lammpstrj).
     Implements Lazy Loading and Persistent Indexing.
     """
+
+    # Bump when the .idx schema or the DSD results_library hash meaning changes;
+    # older sidecars are discarded via the version check in _load_index.
+    # v2: centralized DSD hash identity (dsd_data_manager helpers) — domain +
+    # reference fields unified across persistent hash and controller cache key.
+    IDX_VERSION = 2
 
     def __init__(self, filepath: Path):
         self.filepath = Path(filepath)
@@ -45,7 +54,7 @@ class TrajectoryParser:
                 with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
                     self._parse_header_from_mmap(mm)
         except Exception as e:
-            print(f"Error reading metadata for {self.filepath}: {e}")
+            logger.warning("Error reading metadata for %s: %s", self.filepath, e)
 
     def _ensure_index(self):
         """Lazy loader: Builds the full index if not already done."""
@@ -102,7 +111,7 @@ class TrajectoryParser:
             self.is_indexed = True
             self._save_index(idx_path)
         except Exception as e:
-            print(f"Error indexing trajectory file {self.filepath}: {e}")
+            logger.warning("Error indexing trajectory file %s: %s", self.filepath, e)
 
     def _load_index(self, idx_path: Path) -> bool:
         if not idx_path.exists(): return False
@@ -111,7 +120,7 @@ class TrajectoryParser:
             if os.path.getmtime(self.filepath) > os.path.getmtime(idx_path): return False
             with open(idx_path, 'r') as f:
                 data = json.load(f)
-            if data.get('version') != 1: return False
+            if data.get('version') != self.IDX_VERSION: return False
             self.columns = data.get('columns', [])
             self.global_box_bounds = data.get('global_box_bounds')
             self.header_found = bool(self.columns)
@@ -123,7 +132,7 @@ class TrajectoryParser:
             self.metadata_cache = data.get('metadata_cache', {})
             return True
         except Exception as e:
-            print(f"Failed to load index {idx_path}: {e}")
+            logger.warning("Failed to load index %s: %s", idx_path, e)
             return False
 
     def _save_index(self, idx_path: Path):
@@ -131,7 +140,7 @@ class TrajectoryParser:
             import json
             with open(idx_path, 'w') as f:
                 f.write('{\n')
-                f.write(f'  "version": 1,\n')
+                f.write(f'  "version": {self.IDX_VERSION},\n')
                 f.write(f'  "file_size": {os.path.getsize(self.filepath)},\n')
                 f.write(f'  "columns": {json.dumps(self.columns)},\n')
                 f.write(f'  "global_box_bounds": {json.dumps(self.global_box_bounds)},\n')
@@ -140,7 +149,7 @@ class TrajectoryParser:
                 f.write(f'  "index": {json.dumps(self.index_map)}\n')
                 f.write('}')
         except Exception as e:
-            print(f"Failed to save index {idx_path}: {e}")
+            logger.warning("Failed to save index %s: %s", idx_path, e)
 
     def store_library_entry(self, result_hash: str, result_data: dict, label: str = None):
         from datetime import datetime
@@ -197,7 +206,7 @@ class TrajectoryParser:
                 df = pd.read_csv(f, sep=r'\s+', names=self.columns, nrows=num_atoms, engine='c', header=None, index_col=False)
                 return df, box_bounds
         except Exception as e:
-            print(f"Error reading frame {timestep}: {e}")
+            logger.warning("Error reading frame %s in %s: %s", timestep, self.filepath, e)
             return None, []
 
     def get_global_min_max(self, column: str) -> Tuple[float, float]:

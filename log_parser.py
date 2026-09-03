@@ -6,6 +6,9 @@ import pandas as pd
 from pathlib import Path
 from io import StringIO
 from typing import Dict, List, Tuple, Optional
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 class LogParser:
     """Parses LAMMPS project structures and log files."""
@@ -245,7 +248,7 @@ class LogParser:
                 if k not in file_map:
                     file_map[k] = v
         except Exception as e:
-            print(f"[System] Virtual study grouping failed: {e}")
+            logger.warning("[System] Virtual study grouping failed: %s", e)
 
         return studies, warnings, file_map, origins
 
@@ -362,6 +365,44 @@ class LogParser:
             if origin.get('study') == study and LogParser.same_path(origin.get('path'), path):
                 return key
         return None
+
+    # --- Stable row identity ---------------------------------------------------
+    #
+    # A table row is keyed by what it shows (study key, system, display name) and
+    # by where it sits (row index) - neither survives a reload: study keys gain
+    # or lose their STUDY_SEP prefix as chips come and go, and row indices shift
+    # on every insert/remove. The stable identity of a row is therefore the
+    # (canonical source path, raw study folder, system/effective display) triple:
+    # the source path names the chip the row came from, the raw study folder is
+    # the name discovery reported before qualification, and the system/display
+    # travels inside the row's own state. Rows are re-pointed at the current
+    # study keys via origins on every load; only rows whose chip is gone are
+    # dropped. Virtual wildcard studies ("*") and the synthetic "average" /
+    # "average & std" systems have no single origin and are matched by key.
+
+    @staticmethod
+    def stable_row_identity(source_path: str, study_raw: str) -> dict:
+        """Canonical (source path, raw study) pair stored on every table row."""
+        return {'path': LogParser.canonical_path(source_path), 'study': study_raw or ''}
+
+    @staticmethod
+    def repoint_study_key(origins: Dict[str, dict], source_path: str, study_raw: str):
+        """Current study key for a stored row identity, or None if it is gone."""
+        if source_path is None or study_raw is None:
+            return None
+        return LogParser.qualify_study(
+            origins, LogParser.canonical_path(source_path), study_raw)
+
+    @staticmethod
+    def path_is_loaded(source_path: str, paths) -> bool:
+        """True when a row's source path still has its chip loaded.
+
+        Rows without a stored path (legacy single-path sessions) count as
+        loaded; they adopt the origin of their study key during re-pointing.
+        """
+        if source_path is None:
+            return True
+        return any(LogParser.same_path(source_path, p) for p in (paths or []))
 
     @staticmethod
     def peek_columns(logfile_path: Path) -> List[str]:

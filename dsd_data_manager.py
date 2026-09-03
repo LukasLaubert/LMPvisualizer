@@ -3,10 +3,154 @@
 import numpy as np
 import pandas as pd
 import hashlib
+import json
 from io import StringIO
 from typing import Dict, List, Tuple, Optional, Set
 from pathlib import Path
 from trajectory_parser import TrajectoryParser
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
+
+
+# --- Centralized DSD result identity (single source of truth) ---
+#
+# The persistent `.idx` results_library hash (get_domain_hash) and the
+# controller's RAM `_strain_cache_key` (build_strain_cache_key) — plus the
+# data-manager's own `strain_evolution_cache` mem id — must cover exactly the
+# same result-affecting fields. Visual-only props
+# (color, style/strain_style, size/strain_size, show/strain_show, active,
+# is_optimal_line and other underscore-private helpers) are allow-listed OUT
+# and never affect the identity.
+
+_DSD_UNSET = object()
+
+
+def _dsd_canon_z_col(value):
+    if value is None:
+        return None
+    if isinstance(value, str) and (value == "No Z-Filter" or value == ""):
+        return None
+    return value
+
+
+def canonicalize_dsd_domain(domain):
+    """Canonical domain part of the DSD result identity (visuals excluded)."""
+    d = domain or {}
+    number_boxes = d.get('number_boxes', d.get('num_boxes', 10))
+    box_arrangement = d.get('box_arrangement', d.get('arrangement', 'inside'))
+    overlap = d.get('overlap_percentage', d.get('overlap', 0.0))
+    try:
+        splits = sorted(float(s) for s in (d.get('splits') or []))
+    except Exception:
+        splits = list(d.get('splits') or [])
+    act = d.get('active_segments', [])
+    try:
+        active_segments = [bool(x) for x in act] if act else []
+    except Exception:
+        active_segments = list(act) if act else []
+    try:
+        atom_types = sorted(d.get('atom_types', []) or [])
+    except Exception:
+        try:
+            atom_types = list(d.get('atom_types', []) or [])
+        except Exception:
+            atom_types = []
+    be = d.get('box_edges')
+    if isinstance(be, (list, tuple)) and len(be) == 2:
+        def _c(v):
+            return None if v is None else float(v)
+        try:
+            box_edges = [_c(be[0]), _c(be[1])]
+        except Exception:
+            box_edges = [be[0], be[1]]
+    elif be is None:
+        box_edges = None
+    else:
+        try:
+            f = float(be)
+            box_edges = None if f == float('inf') else f
+        except Exception:
+            box_edges = be
+    return {
+        'name': d.get('name'),
+        'splits': splits,
+        'active_segments': active_segments,
+        'atom_types': atom_types,
+        'box_edges': box_edges,
+        'pbc': bool(d.get('pbc', False)),
+        'weighted': bool(d.get('weighted', False)),
+        'bary_mid_twoside_weight': bool(d.get('bary_mid_twoside_weight', False)),
+        'box_arrangement': box_arrangement,
+        'number_boxes': number_boxes,
+        'overlap_percentage': overlap,
+        'weighting_shape': d.get('weighting_shape', 1.0),
+        'fit_outer_box': bool(d.get('fit_outer_box', False)),
+    }
+
+
+def canonicalize_dsd_reference(slice_axis, observe_axis, options, z_ranges=_DSD_UNSET, timesteps=None):
+    """Canonical reference-context part of the DSD result identity."""
+    opts = options or {}
+    if z_ranges is _DSD_UNSET:
+        z_ranges = opts.get('z_ranges')
+    def _ax(a):
+        return a.lower() if isinstance(a, str) else a
+    z_col = _dsd_canon_z_col(opts.get('z_filter_col'))
+    z_ref = opts.get('z_filter_ref')
+    if z_col is None:
+        z_ref = None
+        z_ranges_c = None
+    else:
+        if z_ranges:
+            try:
+                z_ranges_c = sorted([[float(lo), float(hi)] for (lo, hi) in z_ranges])
+            except Exception:
+                try:
+                    z_ranges_c = sorted(list(z_ranges))
+                except Exception:
+                    z_ranges_c = list(z_ranges)
+        else:
+            z_ranges_c = None
+    try:
+        initial_step = timesteps[0] if timesteps else None
+    except Exception:
+        initial_step = None
+    try:
+        initial_step = int(initial_step) if initial_step is not None else None
+    except Exception:
+        pass
+    disp_std = opts.get('disp_std', True)
+    strain_std = opts.get('strain_std', False)
+    total_count = opts.get('total_count', False)
+    weighted_count = opts.get('weighted_count', False)
+    return {
+        'slice_axis': _ax(slice_axis),
+        'observe_axis': _ax(observe_axis),
+        'z_filter_col': z_col,
+        'z_filter_ref': z_ref,
+        'z_ranges': z_ranges_c,
+        'initial_step': initial_step,
+        'disp_std': bool(disp_std) if disp_std is not None else None,
+        'strain_std': bool(strain_std) if strain_std is not None else None,
+        'total_count': bool(total_count) if total_count is not None else None,
+        'weighted_count': bool(weighted_count) if weighted_count is not None else None,
+    }
+
+
+def build_dsd_result_identity(domain, timesteps, slice_axis, observe_axis, options=None, z_ranges=_DSD_UNSET):
+    """Build the canonical identity dict shared by hash and cache key."""
+    return {
+        'domain': canonicalize_dsd_domain(domain),
+        'reference': canonicalize_dsd_reference(slice_axis, observe_axis, options, z_ranges, timesteps),
+    }
+
+
+def hash_dsd_result_identity(identity):
+    """Hash a canonical identity dict (deterministic, JSON-sorted)."""
+    id_json = json.dumps(identity, sort_keys=True, default=str)
+    return hashlib.sha256(id_json.encode()).hexdigest()
+
 
 class DSDDataManager:
     def __init__(self):
@@ -18,29 +162,33 @@ class DSDDataManager:
         self.slicing_results = {} 
         self.strain_evolution_cache = {} # Key: (Study, System, DomainIdentity) -> {strains, stds}
 
-    def get_domain_hash(self, v_domain, timesteps, slice_axis, observe_axis, options):
-        """Generates a unique persistent hash for a domain definition and its reference context."""
-        import json
-        
-        identity = {
-            'box_edges': v_domain.get('box_edges'),
-            'atom_types': sorted(v_domain.get('atom_types', [])),
-            'pbc': v_domain.get('pbc', False),
-            'weighted': v_domain.get('weighted', False),
-            'bary_mid': v_domain.get('bary_mid_twoside_weight', False),
-            'number_boxes': v_domain.get('number_boxes'),
-            'box_arrangement': v_domain.get('box_arrangement'),
-            'overlap_percentage': v_domain.get('overlap_percentage'),
-            'slice': slice_axis,
-            'observe': observe_axis,
-            'z_col': options.get('z_filter_col'),
-            'z_ref': options.get('z_filter_ref'),
-            'z_ranges': sorted(options.get('z_ranges', [])) if options.get('z_ranges') else None,
-            'initial_step': timesteps[0] if timesteps else None 
-        }
-        
-        id_json = json.dumps(identity, sort_keys=True)
-        return hashlib.sha256(id_json.encode()).hexdigest()
+    def get_domain_hash(self, v_domain, timesteps, slice_axis, observe_axis, options, z_ranges=_DSD_UNSET):
+        """Persistent hash for a domain definition and its reference context.
+
+        Centralized: builds the canonical identity via build_dsd_result_identity
+        (same fields the controller cache key uses). Visual-only props
+        (color, style/size/show and strain_* variants) are excluded.
+        `z_ranges` may be passed explicitly (controller path) or left unset to
+        fall back to `options['z_ranges']` (legacy/data-manager path).
+        """
+        identity = build_dsd_result_identity(v_domain, timesteps, slice_axis, observe_axis, options, z_ranges)
+        return hash_dsd_result_identity(identity)
+
+    def build_strain_cache_key(self, domains, timesteps, slice_axis, observe_axis, options, z_ranges=_DSD_UNSET,
+                               study=None, system=None):
+        """RAM cache key covering exactly the same fields as the persistent hash.
+
+        Expands splits into virtual segments through get_required_hashes, so the
+        key is composed of the very hashes stored in the `.idx` library, plus
+        the location (study/system) and the full active range (the persistent
+        hash pins only the initial step; ts_map merging serves range subsets).
+        """
+        hashes = tuple(sorted(self.get_required_hashes(domains, timesteps, slice_axis, observe_axis, options, z_ranges)))
+        try:
+            range_tuple = tuple(timesteps) if timesteps else ()
+        except Exception:
+            range_tuple = ()
+        return (hashes, study, system, range_tuple)
 
     def load_project_data(self, studies: Dict[str, List[str]], root_path: Path, keywords: List[str], file_map: Dict[str, List[Path]] = None):
         """Discovers files but defers parser creation until needed (Lazy Loading)."""
@@ -168,7 +316,7 @@ class DSDDataManager:
                         continue
                     self.parsers[pat][sys] = fpath
         except Exception as e:
-            print(f"[System] DSD virtual grouping failed: {e}")
+            logger.warning("[System] DSD virtual grouping failed: %s", e)
 
         if not self.parsers:
              warnings.append("No valid trajectory files found.")
@@ -189,7 +337,7 @@ class DSDDataManager:
                 self.parsers[study][system] = parser
                 return parser
             except Exception as e:
-                print(f"Error initializing parser for {entry}: {e}")
+                logger.warning("Error initializing parser for %s: %s", entry, e)
                 return None
                 
         return entry
@@ -442,7 +590,7 @@ class DSDDataManager:
         self.slicing_results[cache_key] = final_df
         return final_df
 
-    def get_required_hashes(self, domains, timesteps, slice_axis, observe_axis, options) -> List[str]:
+    def get_required_hashes(self, domains, timesteps, slice_axis, observe_axis, options, z_ranges=_DSD_UNSET) -> List[str]:
         """Returns the list of all persistent hashes required for a full DSD preload."""
         if not timesteps: return []
         
@@ -455,7 +603,7 @@ class DSDDataManager:
             active_segments = domain.get('active_segments', [])
             
             if not splits:
-                hashes.append(self.get_domain_hash(domain, timesteps, slice_axis, observe_axis, options))
+                hashes.append(self.get_domain_hash(domain, timesteps, slice_axis, observe_axis, options, z_ranges))
             else:
                 sorted_splits = sorted(splits)
                 segments = [(None, sorted_splits[0])] + [(sorted_splits[i], sorted_splits[i+1]) for i in range(len(sorted_splits)-1)] + [(sorted_splits[-1], None)]
@@ -469,7 +617,7 @@ class DSDDataManager:
                     if act[i]:
                         d_seg = domain.copy()
                         d_seg['box_edges'] = (seg_min, seg_max)
-                        hashes.append(self.get_domain_hash(d_seg, timesteps, slice_axis, observe_axis, options))
+                        hashes.append(self.get_domain_hash(d_seg, timesteps, slice_axis, observe_axis, options, z_ranges))
         return hashes
 
     def calculate_strain_evolution_cached(self, domains, timesteps, study, system, slice_axis, observe_axis, options, parser_override=None):
@@ -501,12 +649,12 @@ class DSDDataManager:
         if df_init is None: return None
         any_domain_pbc = any(d.get('pbc', False) for d in domains if not d.get('is_optimal_line'))
 
-        def get_mem_id(v_domain):
-            return (study, system, slice_axis, observe_axis, tuple(v_domain.get('box_edges', (None, None))), tuple(sorted(v_domain.get('atom_types', []))), v_domain.get('pbc', False), v_domain.get('weighted', False), v_domain.get('bary_mid_twoside_weight', False), options.get('z_filter_col'), options.get('z_filter_ref'), tuple(sorted(options.get('z_ranges'))) if options.get('z_ranges') else None)
-
         final_domains_data, domain_tasks, initial_step = [], [], timesteps[0]
         for i, (v_domain, name) in enumerate(virtual_domains):
-            mem_id, p_hash = (get_mem_id(v_domain), initial_step), self.get_domain_hash(v_domain, timesteps, slice_axis, observe_axis, options)
+            # RAM id is pinned to the persistent hash so both layers cover
+            # exactly the same result-affecting fields (centralized identity).
+            p_hash = self.get_domain_hash(v_domain, timesteps, slice_axis, observe_axis, options)
+            mem_id = (study, system, p_hash)
             d_res = {
                 'name': name, 'strains': [np.nan]*len(timesteps), 'stds': [0.0]*len(timesteps),
                 'min_x': [np.nan]*len(timesteps), 'max_x': [np.nan]*len(timesteps), 

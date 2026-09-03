@@ -3,6 +3,10 @@ from PyQt6.QtGui import QColor
 from typing import Dict, Any
 import numpy as np
 import copy
+import plot_model
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 # Custom AxisItem that separates axis line color from grid/tick color
 class ColoredAxis(pg.AxisItem):
@@ -430,9 +434,7 @@ class LogController:
 
     @staticmethod
     def _oriented_range(values, inverted: bool):
-        if not values or len(values) != 2:
-            return values
-        return [values[1], values[0]] if inverted else values
+        return plot_model.oriented_limits(values, inverted)
 
     def _x_inverted(self) -> bool:
         return self._viewbox_axis_inverted(self.plot_item.getViewBox(), 'x')
@@ -444,41 +446,15 @@ class LogController:
 
     @staticmethod
     def _format_export_value(value):
-        if value is None:
-            return ''
-        try:
-            if np.isnan(value):
-                return ''
-        except TypeError:
-            pass
-        return str(value)
+        return plot_model.format_export_value(value)
 
     @staticmethod
     def _subset_positions(base_x, sub_x):
-        base = np.asarray(base_x, dtype=float)
-        sub = np.asarray(sub_x, dtype=float)
-        if len(sub) > len(base):
-            return None
-
-        positions = []
-        search_start = 0
-        for value in sub:
-            if search_start >= len(base):
-                return None
-            matches = np.where(np.isclose(base[search_start:], value, rtol=1e-9, atol=1e-12))[0]
-            if len(matches) == 0:
-                return None
-            pos = search_start + int(matches[0])
-            positions.append(pos)
-            search_start = pos + 1
-        return positions
+        return plot_model.subset_positions(base_x, sub_x)
 
     @staticmethod
     def _align_values(length, positions, values):
-        aligned = [None] * length
-        for pos, value in zip(positions, values):
-            aligned[pos] = value
-        return aligned
+        return plot_model.align_values(length, positions, values)
 
     def export_plot(self, filename: str, figsize=None):
         # Dispatch to text export if applicable
@@ -489,13 +465,14 @@ class LogController:
         try:
             import matplotlib.pyplot as plt
         except ImportError:
+            logger.warning("Matplotlib is required for exporting.")
             print("Matplotlib is required for exporting.")
             return
 
         plots_by_yaxis = {}
         # Track max priority per axis to sort axes later
         axis_max_priority = {}
-        
+
         for name, plot_info in self.plots.items():
             item = plot_info.get('item')
             if not item or not item.isVisible(): continue
@@ -503,110 +480,121 @@ class LogController:
             if not y_col: continue
             if y_col not in plots_by_yaxis: plots_by_yaxis[y_col] = []
             plots_by_yaxis[y_col].append((name, plot_info))
-            
+
             prio = plot_info.get('layer_priority', 0)
             if y_col not in axis_max_priority:
                 axis_max_priority[y_col] = prio
             else:
                 axis_max_priority[y_col] = max(axis_max_priority[y_col], prio)
-        
+
         # Sort plots within each axis by priority
         for y_col in plots_by_yaxis:
             plots_by_yaxis[y_col].sort(key=lambda x: x[1].get('layer_priority', 0))
 
         if not plots_by_yaxis: return
-        
+
         y_axis_order = [y_col for y_col in self.y_axes.keys() if y_col in plots_by_yaxis]
         # Sort axes so that higher priority ones are drawn later (on top)
         y_axis_order.sort(key=lambda y: axis_max_priority.get(y, 0))
-        
+
         if not y_axis_order: return
-        
+
         fig, ax_primary = plt.subplots(figsize=figsize if figsize else (10, 6))
-        
-        matplotlib_axes = {y_axis_order[0]: ax_primary}
-        ax_primary.spines['top'].set_visible(False)
-        ax_primary.spines['right'].set_visible(False)
-        
-        for i, y_col in enumerate(y_axis_order[1:], start=1):
-            ax_new = ax_primary.twinx()
-            ax_new.spines['top'].set_visible(False)
-            ax_new.spines['left'].set_visible(False)
-            if i > 1: ax_new.spines['right'].set_position(('outward', 60 * (i - 1)))
-            matplotlib_axes[y_col] = ax_new
-        
+
+        matplotlib_axes = plot_model.setup_multi_y_axes(ax_primary, y_axis_order)
+
         # Apply Limits, preserving PyQtGraph axis inversion.
         vb_main = self.plot_item.getViewBox()
-        ax_primary.set_xlim(self._oriented_range(vb_main.viewRange()[0], self._x_inverted()))
+        ax_primary.set_xlim(plot_model.oriented_limits(vb_main.viewRange()[0], self._x_inverted()))
 
         for y_col in y_axis_order:
             ax = matplotlib_axes[y_col]
             if y_col in self.y_axes:
                 vb = self.y_axes[y_col]['viewbox']
-                ax.set_ylim(self._oriented_range(vb.viewRange()[1], self._y_inverted(y_col)))
+                ax.set_ylim(plot_model.oriented_limits(vb.viewRange()[1], self._y_inverted(y_col)))
 
         # Plot Curves - legend = table row order, selected at bottom (most top plot last)
         legend_entries = []  # (is_selected, row, sub_prio, handle, label)
-        
+
         for y_col in y_axis_order:
             ax = matplotlib_axes[y_col]
             axis_color = self.y_axis_colors.get(y_col, QColor("black"))
-            mpl_axis_color = axis_color.getRgbF()[:3]
-            
-            ax.spines['left' if y_col == y_axis_order[0] else 'right'].set_edgecolor(mpl_axis_color)
-            ax.tick_params(axis='y', colors=mpl_axis_color, direction='in')
-            ax.yaxis.label.set_color(mpl_axis_color)
-            ax.set_ylabel(self.y_axis_labels.get(y_col, y_col))
-            
+            mpl_axis_color = plot_model.qcolor_to_rgb(axis_color, default=(0.0, 0.0, 0.0))
+
+            try:
+                ax.spines['left' if y_col == y_axis_order[0] else 'right'].set_edgecolor(mpl_axis_color)
+            except Exception:
+                pass
+            plot_model.apply_axis_style(
+                ax,
+                ylabel=self.y_axis_labels.get(y_col, y_col),
+                axis_color=mpl_axis_color,
+                grid=False,
+            )
+
             for name, plot_info in plots_by_yaxis[y_col]:
                 item = plot_info['item']
                 data = item.getData()
                 if not all(d is not None for d in data) or len(data[0]) == 0: continue
-                
-                pen = item.opts['pen']
-                color = pen.color().getRgbF()[:3]
-                width = pen.width()
-                linestyle = self._get_mpl_linestyle(pen.style())
-                
-                error_item = plot_info.get('error_item')
-                has_error_band = error_item is not None
-                
-                prio = plot_info.get('layer_priority', 0)
-                is_sel = 1 if prio >= 100 else 0
-                row = plot_info.get('row', 1_000_000)
-                sub_prio = prio % 100 if prio < 200 else 200
-                z_val = 2.0 + prio
 
-                if has_error_band:
-                    c1 = error_item.curves[0].getData()
-                    c2 = error_item.curves[1].getData()
-                    if all(d is not None for d in c1) and all(d is not None for d in c2):
-                        fill = ax.fill_between(c1[0], c1[1], c2[1], color=color, alpha=0.25, linewidth=0, label=name, zorder=z_val)
-                        legend_entries.append((is_sel, row, sub_prio, fill, name))
-                else:
-                    line, = ax.plot(data[0], data[1], color=color, label=name, linewidth=width, linestyle=linestyle, zorder=z_val)
-                    legend_entries.append((is_sel, row, sub_prio, line, name))
-        legend_entries.sort(key=lambda x: (x[0], x[1], x[2]))
-        all_handles = [h for _,_,_,h,_ in legend_entries]
-        all_labels = [l for _,_,_,_,l in legend_entries]
-        
-        ax_primary.set_xlabel(self.x_axis_label)
-        ax_primary.spines['bottom'].set_edgecolor('black')
-        ax_primary.tick_params(axis='x', colors='black', direction='in')
-        ax_primary.xaxis.label.set_color('black')
-        ax_primary.grid(True, alpha=0.3)
-        
+                pen = item.opts['pen']
+                color = plot_model.qcolor_to_rgba(pen.color())
+                width = pen.width()
+                linestyle = plot_model.qt_pen_style_to_mpl(pen.style())
+
+                error_item = plot_info.get('error_item')
+                std = None
+                if error_item is not None:
+                    try:
+                        c1 = error_item.curves[0].getData()
+                        c2 = error_item.curves[1].getData()
+                        if all(d is not None for d in c1) and all(d is not None for d in c2):
+                            std = np.abs(np.asarray(c2[1]) - np.asarray(c1[1])) / 2.0
+                    except Exception:
+                        std = None
+
+                # Consume the single shared series model, then render it.
+                # Previously the export drew only the fill when std was
+                # present (no line); it now draws fill + line via the
+                # shared helper so live / popout / export converge.
+                series = plot_model.make_series(
+                    f"{y_col}_{name}", name,
+                    np.asarray(data[0]), np.asarray(data[1]), std,
+                    color=pen.color(), linestyle_matlab=linestyle,
+                    linestyle_qt=pen.style(), width=width,
+                    layer_priority=plot_info.get('layer_priority', 0),
+                    row=plot_info.get('row', plot_model.DEFAULT_ROW),
+                )
+                _, _, entries = plot_model.render_series(
+                    ax, series, color=color, linestyle=linestyle,
+                    linewidth=width, marker='None',
+                    show_std=True, show_std_legend=True, show_legend=True,
+                )
+                legend_entries.extend(entries)
+        legend_entries = plot_model.sort_legend_entries(legend_entries)
+        all_handles = [h for _, _, _, h, _ in legend_entries]
+        all_labels = [l for _, _, _, _, l in legend_entries]
+
+        plot_model.apply_axis_style(ax_primary, xlabel=self.x_axis_label,
+                                    grid=True, grid_alpha=0.3)
+        try:
+            ax_primary.spines['bottom'].set_edgecolor('black')
+            ax_primary.tick_params(axis='x', colors='black', direction='in')
+            ax_primary.xaxis.label.set_color('black')
+        except Exception:
+            pass
+
         if all_handles:
             target_ax = matplotlib_axes[y_axis_order[-1]]
             leg = target_ax.legend(all_handles, all_labels, loc='best')
             leg.set_zorder(10000)
-        
+
         fig.tight_layout()
         try:
             fig.savefig(filename, bbox_inches='tight', dpi=300)
-            print(f"Plot exported to {filename}")
+            logger.info("Plot exported to %s", filename)
         except Exception as e:
-            print(f"Failed to save plot: {e}")
+            logger.warning("Failed to save plot: %s", e)
         finally:
             plt.close(fig)
 
@@ -745,9 +733,9 @@ class LogController:
                     for col in data_columns:
                         row_data.append(self._format_export_value(col[i]) if i < len(col) else '')
                     writer.writerow(row_data)
-            print(f"Data exported to {filename}")
+            logger.info("Data exported to %s", filename)
         except Exception as e:
-            print(f"Failed to save data: {e}")
+            logger.warning("Failed to save data: %s", e)
 
     def get_current_plot_state(self) -> Dict[str, Any]:
         """Extracts current state for PopOutWindow."""
@@ -788,21 +776,19 @@ class LogController:
                     std_data = np.abs(c2[1] - c1[1]) / 2.0
 
             pen = item.opts['pen']
-            
-            # Pass translated style to PopOutWindow
-            series_entry = {
-                'id': f"{y_col}_{name}",
-                'name': name,
-                'x': np.array(x),
-                'y': np.array(y),
-                'std': np.array(std_data) if std_data is not None else None,
-                'color': pen.color(),
-                'linestyle_qt': pen.style(), # Raw Enum/Int for debug/qt use
-                'linestyle_matlab': self._get_mpl_linestyle(pen.style()), # Translated string
-                'width': pen.width(),
-                'layer_priority': plot_info.get('layer_priority', 0),
-                'row': plot_info.get('row', 1_000_000)
-            }
+
+            # Same dict shape as before, values sourced from the single builder.
+            series_entry = plot_model.make_series(
+                f"{y_col}_{name}", name,
+                np.array(x), np.array(y),
+                np.array(std_data) if std_data is not None else None,
+                color=pen.color(),
+                linestyle_matlab=plot_model.qt_pen_style_to_mpl(pen.style()),
+                linestyle_qt=pen.style(),
+                width=pen.width(),
+                layer_priority=plot_info.get('layer_priority', 0),
+                row=plot_info.get('row', plot_model.DEFAULT_ROW),
+            )
             state['y_axes'][y_col]['series'].append(series_entry)
         
         for y_col in state['y_axes']:
@@ -1100,19 +1086,4 @@ class LogController:
 
     def _get_mpl_linestyle(self, qt_style):
         """Maps Qt PenStyle enums/ints to Matplotlib linestyle strings."""
-        # Safely extract integer value from Qt.PenStyle enum or use directly if int
-        if hasattr(qt_style, 'value'):
-            style_int = qt_style.value
-        else:
-            style_int = int(qt_style)
-        
-        # 0: NoPen, 1: Solid, 2: Dash, 3: Dot, 4: DashDot, 5: DashDotDot
-        mapping = {
-            0: 'None',
-            1: '-', 
-            2: '--', 
-            3: ':', 
-            4: '-.', 
-            5: (0, (3, 1, 1, 1, 1, 1)) # Matplotlib tuple for DashDotDot
-        }
-        return mapping.get(style_int, '-')
+        return plot_model.qt_pen_style_to_mpl(qt_style)

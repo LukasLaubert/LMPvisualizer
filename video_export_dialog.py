@@ -11,6 +11,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QBuffer, QIODevice
 from PIL import Image, ImageOps
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 class VideoExportDialog(QDialog):
     def __init__(self, plot_panel, parent=None):
@@ -273,14 +276,92 @@ class VideoExportDialog(QDialog):
         duration_s = num_frames / fps
         self.duration_label.setText(f"Duration: {duration_s:.1f}s ({num_frames} frames)")
 
+    def _format_needs_ffmpeg(self, fmt):
+        return fmt.startswith("MP4") or fmt.startswith("AVI") or fmt.startswith("MOV")
+
+    def _format_needs_pil(self, fmt):
+        return fmt.startswith("Animated WebP") or fmt.startswith("Animated GIF")
+
+    def _check_export_dependencies(self, fmt):
+        if self._format_needs_ffmpeg(fmt):
+            if shutil.which("ffmpeg") is None:
+                logger.warning("ffmpeg not found on PATH; %s export requires ffmpeg.", fmt)
+                QMessageBox.critical(
+                    self,
+                    "ffmpeg Not Found",
+                    "ffmpeg was not found on PATH.\n\n"
+                    "MP4/AVI/MOV export requires ffmpeg. "
+                    "Please install ffmpeg and ensure it is on PATH, "
+                    "or choose Animated WebP/GIF instead."
+                )
+                return False
+        if self._format_needs_pil(fmt):
+            try:
+                from PIL import Image as _PilCheck  # noqa: F401
+                _pil_ok = True
+            except ImportError:
+                _pil_ok = False
+            if not _pil_ok or Image is None:
+                logger.warning("Pillow (PIL) is required for %s export but could not be imported.", fmt)
+                QMessageBox.critical(
+                    self,
+                    "Pillow Not Available",
+                    "Pillow (PIL) is required for WebP/GIF export but could not be imported.\n\n"
+                    "Please install Pillow to enable this format."
+                )
+                return False
+        return True
+
+    def _preflight_export(self, start_idx, end_idx):
+        fmt = self.format_combo.currentText()
+        fps = self.fps_spin.value()
+        freq = self.freq_spin.value()
+        if not self.timesteps:
+            QMessageBox.warning(
+                self,
+                "Invalid Range",
+                "No timesteps available to export.\n\nLoad a project with trajectory data first."
+            )
+            return None
+        if fps < 1:
+            QMessageBox.warning(self, "Invalid Framerate", "Framerate (FPS) must be at least 1.")
+            return None
+        if freq < 1:
+            QMessageBox.warning(self, "Invalid Frequency", "Frame frequency must be at least 1.")
+            return None
+        try:
+            start_idx = int(start_idx)
+            end_idx = int(end_idx)
+        except (TypeError, ValueError):
+            QMessageBox.warning(self, "Invalid Range", "Timestep range must be integer indices.")
+            return None
+        max_idx = len(self.timesteps) - 1
+        start_c = max(0, min(start_idx, max_idx))
+        end_c = max(0, min(end_idx, max_idx))
+        lo = min(start_c, end_c)
+        hi = max(start_c, end_c)
+        num_frames = len(range(lo, hi + 1, freq))
+        if num_frames < 1:
+            QMessageBox.warning(
+                self,
+                "Invalid Range",
+                "Timestep range yields no frames to export.\n\nCheck start/end indices and frame frequency."
+            )
+            return None
+        if not self._check_export_dependencies(fmt):
+            return None
+        return (lo, hi)
+
     def run_export(self):
         start_idx = self.start_spin.value()
         end_idx = self.end_spin.value()
-        
-        if start_idx > end_idx:
-            start_idx, end_idx = end_idx, start_idx
-            self.start_spin.setValue(start_idx)
-            self.end_spin.setValue(end_idx)
+
+        preflight = self._preflight_export(start_idx, end_idx)
+        if preflight is None:
+            return
+        start_idx, end_idx = preflight
+        self.start_spin.setValue(start_idx)
+        self.end_spin.setValue(end_idx)
             
         fmt = self.format_combo.currentText()
         if fmt.startswith("MP4"):
@@ -305,6 +386,14 @@ class VideoExportDialog(QDialog):
         self.execute_export(path, start_idx, end_idx)
 
     def execute_export(self, filepath, start_idx, end_idx):
+        # Early preflight BEFORE any state change or temp dir creation:
+        # validates timesteps/fps/freq/range plus ffmpeg/PIL availability.
+        # Aborts cleanly (no temp dir, no state changed) with a message.
+        preflight = self._preflight_export(start_idx, end_idx)
+        if preflight is None:
+            return False
+        start_idx, end_idx = preflight
+
         # 1. Stop playback if playing
         was_playing = False
         if hasattr(self.plot_panel, 'controller') and self.plot_panel.controller is not None:
@@ -536,9 +625,11 @@ class VideoExportDialog(QDialog):
                     raise Exception(f"FFmpeg failed with exit code {result.returncode}:\n{result.stderr}")
                     
             QMessageBox.information(self, "Success", f"Successfully exported animation to:\n{filepath}")
+            logger.info("Successfully exported animation to: %s", filepath)
             self.accept()
             
         except Exception as e:
+            logger.warning("An error occurred during export: %s", e)
             QMessageBox.critical(self, "Export Error", f"An error occurred during export:\n{str(e)}")
             
         finally:

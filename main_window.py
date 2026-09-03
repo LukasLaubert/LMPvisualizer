@@ -15,10 +15,14 @@ from PyQt6.QtGui import QColor
 from ui_components import (ChipInputWidget, PathChipInputWidget, NoNewLineDelegate,
                            ColorButton, NeutralPanel)
 from log_parser import LogParser
+from panel_protocol import call_load_project, has_panel_method
 from log_plot_panel import LogPlotPanel
 from trj_plot_panel import TrjPlotPanel
 from dsd_plot_panel import DSDPlotPanel
 from settings_manager import SettingsManager
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 class MainWindow(QMainWindow):
     # Constants for Mode Management
@@ -236,8 +240,9 @@ class MainWindow(QMainWindow):
         
         # 5. Reparent Mode Combo
         self.mode_combo.setParent(None)
-        if hasattr(new_panel, 'attach_mode_combo'):
-            new_panel.attach_mode_combo(self.mode_combo)
+        attach = getattr(new_panel, 'attach_mode_combo', None)
+        if callable(attach):
+            attach(self.mode_combo)
             
         # 6. Load Session (Orchestration)
         self.orchestrate_load(mode_index, previous_index)
@@ -303,7 +308,7 @@ class MainWindow(QMainWindow):
         if should_load:
             self.load_session_for_mode(new_mode_index)
         else:
-            print(f"[System] Switching to {mode_name}. Loading skipped.")
+            logger.info("[System] Switching to %s. Loading skipped.", mode_name)
 
     def save_session_for_mode(self, mode_index):
         """Saves the session state for the given mode index."""
@@ -325,8 +330,8 @@ class MainWindow(QMainWindow):
              os.makedirs(config_dir, exist_ok=True)
              path = os.path.join(config_dir, filename)
              
-             if hasattr(panel, 'save_session_to_file'):
-                 panel.save_session_to_file(path)
+             if has_panel_method(panel, 'save_session_to_file'):
+                  panel.save_session_to_file(path)
 
     def load_session_for_mode(self, mode_index):
         """Loads the session state for the given mode index."""
@@ -351,10 +356,10 @@ class MainWindow(QMainWindow):
             elif mode_index == self.MODE_DSD:
                 panel = self.dsd_plot_panel
             
-            if panel and hasattr(panel, 'load_session_from_file'):
+            if panel and has_panel_method(panel, 'load_session_from_file'):
                 panel.load_session_from_file(path)
         else:
-             print(f"[System] No autosave found for {mode_str}.")
+             logger.info("[System] No autosave found for %s.", mode_str)
 
     # --- Existing Functionality ---
 
@@ -474,6 +479,7 @@ class MainWindow(QMainWindow):
             # Clear first: editingFinished fires again on focus-out and would otherwise
             # re-raise the same dialog for the same bad text.
             self.path_input.clear_input()
+            logger.warning("The specified path does not exist: %s", text)
             QMessageBox.critical(self, "Error", "The specified path does not exist.")
             return
 
@@ -491,13 +497,14 @@ class MainWindow(QMainWindow):
 
         self.path_input.clear_input()
         if not self.path_input.add_path(str(path)):
-            print(f"[System] Path already loaded: {path}")
+            logger.info("[System] Path already loaded: %s", path)
 
     def _load_session_file(self, path: Path):
         try:
             with open(path, 'r') as f:
                 data = json.load(f)
         except Exception as e:
+            logger.warning("Failed to parse JSON file %s: %s", path, e)
             QMessageBox.warning(self, "Error", f"Failed to parse JSON file:\n{e}")
             return
 
@@ -511,6 +518,7 @@ class MainWindow(QMainWindow):
         }
 
         if file_type not in type_map:
+            logger.warning("Invalid session file '%s' with unknown type: '%s'", path.name, file_type)
             QMessageBox.warning(self, "Invalid Session File",
                 f"The file '{path.name}' is not a valid session file OR has an unknown type.\n\n"
                 f"Found type: '{file_type}'\n\n"
@@ -522,7 +530,7 @@ class MainWindow(QMainWindow):
 
         self.switch_to_mode(type_map[file_type])
         current_panel = self.stacked_widget.currentWidget()
-        if hasattr(current_panel, 'load_session_from_file'):
+        if has_panel_method(current_panel, 'load_session_from_file'):
             current_panel.load_session_from_file(str(path))
 
     def on_paths_changed(self, paths):
@@ -533,9 +541,10 @@ class MainWindow(QMainWindow):
             current_panel = self.stacked_widget.currentWidget()
             # Panels that want a say in what survives a cleared path provide
             # on_path_cleared(); the rest fall back to the plain reset.
-            if hasattr(current_panel, 'on_path_cleared'):
-                current_panel.on_path_cleared()
-            elif hasattr(current_panel, '_update_ui_state'):
+            on_cleared = getattr(current_panel, 'on_path_cleared', None)
+            if callable(on_cleared):
+                on_cleared()
+            elif has_panel_method(current_panel, '_update_ui_state'):
                 current_panel.loaded_path = None
                 current_panel._update_ui_state(project_loaded=False)
             return
@@ -557,23 +566,17 @@ class MainWindow(QMainWindow):
             self.propagate_load(paths, force_reload=True, keep_table=True)
 
     def propagate_load(self, path, force_reload=False, keep_table=False, target_system=None):
-        # Send load command to CURRENT panel
+        # Send load command to CURRENT panel.
+        # Duck-typed contract, see panel_protocol.PanelProtocol: every mode panel
+        # exposes load_project with the same routing kwargs, so plain
+        # hasattr/getattr dispatch replaces the former inspect.signature branching.
         current_panel = self.stacked_widget.currentWidget()
         keywords = self.chip_input.get_chips()
-        
-        # Check if the panel accepts 'keep_table' and 'target_system'
-        if hasattr(current_panel, 'load_project'):
-            import inspect
-            sig = inspect.signature(current_panel.load_project)
-            kwargs = {}
-            if 'force_reload' in sig.parameters:
-                kwargs['force_reload'] = force_reload
-            if 'keep_table' in sig.parameters:
-                kwargs['keep_table'] = keep_table
-            if 'target_system' in sig.parameters:
-                kwargs['target_system'] = target_system
-                
-            current_panel.load_project(path, keywords, **kwargs)
+
+        call_load_project(current_panel, path, keywords,
+                          force_reload=force_reload,
+                          keep_table=keep_table,
+                          target_system=target_system)
 
     def closeEvent(self, event):
         """Handle application exit: Save state for current mode."""

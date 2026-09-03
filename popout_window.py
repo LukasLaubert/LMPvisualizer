@@ -22,6 +22,10 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
 from ui_components import ColorButton
+import plot_model
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 class LinePropertiesWidget(QGroupBox):
     """Widget to control properties of a single line or scatter series."""
@@ -939,6 +943,7 @@ class PopOutWindow(QMainWindow):
                 # Check again
                 missing_retry = self.check_requirements()
                 if missing_retry:
+                    logger.warning("Still missing LaTeX requirements: %s", ", ".join(missing_retry))
                     QMessageBox.warning(self, "Still Missing Requirements", 
                         f"Could not find: {', '.join(missing_retry)}\n"
                         "Please ensure the directories point to the folder containing the executables.")
@@ -968,6 +973,7 @@ class PopOutWindow(QMainWindow):
             
             self.redraw_plot()
         except Exception as e:
+            logger.warning("Error enabling LaTeX: %s", e)
             QMessageBox.warning(self, "LaTeX Error", f"Error enabling LaTeX:\n{e}\n\nMake sure Ghostscript and MikTeX/TeXLive are installed correctly.")
             self.latex_check.blockSignals(True)
             self.latex_check.setChecked(False)
@@ -981,9 +987,7 @@ class PopOutWindow(QMainWindow):
 
     @staticmethod
     def _oriented_limits(limits, inverted):
-        if not limits or len(limits) != 2:
-            return limits
-        return [limits[1], limits[0]] if inverted else limits
+        return plot_model.oriented_limits(limits, inverted)
 
     def redraw_plot(self):
         # 1. Capture current view limits to prevent auto-rescaling on property updates
@@ -1016,27 +1020,21 @@ class PopOutWindow(QMainWindow):
         ax_primary = self.figure.add_subplot(111)
         ax_primary.set_title(self.title_edit.text(), fontsize=font_title)
         ax_primary.set_xlabel(self.x_label_edit.text(), fontsize=font_label)
-        
+
         ax_primary.tick_params(axis='both', labelsize=font_tick, direction='in')
-        
-        # Apply X Limits: Saved > Initial Data (clamp for log)
+
+        # Apply X Limits: Saved > Initial Data (clamp for log via shared helper)
         def _clamp_log(lim, is_log):
-            if not is_log or lim is None or len(lim)!=2:
+            if not is_log:
                 return lim
-            lo, hi = lim
-            if lo <= 0:
-                # find smallest positive in data
-                try:
-                    all_x = []
-                    for yc in self.plot_data.get('y_axes', {}).values():
-                        for s in yc.get('series', []):
-                            all_x.extend([v for v in s.get('x', []) if v is not None and v>0])
-                    lo = float(np.min(all_x)) if all_x else 1e-9
-                    if lo <=0: lo = 1e-9
-                except Exception:
-                    lo = 1e-9
-                return (lo, hi)
-            return lim
+            try:
+                data_arrays = []
+                for yc in self.plot_data.get('y_axes', {}).values():
+                    for s in yc.get('series', []):
+                        data_arrays.append(s.get('x', []))
+                return plot_model.clamp_log_limits(lim, True, data_arrays)
+            except Exception:
+                return lim
         x_is_log = self.x_log_check.isChecked()
         # when linear, prefer initial limits to restore 0 after log; when log, prefer saved then initial
         if x_is_log:
@@ -1105,16 +1103,12 @@ class PopOutWindow(QMainWindow):
             elif saved_ylim_prim:
                 y_lim = saved_ylim_prim
         if y_lim is not None:
-            if y_is_log and y_lim[0] <= 0:
+            if y_is_log:
                 try:
-                    ys = []
-                    for s in self.plot_data['y_axes'][y_cols[0]]['series']:
-                        ys.extend([v for v in s.get('y', []) if v is not None and v>0])
-                    lo = float(np.min(ys)) if ys else 1e-9
-                    if lo <=0: lo = 1e-9
-                    y_lim = (lo, y_lim[1])
+                    y_arrays = [s.get('y', []) for s in self.plot_data['y_axes'][y_cols[0]]['series']]
+                    y_lim = plot_model.clamp_log_limits(y_lim, True, y_arrays)
                 except Exception:
-                    y_lim = (1e-9, y_lim[1] if y_lim[1]>0 else 1)
+                    pass
             ax_primary.set_ylim(y_lim)
             # when log deselected, re-apply view alignment if needed
             if not y_is_log:
@@ -1128,11 +1122,11 @@ class PopOutWindow(QMainWindow):
             except Exception:
                 pass
             
-        # Apply Axis Colors (Primary)
+        # Apply Axis Colors (Primary) via shared helper (same rgb as exports).
         y_data_prim = self.plot_data['y_axes'][y_cols[0]]
         if 'color' in y_data_prim:
             col = y_data_prim['color']
-            rgb = (col.redF(), col.greenF(), col.blueF())
+            rgb = plot_model.qcolor_to_rgb(col, default=(0.0, 0.0, 0.0))
             ax_primary.yaxis.label.set_color(rgb)
             ax_primary.tick_params(axis='y', colors=rgb, direction='in')
             # Primary left spine
@@ -1169,16 +1163,12 @@ class PopOutWindow(QMainWindow):
                  y_axis_data = self.plot_data['y_axes'][y_col]
                  y_lim = self._oriented_limits(y_axis_data['y_limits'], y_axis_data.get('y_inverted', False))
             if y_lim is not None:
-                if y_is_log and y_lim[0] <= 0:
+                if y_is_log:
                     try:
-                        ys = []
-                        for s in self.plot_data['y_axes'][y_col]['series']:
-                            ys.extend([v for v in s.get('y', []) if v is not None and v>0])
-                        lo = float(np.min(ys)) if ys else 1e-9
-                        if lo <=0: lo = 1e-9
-                        y_lim = (lo, y_lim[1])
+                        y_arrays = [s.get('y', []) for s in self.plot_data['y_axes'][y_col]['series']]
+                        y_lim = plot_model.clamp_log_limits(y_lim, True, y_arrays)
                     except Exception:
-                        y_lim = (1e-9, y_lim[1] if y_lim[1]>0 else 1)
+                        pass
                 ax_new.set_ylim(y_lim)
             if y_is_log:
                 try:
@@ -1186,11 +1176,11 @@ class PopOutWindow(QMainWindow):
                 except Exception:
                     pass
             
-            # Apply Axis Colors (Secondary)
+            # Apply Axis Colors (Secondary) via shared helper.
             y_data_sec = self.plot_data['y_axes'][y_col]
             if 'color' in y_data_sec:
                 col = y_data_sec['color']
-                rgb = (col.redF(), col.greenF(), col.blueF())
+                rgb = plot_model.qcolor_to_rgb(col, default=(0.0, 0.0, 0.0))
                 ax_new.yaxis.label.set_color(rgb)
                 ax_new.tick_params(axis='y', colors=rgb, direction='in')
                 ax_new.spines['right'].set_color(rgb)
@@ -1224,15 +1214,15 @@ class PopOutWindow(QMainWindow):
                     all_x = main['x']
                     all_y = main['y']
                     prio = main.get('layer_priority', 0)
-                    is_sel = 1 if prio >= 100 else 0  # selected row has +100 z_offset -> bottom of legend
-                    row = main.get('row', 1_000_000)
-                    z_val = 2.0 + prio
+                    is_sel = 1 if plot_model.is_selected_priority(prio) else 0  # selected row has +100 z_offset -> bottom of legend
+                    row = main.get('row', plot_model.DEFAULT_ROW)
+                    z_val = plot_model.zorder_for_priority(prio)
                     if props.get('show_legend', True):
                         main_label = props.get('label')
                     else:
                         main_label = None
                     c_main = props.get('color', main['color'])
-                    color_tuple_main = (c_main.redF(), c_main.greenF(), c_main.blueF(), c_main.alphaF())
+                    color_tuple_main = plot_model.qcolor_to_rgba(c_main)
                     std_s = layers.get('std')
                     inter_s = layers.get('inter')
                     all_std = std_s.get('std') if std_s else None
@@ -1242,9 +1232,7 @@ class PopOutWindow(QMainWindow):
                             sd_c = props.get('std_color', c_main)
                             fill_label = props.get('std_label') if props.get('std_show_legend', True) else None
                             if fill_label == "": fill_label = None
-                            lower = all_y - all_std
-                            upper = all_y + all_std
-                            fill = ax.fill_between(all_x, lower, upper, color=(sd_c.redF(), sd_c.greenF(), sd_c.blueF(), sd_c.alphaF()), alpha=0.25, linewidth=0, label=fill_label, zorder=z_val - 0.05)
+                            fill = plot_model.draw_std_fill(ax, all_x, all_y, all_std, plot_model.qcolor_to_rgba(sd_c), label=fill_label, zorder=z_val - 0.05, alpha=plot_model.STD_FILL_ALPHA)
                             if fill_label:
                                 # sub_prio 0 = avg std pale, 1 = smooth std, keep interleaving per row
                                 legend_entries.append((is_sel, row, 1, fill, fill_label))
@@ -1255,9 +1243,7 @@ class PopOutWindow(QMainWindow):
                             ic = props.get('inter_color', c_main)
                             fill_label = props.get('inter_label') if props.get('inter_show_legend', True) else None
                             if fill_label == "": fill_label = None
-                            lower = all_y - all_inter
-                            upper = all_y + all_inter
-                            fill = ax.fill_between(all_x, lower, upper, color=(ic.redF(), ic.greenF(), ic.blueF(), ic.alphaF()), alpha=0.18, linewidth=0, label=fill_label, zorder=z_val - 0.1)
+                            fill = plot_model.draw_std_fill(ax, all_x, all_y, all_inter, plot_model.qcolor_to_rgba(ic), label=fill_label, zorder=z_val - 0.1, alpha=plot_model.AVG_FILL_ALPHA)
                             if fill_label:
                                 legend_entries.append((is_sel, row, 0, fill, fill_label))
                         except Exception:
@@ -1265,21 +1251,20 @@ class PopOutWindow(QMainWindow):
                     mode = main.get('mode', 'line')
                     if mode == 'scatter':
                         if main.get('colors') is not None:
-                            colors_to_use = [(c.redF(), c.greenF(), c.blueF(), c.alphaF()) for c in main['colors']]
-                            scatter_h = ax.scatter(all_x, all_y, label=main_label, c=colors_to_use, s=props.get('size', 10)**2, marker=props.get('marker', 'o') if props.get('marker') else 'o', edgecolors='none', zorder=z_val)
+                            try:
+                                colors_to_use = [plot_model.qcolor_to_rgba(c) for c in main['colors']]
+                            except Exception:
+                                colors_to_use = None
+                            scatter_h = plot_model.draw_scatter(ax, all_x, all_y, per_point_colors=colors_to_use, size=props.get('size', 10)**2, marker=props.get('marker', 'o') if props.get('marker') else 'o', label=main_label, zorder=z_val)
                         else:
-                            scatter_h = ax.scatter(all_x, all_y, label=main_label, color=color_tuple_main, s=props.get('size', 10)**2, marker=props.get('marker', 'None') if props.get('marker') not in (None, 'None') else 'o', edgecolors='none', zorder=z_val)
+                            scatter_h = plot_model.draw_scatter(ax, all_x, all_y, color_rgba=color_tuple_main, size=props.get('size', 10)**2, marker=props.get('marker', 'None') if props.get('marker') not in (None, 'None') else 'o', label=main_label, zorder=z_val)
                         if main_label:
                             legend_entries.append((is_sel, row, 2, scatter_h, main_label))
                         continue
                     lstyle = props.get('linestyle', '-')
                     marker = props.get('marker', 'None')
-                    if lstyle == 'None' and (marker is None or marker == 'None'):
-                        continue
-                    if lstyle == 'None':
-                        lstyle = 'None'
-                    line, = ax.plot(all_x, all_y, label=main_label, color=color_tuple_main, linestyle=lstyle, linewidth=props.get('linewidth', 1.5), marker=marker if marker not in (None, 'None') else 'None', markersize=props.get('size', 6), zorder=z_val)
-                    if main_label:
+                    line = plot_model.draw_line(ax, all_x, all_y, color_tuple_main, linewidth=props.get('linewidth', 1.5), linestyle=lstyle, marker=marker, markersize=props.get('size', 6), label=main_label, zorder=z_val)
+                    if line is not None and main_label:
                         legend_entries.append((is_sel, row, 2, line, main_label))
                 continue
             sorted_series = sorted(axis_data['series'], key=lambda s: s.get('layer_priority', 0))
@@ -1288,50 +1273,29 @@ class PopOutWindow(QMainWindow):
                 if sid not in self.line_widgets: continue
                 props = self.line_widgets[sid].get_properties()
                 if not props['visible']: continue
-                prio = series.get('layer_priority', 0)
-                is_sel = 1 if prio >= 100 else 0
-                # fits have prio 200 and row 1M -> after selected table rows (bottom)
-                row = series.get('row', 1_000_000)
-                sub_prio = prio % 100 if prio < 200 else 200
-                z_val = 2.0 + prio
-                all_x = series['x']
-                all_y = series['y']
-                all_std = series.get('std')
-                c = props['color']
-                color_tuple = (c.redF(), c.greenF(), c.blueF(), c.alphaF())
-                if props.get('show_std', True) and all_std is not None:
-                    try:
-                        lower = all_y - all_std
-                        upper = all_y + all_std
-                        show_std_legend = props.get('show_std_legend', True)
-                        fill_label = f"{props['label']} (Std)" if (props['label'] and show_std_legend) else None
-                        fill = ax.fill_between(all_x, lower, upper, color=color_tuple, alpha=0.25, linewidth=0, label=fill_label, zorder=z_val - 0.1)
-                        if fill_label:
-                            legend_entries.append((is_sel, row, sub_prio - 0.5, fill, fill_label))
-                    except Exception:
-                        pass
-                if series.get('mode') == 'scatter':
-                    if series.get('colors') is not None:
-                        colors_to_use = []
-                        for c_item in series['colors']:
-                            colors_to_use.append((c_item.redF(), c_item.greenF(), c_item.blueF(), c_item.alphaF()))
-                        scatter_h = ax.scatter(all_x, all_y, label=props['label'], c=colors_to_use, s=props['size']**2, marker=props['marker'], edgecolors='none', zorder=z_val)
-                    else:
-                        scatter_h = ax.scatter(all_x, all_y, label=props['label'], color=color_tuple, s=props['size']**2, marker=props['marker'], edgecolors='none', zorder=z_val)
-                    if props['label']:
-                        legend_entries.append((is_sel, row, sub_prio, scatter_h, props['label']))
-                else:
-                    lstyle = props.get('linestyle', '-')
-                    marker = props.get('marker', 'None')
-                    if lstyle == 'None' and (marker is None or marker == 'None'):
-                        continue
-                    if lstyle == 'None':
-                        lstyle = 'None'
-                    line, = ax.plot(all_x, all_y, label=props['label'], color=color_tuple, linestyle=lstyle, linewidth=props.get('linewidth', 1.5), marker=marker, markersize=props.get('size', 6), zorder=z_val)
-                    if props['label']:
-                        legend_entries.append((is_sel, row, sub_prio, line, props['label']))
+                # Consume the shared series renderer (same helper the
+                # exports use): fill + line/scatter, show_std vs
+                # show_std_legend stay distinct.
+                color_tuple = plot_model.qcolor_to_rgba(props['color'])
+                try:
+                    scatter_area = float(props.get('size', 6)) ** 2
+                except Exception:
+                    scatter_area = 36.0
+                _, _, entries = plot_model.render_series(
+                    ax, series, color=color_tuple,
+                    label=props.get('label'),
+                    linestyle=props.get('linestyle', '-'),
+                    linewidth=props.get('linewidth', 1.5),
+                    marker=props.get('marker', 'None'),
+                    markersize=props.get('size', 6),
+                    show_std=props.get('show_std', True),
+                    show_std_legend=props.get('show_std_legend', True),
+                    show_legend=True,
+                    scatter_size=scatter_area,
+                )
+                legend_entries.extend(entries)
         # sort legend exactly as table rows: non-selected in row order, selected at bottom (most top plot last)
-        legend_entries.sort(key=lambda x: (x[0], x[1], x[2]))
+        legend_entries = plot_model.sort_legend_entries(legend_entries)
         all_handles = [h for _,_,_,h,_ in legend_entries]
         all_labels = [l for _,_,_,_,l in legend_entries]
         if self.show_legend_check.isChecked() and all_handles:

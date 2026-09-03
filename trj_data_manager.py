@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set, Any
 import pandas as pd
 from trajectory_parser import TrajectoryParser
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 class TrjDataManager:
     def __init__(self):
@@ -153,7 +156,7 @@ class TrjDataManager:
                         continue
                     self.parsers[pat][sys] = fpath
         except Exception as e:
-            print(f"[System] TRJ virtual grouping failed: {e}")
+            logger.warning("[System] TRJ virtual grouping failed: %s", e)
 
         if not self.parsers:
              self.warnings.append("No valid trajectory files found with provided keywords.")
@@ -182,7 +185,7 @@ class TrjDataManager:
                         self.available_columns.append(col)
                 return parser
             except Exception as e:
-                print(f"Error initializing parser for {entry}: {e}")
+                logger.warning("Error initializing parser for %s: %s", entry, e)
                 return None
                 
         return entry

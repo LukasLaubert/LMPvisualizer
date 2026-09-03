@@ -22,6 +22,9 @@ from log_parser import LogParser
 from popout_window import PopOutWindow
 from auto_index_dialog import AutoIndexDialog
 from video_export_dialog import VideoExportDialog
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 class DSDPlotPanel(QWidget):
     def __init__(self, main_window_ref):
@@ -627,7 +630,10 @@ class DSDPlotPanel(QWidget):
         # place: blank the canvas rather than keep showing a project that is no longer
         # loaded. The domains stay. Deliberately narrow - when the same study name is
         # still available from another path the selection survives and must not be cut.
-        if (previous and previous['path'] not in paths
+        # The comparison is path-identity based (same spelling-insensitive chip
+        # matching as the row tables), so a same-named study from another project
+        # never passes for the removed one.
+        if (previous and not LogParser.path_is_loaded(previous['path'], paths)
                 and self.study_combo.currentText() == "Select Study"):
             self.controller.clear_scene()
             self.player_controls.set_timesteps([])
@@ -1139,6 +1145,7 @@ class DSDPlotPanel(QWidget):
         
         data = SettingsManager.load_state(path)
         if not data:
+            logger.warning("Failed to load DSD session file: %s", path)
             QMessageBox.critical(self, "Error", "Failed to load DSD session file.")
             return
             
@@ -1174,12 +1181,13 @@ class DSDPlotPanel(QWidget):
                 return
             else:
                 # Unknown Type -> Error only, NO Switch
+                logger.warning("Invalid session file '%s' with unknown type: '%s'", path, file_type)
                 QMessageBox.warning(self.main_window, "Invalid Session File", 
                                     f"The file has an unknown or invalid type: '{file_type}'.\n"
                                     "Cannot load this session.")
                 return
         
-        print(f"[System] Loading session: {path} for mode DSD Mode")
+        logger.info("[System] Loading session: %s for mode DSD Mode", path)
 
         self.main_window.path_input.blockSignals(True)
         self.main_window.chip_input.blockSignals(True)
@@ -1202,7 +1210,7 @@ class DSDPlotPanel(QWidget):
             # If relocated and project was found, auto-update the session file
             if relocated and self.data_manager.parsers:
                 if self.save_session_to_file(path):
-                    print(f"[System] Relocation successful. Session file updated: {path}")
+                    logger.info("[System] Relocation successful. Session file updated: %s", path)
             
             # 2. Establish Base Configuration
             g_opts = data.get('global_options', {})
@@ -1214,10 +1222,10 @@ class DSDPlotPanel(QWidget):
             self.system_combo.blockSignals(True)
             
             # The session stores the study key it saw; with several paths loaded that
-            # key may now be prefixed, so prefer the (path, folder) pair when present.
+            # key may now be prefixed, so prefer the stable (path, folder) pair.
             saved_study = g_opts.get('study', 'Select Study')
             if g_opts.get('study_path'):
-                saved_study = LogParser.qualify_study(
+                saved_study = LogParser.repoint_study_key(
                     self.study_origins, g_opts['study_path'],
                     g_opts.get('study_raw', saved_study)) or saved_study
 

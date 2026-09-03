@@ -1,0 +1,5 @@
+# required: core GUI/plotting/data stack imported unconditionally (PyQt6 GUI, pyqtgraph scenes, pandas/numpy data handling)
+PyQt6
+pyqtgraph
+pandas
+numpy

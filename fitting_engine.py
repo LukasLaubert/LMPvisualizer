@@ -1,11 +1,15 @@
 import numpy as np
 import time
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, pyqtSlot
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 try:
     from scipy.optimize import minimize
     SCIPY_AVAILABLE = True
 except ImportError:
+    logger.warning("Scipy not available; fitting will be disabled.")
     SCIPY_AVAILABLE = False
 
 class FitWorkerSignals(QObject):
@@ -31,6 +35,7 @@ class FitWorker(QRunnable):
     @pyqtSlot()
     def run(self):
         if not SCIPY_AVAILABLE:
+            logger.warning("Scipy not installed; cannot run fit.")
             self.signals.error.emit("Scipy not installed.")
             return
 
@@ -43,6 +48,7 @@ class FitWorker(QRunnable):
                 x_min = float(self.bounds[0])
                 x_max = float(self.bounds[1])
             except ValueError:
+                logger.warning("Fit data contains non-numeric values.")
                 self.signals.error.emit("Data contains non-numeric values.")
                 return
             
@@ -142,6 +148,7 @@ class FitWorker(QRunnable):
                 except (StopIteration, TimeoutError):
                     best_free = initial_guess
                 except Exception as e:
+                    logger.warning("Optimizer failed: %s", e)
                     self.signals.error.emit(f"Optimizer failed: {str(e)}")
                     return
 
@@ -185,6 +192,7 @@ class FitWorker(QRunnable):
             self.signals.finished.emit(result_payload)
 
         except Exception as e:
+            logger.warning("Fit worker failed: %s", e)
             self.signals.error.emit(str(e))
 
     def cancel(self):

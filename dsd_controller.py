@@ -3,6 +3,10 @@ import numpy as np
 import pandas as pd
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, Qt
 from PyQt6.QtGui import QColor
+import plot_model
+from logger_setup import get_logger
+
+logger = get_logger(__name__)
 # Shared appearance defaults, so the plot cannot diverge from what the table row shows.
 from dsd_widgets import DEFAULT_STYLE, DEFAULT_SIZE, DEFAULT_STRAIN_STYLE, DEFAULT_STRAIN_SIZE
 
@@ -465,30 +469,15 @@ class DSDController(QObject):
 
     def update_config(self, domains, global_options, slice_axis, observe_axis, plot_type, z_ranges=None):
         old_type = self.plot_config.get('plot_type')
-        
-        # Cache Invalidation Check - EXCLUDE visual properties (color, style, size, show)
-        # Identity consists of all parameters affecting the numerical results.
-        def get_domain_identity(d):
-            return (
-                d.get('name'),
-                tuple(d.get('splits', [])),
-                tuple(d.get('active_segments', [])),
-                tuple(sorted(d.get('atom_types', []))),
-                d.get('pbc', False),
-                d.get('weighted', False),
-                d.get('bary_mid_twoside_weight', False),
-                d.get('box_arrangement'),
-                d.get('number_boxes')
-            )
 
-        new_key = (
-            tuple(sorted([get_domain_identity(d) for d in domains if not d.get('is_optimal_line')])),
-            self.current_study, self.current_system,
-            slice_axis, observe_axis, 
-            global_options.get('z_filter_col'), global_options.get('z_filter_ref'),
-            tuple(sorted(z_ranges)) if z_ranges else None,
-            tuple(self.timesteps) # Include active range in cache key
-        )
+        # Cache Invalidation Check — centralized identity in dsd_data_manager:
+        # same result-affecting fields as the persistent .idx hash; visual-only
+        # props (color, style/size/show and strain_* variants) are excluded there.
+        merged_options = dict(global_options or {})
+        merged_options['z_ranges'] = z_ranges
+        new_key = self.data_manager.build_strain_cache_key(
+            domains, self.timesteps, slice_axis, observe_axis, merged_options,
+            study=self.current_study, system=self.current_system)
 
         if self._strain_cache_key != new_key:
             self._strain_cache = None  # Invalidate
@@ -1181,107 +1170,70 @@ class DSDController(QObject):
             exporter.export(filename)
             return
 
-        # Matplotlib Export for high quality and proper legend scaling
-        # We need to collect what's currently in the plot
+        # Matplotlib Export for high quality and proper legend scaling.
+        # Consumes the same canonical state the popout uses, so the two
+        # cannot diverge; bars stay export-only (popout has no counts axis).
+        state = self.get_current_plot_state()
+        series_list = []
+        try:
+            series_list = state.get('y_axes', {}).get('Y', {}).get('series', [])
+        except Exception:
+            series_list = []
+
         fig, ax1 = plt.subplots(figsize=figsize if figsize else (10, 6))
-        
+
         # Apply limits from current view
         view_range = self.plot_item.getViewBox().viewRange()
         ax1.set_xlim(view_range[0])
         ax1.set_ylim(view_range[1])
-        
+
         # Determine if we have a right axis (Counts/Weights)
         show_right = self.plot_item.getAxis('right').isVisible()
         ax2 = ax1.twinx() if show_right else None
         if ax2:
-            ax2.set_ylabel(self.plot_item.getAxis('right').labelText, fontsize=12)
-            # Ticks inside the frame, matching the Pop Out window
-            ax2.tick_params(axis='both', which='both', labelsize=10, direction='in')
+            plot_model.apply_axis_style(
+                ax2,
+                ylabel=self.plot_item.getAxis('right').labelText,
+                grid=False,
+            )
             # Try to match secondary view range if possible
             if self.vb2:
-                 vr2 = self.vb2.viewRange()
-                 if vr2 and len(vr2) > 1:
-                     ax2.set_ylim(vr2[1])
+                try:
+                    vr2 = self.vb2.viewRange()
+                    if vr2 and len(vr2) > 1:
+                        ax2.set_ylim(vr2[1])
+                except Exception:
+                    pass
 
-        # Labels
-        ax1.set_xlabel(self.plot_item.getAxis('bottom').labelText, fontsize=12)
-        ax1.set_ylabel(self.plot_item.getAxis('left').labelText, fontsize=12)
-        # Ticks inside the frame, matching the Pop Out window
-        ax1.tick_params(axis='both', which='both', labelsize=10, direction='in')
-        
-        handles, labels = [], []
-        
-        # Iterate over plot items to replicate them in Matplotlib
-        for item in self.plot_item.items:
-            if isinstance(item, pg.PlotDataItem) and item.isVisible():
-                x, y = item.getData()
-                if x is None or y is None or len(x) == 0: continue
-                
-                name = item.name()
-                pen = item.opts.get('pen')
-                
-                # Robust Color Extraction
-                color = QColor('blue')
-                if pen and pen.style() != Qt.PenStyle.NoPen:
-                    color = pen.color()
-                else:
-                    sb = item.opts.get('symbolBrush')
-                    if sb:
-                        if isinstance(sb, QColor): color = sb
-                        elif hasattr(sb, 'color'): color = sb.color()
-                
-                c_rgb = (color.redF(), color.greenF(), color.blueF())
+        # Labels + ticks-in via the shared helper (same as popout/export).
+        plot_model.apply_axis_style(
+            ax1,
+            xlabel=self.plot_item.getAxis('bottom').labelText,
+            ylabel=self.plot_item.getAxis('left').labelText,
+            grid=False,
+        )
 
-                width = pen.width() if pen else 1
-                linestyle = self._get_mpl_linestyle(pen.style()) if (pen and pen.style() != Qt.PenStyle.NoPen) else 'None'
-                # Fix: Handle both scatter (dot) and line cases
-                symbol = item.opts.get('symbol')
-                symbol_size = item.opts.get('symbolSize', 5)
-                
-                h, = ax1.plot(x, y, label=name, color=c_rgb, linewidth=width, linestyle=linestyle,
-                               marker=self._get_trj_mpl_marker(symbol) if symbol else None,
-                               markersize=symbol_size)
-                if name:
-                    handles.append(h)
-                    labels.append(name)
-            
-        # Second pass to handle FillBetweenItems and associate them with legend names
-        all_handles = list(handles)
-        all_labels = list(labels)
-        
-        for item in self.plot_item.items:
-            if isinstance(item, pg.FillBetweenItem) and item.isVisible():
-                c1_data = item.curves[0].getData()
-                c2_data = item.curves[1].getData()
-                if c1_data[1] is not None and c2_data[1] is not None:
-                    # Match this error band to a series name by checking midpoints
-                    mid_y = (c1_data[1] + c2_data[1]) / 2.0
-                    match_label = None
-                    
-                    for i, h in enumerate(handles):
-                        h_x, h_y = h.get_data()
-                        if len(h_x) == len(c1_data[0]) and np.allclose(h_y, mid_y, atol=1e-8):
-                            match_label = f"{labels[i]} (Std)"
-                            break
-                    
-                    # Fix: Handle brush being a method or property
-                    brush = item.brush() if callable(item.brush) else item.brush
-                    if hasattr(brush, 'color'):
-                        c = brush.color() if callable(brush.color) else brush.color
-                        color = (c.redF(), c.greenF(), c.blueF())
-                        alpha = c.alphaF()
-                    else:
-                        color = (0.5, 0.5, 0.5)
-                        alpha = 0.5
-                    
-                    fill = ax1.fill_between(c1_data[0], c1_data[1], c2_data[1], 
-                                          color=color, alpha=alpha, linewidth=0, label=match_label)
-                    
-                    if match_label:
-                        all_handles.append(fill)
-                        all_labels.append(match_label)
+        legend_entries = []
 
-        # Handle BarGraphItems (Counts/Weights) on ax2
+        # Render every series from the canonical state (line/scatter +
+        # FillBetween std matched inside get_current_plot_state).
+        for series in series_list:
+            try:
+                color = plot_model.qcolor_to_rgba(series.get('color'))
+            except Exception:
+                color = (0.0, 0.0, 1.0, 1.0)
+            _, _, entries = plot_model.render_series(
+                ax1, series, color=color,
+                linestyle=series.get('linestyle_matlab', '-'),
+                linewidth=series.get('width', 1),
+                marker=series.get('marker', 'None'),
+                markersize=series.get('size', 5),
+                show_std=True, show_std_legend=True, show_legend=True,
+            )
+            legend_entries.extend(entries)
+
+        # Handle BarGraphItems (Counts/Weights) on ax2 — preserved as-is:
+        # counts have no legend entry, widths/colors come from live items.
         if ax2:
             for item in self.vb2.allChildItems():
                 if isinstance(item, pg.BarGraphItem) and item.isVisible():
@@ -1297,12 +1249,15 @@ class DSDController(QObject):
                         c = brush # Already a QColor
                     else:
                         c = QColor(128, 128, 128, 128)
-                        
+
                     color = (c.redF(), c.greenF(), c.blueF())
                     alpha = c.alphaF()
                     ax2.bar(x, height, width=width, color=color, alpha=alpha, align='center')
 
-        ax1.grid(True, alpha=0.3)
+        plot_model.apply_axis_style(ax1, grid=True, grid_alpha=0.3)
+        legend_entries = plot_model.sort_legend_entries(legend_entries)
+        all_handles = [h for _, _, _, h, _ in legend_entries]
+        all_labels = [l for _, _, _, _, l in legend_entries]
         if all_handles:
             # Legend size same as display: Increased font size for better visibility
             ax1.legend(all_handles, all_labels, loc='best', fontsize=12)
@@ -1312,11 +1267,7 @@ class DSDController(QObject):
         plt.close(fig)
 
     def _get_trj_mpl_marker(self, pg_symbol):
-        mapping = {
-            'o': 'o', 's': 's', 't': 'v', 't1': '^', 't2': '>', 't3': '<',
-            'd': 'D', '+': '+', 'x': 'x', 'p': 'p', 'h': 'h', 'star': '*'
-        }
-        return mapping.get(pg_symbol, 'o')
+        return plot_model.pg_symbol_to_mpl(pg_symbol)
 
     def _export_text_data(self, filename: str):
         """Internal handler for exporting data to CSV or TSV."""
@@ -1342,21 +1293,19 @@ class DSDController(QObject):
                 if x is None or y is None: continue
                 
                 std = None
-                # Optimization: Look for a FillBetweenItem that covers this series
-                # We assume if a FillBetweenItem exists, it surrounds the mean.
-                # Actually, in DSD, we add FillBetween with bc (brush).
-                # To be sure, we can check if any FillBetweenItem has curves that 
-                # average to this Y.
-                for other in self.plot_item.items:
-                    if isinstance(other, pg.FillBetweenItem) and other.isVisible():
-                        c1 = other.curves[0].getData()
-                        c2 = other.curves[1].getData()
-                        if np.array_equal(c1[0], x):
-                            # Check if (c1+c2)/2 roughly equals y
-                            mid = (c1[1] + c2[1]) / 2.0
-                            if np.allclose(mid, y, atol=1e-10):
-                                std = np.abs(c1[1] - c2[1]) / 2.0
-                                break
+                # Shared FillBetween matching (exact-x + 1e-10 midpoint,
+                # same bytes as the old inline loop).
+                try:
+                    _bands_csv = []
+                    for other in self.plot_item.items:
+                        if isinstance(other, pg.FillBetweenItem) and other.isVisible():
+                            c1 = other.curves[0].getData()
+                            c2 = other.curves[1].getData()
+                            if c1[0] is not None and c1[1] is not None and c2[1] is not None:
+                                _bands_csv.append((c1[0], c1[1], c2[1]))
+                    std = plot_model.match_std_band(x, y, _bands_csv, atol=1e-10, exact_x=True)
+                except Exception:
+                    std = None
                 
                 series_data.append({
                     'name': name,
@@ -1416,7 +1365,7 @@ class DSDController(QObject):
                         else: row.append('')
                     writer.writerow(row)
         except Exception as e:
-            print(f"Export Error: {e}")
+            logger.warning("Export Error: %s", e)
 
     def get_current_plot_state(self):
         """Extracts current state for PopOutWindow."""
@@ -1435,16 +1384,38 @@ class DSDController(QObject):
             'series': []
         }
 
+        # Collect FillBetween bands once for shared matching (same helper
+        # as export_plot uses, so state/popout/export cannot diverge).
+        bands = []
+        for other in self.plot_item.items:
+            if isinstance(other, pg.FillBetweenItem) and other.isVisible():
+                try:
+                    c1_dt = other.curves[0].getData()
+                    c2_dt = other.curves[1].getData()
+                    if c1_dt[0] is not None and c2_dt[1] is not None:
+                        bands.append((c1_dt[0], c1_dt[1], c2_dt[1]))
+                except Exception:
+                    continue
+
+        # Table-row order for legend: domain index when the name maps to
+        # a domain, else scene order (update_scene draws in table order).
+        domain_row = {}
+        for idx, domain in enumerate(self.domains or []):
+            dname = domain.get('name')
+            if dname and dname not in domain_row:
+                domain_row[dname] = idx
+
+        scene_idx = 0
         for item in self.plot_item.items:
             if isinstance(item, pg.PlotDataItem):
                 name = item.name()
                 if not name: continue
-                
+
                 x_data, y_data = item.getData()
                 if x_data is None or y_data is None: continue
-                
+
                 pen = item.opts.get('pen')
-                
+
                 # Extract color: prefer pen color, fall back to symbolBrush for scatter plots
                 color = QColor('blue')  # Default fallback
                 if pen and pen.style() != Qt.PenStyle.NoPen:
@@ -1457,57 +1428,44 @@ class DSDController(QObject):
                             color = symbol_brush
                         elif hasattr(symbol_brush, 'color'):
                             color = symbol_brush.color()
-                
+
                 is_opt = getattr(item, 'is_opt_line', False)
                 symbol = item.opts.get('symbol')
-                
-                pending_std = None
-                # Look for a FillBetweenItem that covers this series
-                for other in self.plot_item.items:
-                    if isinstance(other, pg.FillBetweenItem) and other.isVisible():
-                        c1_dt = other.curves[0].getData()
-                        c2_dt = other.curves[1].getData()
-                        # Use allclose for robust float comparison of centers and means
-                        if (c1_dt[0] is not None and len(c1_dt[0]) == len(x_data) and 
-                            np.allclose(c1_dt[0], x_data, atol=1e-8)):
-                            
-                            mid = (c1_dt[1] + c2_dt[1]) / 2.0
-                            if np.allclose(mid, y_data, atol=1e-8):
-                                pending_std = np.abs(c1_dt[1] - c2_dt[1]) / 2.0
-                                break
 
-                series_entry = {
-                    'id': name,
-                    'name': name,
-                    'x': x_data,
-                    'y': y_data,
-                    'std': pending_std,
-                    'color': color,
-                    'linestyle_matlab': self._get_mpl_linestyle(pen.style()) if pen else 'None',
-                    'width': pen.width() if pen else 0,
-                    'marker': self._get_trj_mpl_marker(symbol) if symbol else 'None',
-                    'mode': 'scatter' if (symbol and (not pen or pen.style() == Qt.PenStyle.NoPen)) else 'line',
-                    'size': item.opts.get('symbolSize', 5),
-                    'layer_priority': 10 if is_opt else 0
-                }
+                pending_std = plot_model.match_std_band(x_data, y_data, bands, atol=1e-8)
+
+                row = domain_row.get(name, None)
+                if row is None:
+                    # Split segments carry the domain name as prefix.
+                    for dname, didx in domain_row.items():
+                        if name.startswith(dname):
+                            row = didx
+                            break
+                if row is None:
+                    row = scene_idx
+                if is_opt:
+                    # End-to-end line sorts after every domain row.
+                    row = plot_model.DEFAULT_ROW
+
+                # Same dict shape as before, values sourced from the single builder.
+                series_entry = plot_model.make_series(
+                    name, name, x_data, y_data, pending_std,
+                    color=color,
+                    linestyle_matlab=self._get_mpl_linestyle(pen.style()) if pen else 'None',
+                    width=pen.width() if pen else 0,
+                    marker=self._get_trj_mpl_marker(symbol) if symbol else 'None',
+                    mode='scatter' if (symbol and (not pen or pen.style() == Qt.PenStyle.NoPen)) else 'line',
+                    size=item.opts.get('symbolSize', 5),
+                    layer_priority=10 if is_opt else 0,
+                    row=row,
+                )
                 state['y_axes']['Y']['series'].append(series_entry)
-                
+                scene_idx += 1
+
         return state
 
     def _get_mpl_linestyle(self, qt_style):
-        if hasattr(qt_style, 'value'):
-            style_int = qt_style.value
-        else:
-            style_int = int(qt_style)
-        mapping = {
-            0: 'None', # NoPen
-            1: '-', 
-            2: '--', 
-            3: ':', 
-            4: '-.', 
-            5: (0, (3, 1, 1, 1, 1, 1))
-        }
-        return mapping.get(style_int, '-')
+        return plot_model.qt_pen_style_to_mpl(qt_style)
 
     def _get_pyqtgraph_style(self, style_str):
         symbol = 'o'

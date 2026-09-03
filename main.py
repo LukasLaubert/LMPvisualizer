@@ -4,6 +4,9 @@ import sys
 import argparse
 from PyQt6.QtWidgets import QApplication
 from main_window import MainWindow
+from logger_setup import get_logger, setup_logging
+
+logger = get_logger(__name__)
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="LMPvisualizer")
@@ -13,6 +16,11 @@ def parse_arguments():
 
 if __name__ == '__main__':
     args = parse_arguments()
+    try:
+        setup_logging()
+    except Exception as exc:
+        # Logging must never block startup; console remains usable.
+        print(f"Logging setup failed: {exc}")
     app = QApplication(sys.argv)
     
     # Convert string arg to boolean
