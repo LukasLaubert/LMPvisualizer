@@ -139,10 +139,20 @@ class LinePropertiesWidget(QGroupBox):
 
         # Shared Error Band Control (Available for both line and scatter if data exists)
         self.error_check = QCheckBox("Show Error Band")
+        self.error_legend_check = QCheckBox("Std in Legend")
+        self.error_legend_check.setToolTip("Show error band in legend while keeping the band")
         if self.has_std:
             self.error_check.setChecked(initial_props.get('show_std', True))
             self.error_check.toggled.connect(self.propertiesChanged)
-            layout.addWidget(self.error_check, next_row, 0, 1, 4)
+            self.error_check.toggled.connect(lambda c: self.error_legend_check.setEnabled(c))
+            layout.addWidget(self.error_check, next_row, 0, 1, 2)
+            self.error_legend_check.setChecked(initial_props.get('show_std_legend', True))
+            self.error_legend_check.setEnabled(self.error_check.isChecked())
+            self.error_legend_check.toggled.connect(self.propertiesChanged)
+            layout.addWidget(self.error_legend_check, next_row, 2, 1, 2)
+        else:
+            self.error_check.setVisible(False)
+            self.error_legend_check.setVisible(False)
 
     def get_properties(self):
         props = {
@@ -165,6 +175,7 @@ class LinePropertiesWidget(QGroupBox):
             props['size'] = self.size_spin.value()  # marker size, now user-adjustable
             
         props['show_std'] = self.error_check.isChecked() if self.has_std else False
+        props['show_std_legend'] = self.error_legend_check.isChecked() if self.has_std else False
             
         return props
 
@@ -683,6 +694,7 @@ class PopOutWindow(QMainWindow):
                     'marker': series.get('marker', 'None'),
                     'has_std': series['std'] is not None,
                     'show_std': True,
+                    'show_std_legend': True,
                     'mode': series.get('mode', 'line'),
                     'size': series.get('size', 20) if is_scatter else 10,
                     'colors': series.get('colors')
@@ -1291,7 +1303,8 @@ class PopOutWindow(QMainWindow):
                     try:
                         lower = all_y - all_std
                         upper = all_y + all_std
-                        fill_label = f"{props['label']} (Std)" if props['label'] else None
+                        show_std_legend = props.get('show_std_legend', True)
+                        fill_label = f"{props['label']} (Std)" if (props['label'] and show_std_legend) else None
                         fill = ax.fill_between(all_x, lower, upper, color=color_tuple, alpha=0.25, linewidth=0, label=fill_label, zorder=z_val - 0.1)
                         if fill_label:
                             legend_entries.append((is_sel, row, sub_prio - 0.5, fill, fill_label))

@@ -237,8 +237,8 @@ class VideoExportDialog(QDialog):
         if checked:
             self._prev_axes_checked = self.axes_cb.isChecked()
             self._prev_grid_checked = self.grid_cb.isChecked()
-            self.axes_cb.setChecked(False)
-            self.grid_cb.setChecked(False)
+            self.axes_cb.setChecked(True)
+            self.grid_cb.setChecked(True)
         else:
             if hasattr(self, '_prev_axes_checked'):
                 self.axes_cb.setChecked(self._prev_axes_checked)
