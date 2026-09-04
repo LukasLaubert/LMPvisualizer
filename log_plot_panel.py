@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QComboBox, QFrame, QTableWidget, QHeaderView, QTableWidgetItem,
     QMessageBox, QCheckBox, QLabel, QSplitter, QGridLayout, QSizePolicy, 
-    QMenu, QFileDialog, QDialog, QSpinBox
+    QMenu, QFileDialog, QDialog, QSpinBox, QWidgetAction, QToolButton
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer
 from PyQt6.QtGui import QColor, QIntValidator, QAction, QActionGroup, QFont
@@ -23,7 +23,7 @@ from settings_manager import SettingsManager
 from ui_components import ColorButton, InconsistentDataDialog, RightClickButton, NoNewLineDelegate, MissingPathResolver
 from global_label_editor_dialog import GlobalLabelEditorDialog
 from custom_property_dialog import CustomPropertyDialog
-from popout_window import PopOutWindow
+from popout_window import PopOutWindow, mint_preset_name
 from fit_dialog import FitFunctionDialog
 from header_selection_dialog import HeaderSelectionDialog
 from logger_setup import get_logger
@@ -118,6 +118,7 @@ class LogPlotPanel(QWidget):
         self.synchronized_columns = set()
         self.average_user_choices = {}
         self.popout_windows = []
+        self.popout_presets = []
         self.current_x_axis = None
         self.global_label_map = {}
         self.custom_properties = {} # Name -> Formula
@@ -163,6 +164,10 @@ class LogPlotPanel(QWidget):
         self._init_ui()
         self._connect_signals()
         self._update_ui_state(project_loaded=False)
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1892,7 +1897,7 @@ class LogPlotPanel(QWidget):
         self.plot_table.clicked.connect(lambda _idx: self._note_table_click('plot'))
         self.fit_table.clicked.connect(lambda _idx: self._note_table_click('fit'))
 
-        self.popout_btn.clicked.connect(self.launch_popout_window)
+        self.popout_btn.clicked.connect(self._on_popout_button_clicked)
 
     def _note_table_click(self, which: str):
         self._last_clicked_table = which
@@ -4301,6 +4306,7 @@ class LogPlotPanel(QWidget):
             'fit_table_visible': self.fit_table_visible,
             'selected_row': self.plot_table.currentRow(),
             'allowed_headers': [list(h) for h in self.allowed_headers] if self.allowed_headers else None,
+            'popout_presets': copy.deepcopy(getattr(self, 'popout_presets', []) or []),
             'plots': [],
             'fits': []
         }
@@ -4472,6 +4478,14 @@ class LogPlotPanel(QWidget):
 
 
         # --- Load Logic ---
+        try:
+            self.popout_presets = self._sanitize_popout_presets(data.get('popout_presets', []))
+        except Exception:
+            self.popout_presets = []
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
         self.global_label_map = data.get('global_label_map', {})
         self.custom_properties = data.get('custom_properties', {})
         self.data_manager.set_custom_properties(self.custom_properties)
@@ -4496,6 +4510,7 @@ class LogPlotPanel(QWidget):
         self.main_window.path_input.blockSignals(True)
         self.main_window.chip_input.blockSignals(True)
 
+        relocated = False
         try:
             if project_paths:
                 project_paths, relocated, action = self.main_window.resolve_session_paths(
@@ -4678,6 +4693,149 @@ class LogPlotPanel(QWidget):
 
     def launch_popout_window(self):
         """Creates a new independent window with the current plot data."""
+        self._open_fresh_popout()
+
+    def _on_popout_button_clicked(self):
+        # With presets the button only opens its menu (New Pop Out lives there);
+        # the menu pops automatically, so a direct click must not open twice.
+        if getattr(self, 'popout_presets', None):
+            try:
+                self.popout_btn.showMenu()
+            except Exception:
+                pass
+            return
+        self._open_fresh_popout()
+
+    def _sanitize_popout_presets(self, raw):
+        out = []
+        try:
+            if not isinstance(raw, list):
+                return []
+            for p in raw:
+                if not isinstance(p, dict):
+                    continue
+                name = p.get('name')
+                if not isinstance(name, str) or not name:
+                    continue
+                glob = p.get('global')
+                series = p.get('series')
+                if not isinstance(glob, dict) or not isinstance(series, dict):
+                    continue
+                try:
+                    out.append(copy.deepcopy(p))
+                except Exception:
+                    out.append({'name': name, 'global': dict(glob), 'series': dict(series)})
+        except Exception:
+            return []
+        return out
+
+    def _write_popout_autosave(self):
+        try:
+            self.main_window.save_session_for_mode(self.main_window.MODE_LOG)
+        except Exception as e:
+            logger.warning("[System] Popout preset autosave failed: %s", e)
+
+    def _refresh_popout_button(self):
+        presets = getattr(self, 'popout_presets', []) or []
+        if not presets:
+            try:
+                self.popout_btn.setMenu(None)
+            except Exception:
+                pass
+            try:
+                self.popout_btn.setText("Pop Out")
+            except Exception:
+                pass
+            return
+        try:
+            self.popout_btn.setText("Pop Out")
+        except Exception:
+            pass
+        try:
+            menu = QMenu(self.popout_btn)
+            new_act = menu.addAction("New Pop Out")
+            new_act.triggered.connect(lambda _c=False: self._open_fresh_popout())
+            menu.addSeparator()
+            for preset in list(presets):
+                try:
+                    name = preset.get('name', 'preset')
+                except Exception:
+                    continue
+                wa = QWidgetAction(menu)
+                row = QWidget()
+                hl = QHBoxLayout(row)
+                hl.setContentsMargins(4, 2, 4, 2)
+                hl.setSpacing(6)
+                open_btn = QPushButton(name)
+                open_btn.setFlat(True)
+                open_btn.setStyleSheet("text-align: left;")
+                open_btn.setMinimumWidth(160)
+                trash = QToolButton()
+                trash.setText("\U0001f5d1")
+                trash.setToolTip("Delete preset")
+                trash.setAutoRaise(True)
+                open_btn.clicked.connect(
+                    lambda _c=False, n=name, m=menu: (m.close(), self._open_preset_popout(n)))
+                trash.clicked.connect(
+                    lambda _c=False, n=name, m=menu: (m.close(), self._delete_popout_preset(n)))
+                hl.addWidget(open_btn, 1)
+                hl.addWidget(trash)
+                wa.setDefaultWidget(row)
+                menu.addAction(wa)
+            self.popout_btn.setMenu(menu)
+        except Exception as e:
+            logger.warning("[System] Popout menu rebuild failed: %s", e)
+
+    def _delete_popout_preset(self, name):
+        try:
+            self.popout_presets = [p for p in (getattr(self, 'popout_presets', []) or [])
+                                   if p.get('name') != name]
+        except Exception:
+            self.popout_presets = []
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
+        self._write_popout_autosave()
+
+    def _on_popout_closed(self, window, preset):
+        try:
+            src = getattr(window, 'source_name', None)
+            existing = [p.get('name') for p in (getattr(self, 'popout_presets', []) or [])]
+            if src:
+                replaced = False
+                for i, p in enumerate(self.popout_presets):
+                    if p.get('name') == src:
+                        try:
+                            preset['name'] = src
+                        except Exception:
+                            pass
+                        self.popout_presets[i] = copy.deepcopy(preset)
+                        replaced = True
+                        break
+                if not replaced:
+                    try:
+                        preset['name'] = mint_preset_name(existing)
+                    except Exception:
+                        pass
+                    self.popout_presets.append(copy.deepcopy(preset))
+            else:
+                try:
+                    preset['name'] = mint_preset_name(existing)
+                except Exception:
+                    pass
+                self.popout_presets.append(copy.deepcopy(preset))
+        except Exception as e:
+            logger.warning("[System] Popout preset save failed: %s", e)
+            return
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
+        self._write_popout_autosave()
+
+    def _open_fresh_popout(self):
+        """Creates a new independent window with the current plot data."""
         if self.plot_table.rowCount() == 0:
             return
 
@@ -4689,7 +4847,7 @@ class LogPlotPanel(QWidget):
             return
 
         plot_state = self.plot_controller.get_current_plot_state()
-        
+
         if not plot_state['y_axes']:
             QMessageBox.information(self, "Info", "No visible data to display in Pop Out.")
             return
@@ -4697,13 +4855,51 @@ class LogPlotPanel(QWidget):
         dpi = self.logicalDpiX()
         w_in = self.plot_widget.width() / dpi
         h_in = self.plot_widget.height() / dpi
-        
-        popout = PopOutWindow(plot_state, figsize=(w_in, h_in))
+
+        popout = PopOutWindow(plot_state, figsize=(w_in, h_in),
+                              source_name=None, on_close=self._on_popout_closed)
         popout.show()
-        
+
         # Keep reference to prevent GC
         self.popout_windows.append(popout)
-        
+
         # Clean up closed windows
         # (Optional: Connect destroyed signal to remove from list, or just let list grow - small overhead)
+        popout.destroyed.connect(lambda: self.popout_windows.remove(popout) if popout in self.popout_windows else None)
+
+    def _open_preset_popout(self, name):
+        try:
+            preset = next((p for p in (getattr(self, 'popout_presets', []) or [])
+                           if p.get('name') == name), None)
+        except Exception:
+            preset = None
+        if preset is None:
+            return
+        try:
+            import matplotlib
+        except ImportError:
+            logger.warning("Matplotlib is required for the Pop Out feature.")
+            QMessageBox.critical(self, "Error", "Matplotlib is required for the Pop Out feature.\nPlease install it via pip: pip install matplotlib")
+            return
+        try:
+            plot_state = self.plot_controller.get_current_plot_state()
+        except Exception:
+            return
+        if not plot_state or not plot_state.get('y_axes'):
+            QMessageBox.information(self, "Info", "No visible data to display in Pop Out.")
+            return
+        try:
+            dpi = self.logicalDpiX()
+            w_in = self.plot_widget.width() / dpi
+            h_in = self.plot_widget.height() / dpi
+        except Exception:
+            w_in, h_in = 11.0, 6.5
+        popout = PopOutWindow(plot_state, figsize=(w_in, h_in),
+                              source_name=name, on_close=self._on_popout_closed)
+        try:
+            popout.apply_all(copy.deepcopy(preset))
+        except Exception as e:
+            logger.warning("[System] Popout preset apply failed: %s", e)
+        popout.show()
+        self.popout_windows.append(popout)
         popout.destroyed.connect(lambda: self.popout_windows.remove(popout) if popout in self.popout_windows else None)

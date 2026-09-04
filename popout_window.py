@@ -3,6 +3,7 @@
 import os
 import sys
 import copy
+import datetime
 import json
 import shutil
 import numpy as np
@@ -26,6 +27,106 @@ import plot_model
 from logger_setup import get_logger
 
 logger = get_logger(__name__)
+
+BERLIN_TZ_NAME = "Europe/Berlin"
+PRESET_NAME_FMT = "%Y-%m-%d_%H:%M:%S"
+
+
+def berlin_now_str(now_utc=None):
+    """Current time as Berlin wall-clock 'YYYY-MM-DD_HH:MM:SS' (no tz suffix).
+
+    Falls back to system local time when the zoneinfo DB is missing.
+    Never raises.
+    """
+    try:
+        if now_utc is None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+        elif now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=datetime.timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(BERLIN_TZ_NAME)
+            local = now_utc.astimezone(tz)
+        except Exception:
+            try:
+                local = now_utc.astimezone()
+            except Exception:
+                local = datetime.datetime.now()
+        return local.strftime(PRESET_NAME_FMT)
+    except Exception:
+        try:
+            return datetime.datetime.now().strftime(PRESET_NAME_FMT)
+        except Exception:
+            return "preset"
+
+
+def mint_preset_name(existing_names, now_utc=None):
+    """Mint a collision-free preset name against existing names."""
+    try:
+        existing = set(existing_names or [])
+    except Exception:
+        existing = set()
+    base = berlin_now_str(now_utc)
+    if base not in existing:
+        return base
+    i = 2
+    while f"{base}_{i}" in existing:
+        i += 1
+    return f"{base}_{i}"
+
+
+def _qcolor_to_hex(c):
+    try:
+        if isinstance(c, QColor):
+            if not c.isValid():
+                return "#000000"
+            try:
+                if c.alpha() != 255:
+                    return c.name(QColor.NameFormat.HexArgb)
+            except Exception:
+                pass
+            return c.name()
+        if isinstance(c, str):
+            return c
+    except Exception:
+        pass
+    return "#000000"
+
+
+def _hex_to_qcolor(v, fallback="black"):
+    try:
+        if isinstance(v, QColor):
+            return v if v.isValid() else QColor(fallback)
+        if isinstance(v, str) and v:
+            c = QColor(v)
+            if c.isValid():
+                return c
+    except Exception:
+        pass
+    try:
+        return QColor(fallback)
+    except Exception:
+        return QColor("black")
+
+
+def _plain_series_props(props):
+    """Copy get_properties() output with QColors as hex (JSON-safe)."""
+    try:
+        out = {}
+        for k, v in dict(props or {}).items():
+            try:
+                if isinstance(v, QColor):
+                    out[k] = _qcolor_to_hex(v)
+                else:
+                    out[k] = copy.deepcopy(v)
+            except Exception:
+                try:
+                    out[k] = v
+                except Exception:
+                    pass
+        return out
+    except Exception:
+        return {}
 
 class LinePropertiesWidget(QGroupBox):
     """Widget to control properties of a single line or scatter series."""
@@ -340,7 +441,8 @@ class PopOutWindow(QMainWindow):
     # within the same application session. Resets to False when app restarts.
     _session_latex_enabled = False
 
-    def __init__(self, plot_state_data, parent=None, figsize=None):
+    def __init__(self, plot_state_data, parent=None, figsize=None,
+                 source_name=None, on_close=None):
         super().__init__(parent)
         self.setWindowTitle("Plot Inspector")
         self.resize(1100, 650) 
@@ -350,6 +452,10 @@ class PopOutWindow(QMainWindow):
         self._main_sync_enabled = False
         self._in_sync = False
         self.initial_figsize = figsize 
+        # Preset lifecycle: fresh window -> source_name None (close mints new);
+        # preset-opened window -> source_name set (close overwrites entry).
+        self.source_name = source_name
+        self._preset_on_close = on_close
         
         self._init_ui()
         
@@ -1350,6 +1456,523 @@ class PopOutWindow(QMainWindow):
         self.height_spin.setValue(h_val)
         self.width_spin.blockSignals(False)
         self.height_spin.blockSignals(False)
+
+    # --- Popout presets (settings snapshot only, never x/y arrays) ---
+
+    def collect_all(self):
+        """Snapshot the entire settings dock + canvas size as plain values."""
+        try:
+            name = self.source_name or berlin_now_str()
+        except Exception:
+            name = "preset"
+        glob = {}
+        try:
+            glob['title'] = self.title_edit.text()
+        except Exception:
+            glob['title'] = ""
+        try:
+            glob['grid'] = bool(self.grid_check.isChecked())
+        except Exception:
+            glob['grid'] = True
+        try:
+            glob['latex'] = bool(self.latex_check.isChecked())
+        except Exception:
+            glob['latex'] = False
+        try:
+            glob['fonts'] = {
+                'title': int(self.font_title_spin.value()),
+                'label': int(self.font_label_spin.value()),
+                'tick': int(self.font_tick_spin.value()),
+                'legend': int(self.font_legend_spin.value()),
+            }
+        except Exception:
+            glob['fonts'] = {'title': 12, 'label': 11, 'tick': 12, 'legend': 12}
+        try:
+            glob['x_label'] = self.x_label_edit.text()
+        except Exception:
+            glob['x_label'] = ""
+        try:
+            glob['x_log'] = bool(self.x_log_check.isChecked())
+        except Exception:
+            glob['x_log'] = False
+        try:
+            y_labels, y_logs = {}, {}
+            for y_col, cfg in dict(getattr(self, 'y_configs', {}) or {}).items():
+                try:
+                    y_labels[y_col] = cfg['label_edit'].text()
+                except Exception:
+                    pass
+                try:
+                    y_logs[y_col] = bool(cfg['log_check'].isChecked())
+                except Exception:
+                    pass
+            glob['y_labels'] = y_labels
+            glob['y_logs'] = y_logs
+        except Exception:
+            glob.setdefault('y_labels', {})
+            glob.setdefault('y_logs', {})
+        try:
+            glob['legend'] = {
+                'show': bool(self.show_legend_check.isChecked()),
+                'loc': self.legend_loc.currentText(),
+                'frame': bool(self.legend_frame.isChecked()),
+                'draggable': bool(self.legend_draggable.isChecked()),
+            }
+        except Exception:
+            glob['legend'] = {'show': True, 'loc': 'best', 'frame': True, 'draggable': True}
+        try:
+            dpi = self.figure.get_dpi() if getattr(self, 'figure', None) is not None else 100
+            cw, ch = self.canvas.width(), self.canvas.height()
+            glob['figsize'] = [float(cw) / float(dpi), float(ch) / float(dpi)]
+        except Exception:
+            try:
+                glob['figsize'] = [float(self.initial_figsize[0]), float(self.initial_figsize[1])]
+            except Exception:
+                glob['figsize'] = [11.0, 6.5]
+        try:
+            glob['width'] = float(self.width_spin.value())
+            glob['height'] = float(self.height_spin.value())
+            glob['unit'] = self.unit_combo.currentText()
+        except Exception:
+            pass
+        series = {}
+        try:
+            for sid, w in dict(getattr(self, 'line_widgets', {}) or {}).items():
+                try:
+                    series[sid] = _plain_series_props(w.get_properties())
+                except Exception:
+                    continue
+        except Exception:
+            series = {}
+        try:
+            return copy.deepcopy({'name': name, 'global': glob, 'series': series})
+        except Exception:
+            return {'name': name, 'global': glob, 'series': series}
+
+    def apply_all(self, preset):
+        """Restore every dock control + canvas size; unknown sids ignored."""
+        try:
+            data = dict(preset or {})
+        except Exception:
+            return
+        try:
+            pname = data.get('name')
+            if isinstance(pname, str) and pname:
+                self.source_name = pname
+        except Exception:
+            pass
+        glob = data.get('global', {})
+        if not isinstance(glob, dict):
+            glob = {}
+        series_saved = data.get('series', {})
+        if not isinstance(series_saved, dict):
+            series_saved = {}
+
+        def _set_checked(widget, val):
+            widget.blockSignals(True)
+            try:
+                widget.setChecked(bool(val))
+            finally:
+                widget.blockSignals(False)
+
+        def _set_text(widget, val):
+            widget.blockSignals(True)
+            try:
+                widget.setText(str(val))
+            finally:
+                widget.blockSignals(False)
+
+        # -- globals --
+        try:
+            if isinstance(glob.get('title'), str):
+                _set_text(self.title_edit, glob['title'])
+        except Exception:
+            pass
+        try:
+            if isinstance(glob.get('grid'), bool):
+                _set_checked(self.grid_check, glob['grid'])
+        except Exception:
+            pass
+        try:
+            fonts = glob.get('fonts', {})
+            if isinstance(fonts, dict):
+                for key, spin in (('title', self.font_title_spin),
+                                  ('label', self.font_label_spin),
+                                  ('tick', self.font_tick_spin),
+                                  ('legend', self.font_legend_spin)):
+                    try:
+                        v = fonts.get(key)
+                        if isinstance(v, (int, float)):
+                            spin.blockSignals(True)
+                            try:
+                                spin.setValue(int(v))
+                            finally:
+                                spin.blockSignals(False)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            if isinstance(glob.get('x_label'), str):
+                _set_text(self.x_label_edit, glob['x_label'])
+        except Exception:
+            pass
+        try:
+            if isinstance(glob.get('x_log'), bool):
+                _set_checked(self.x_log_check, glob['x_log'])
+        except Exception:
+            pass
+        try:
+            y_labels = glob.get('y_labels', {})
+            y_logs = glob.get('y_logs', {})
+            if not isinstance(y_labels, dict):
+                y_labels = {}
+            if not isinstance(y_logs, dict):
+                y_logs = {}
+            for y_col, cfg in dict(getattr(self, 'y_configs', {}) or {}).items():
+                try:
+                    if y_col in y_labels and isinstance(y_labels[y_col], str):
+                        _set_text(cfg['label_edit'], y_labels[y_col])
+                except Exception:
+                    pass
+                try:
+                    if y_col in y_logs and isinstance(y_logs[y_col], bool):
+                        _set_checked(cfg['log_check'], y_logs[y_col])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            leg = glob.get('legend', {})
+            if isinstance(leg, dict):
+                if isinstance(leg.get('show'), bool):
+                    _set_checked(self.show_legend_check, leg['show'])
+                if isinstance(leg.get('loc'), str):
+                    try:
+                        idx = self.legend_loc.findText(leg['loc'])
+                        if idx != -1:
+                            self.legend_loc.blockSignals(True)
+                            try:
+                                self.legend_loc.setCurrentIndex(idx)
+                            finally:
+                                self.legend_loc.blockSignals(False)
+                    except Exception:
+                        pass
+                if isinstance(leg.get('frame'), bool):
+                    _set_checked(self.legend_frame, leg['frame'])
+                if isinstance(leg.get('draggable'), bool):
+                    _set_checked(self.legend_draggable, leg['draggable'])
+        except Exception:
+            pass
+        # LaTeX without modal dialogs: never prompt inside apply.
+        try:
+            if isinstance(glob.get('latex'), bool):
+                want = bool(glob['latex'])
+                self.latex_check.blockSignals(True)
+                try:
+                    if want:
+                        try:
+                            missing = self.check_requirements()
+                        except Exception:
+                            missing = ['latex']
+                        if missing:
+                            self.latex_check.setChecked(False)
+                            PopOutWindow._session_latex_enabled = False
+                            try:
+                                plt.rcParams['text.usetex'] = False
+                                plt.rcParams['font.family'] = 'sans-serif'
+                            except Exception:
+                                pass
+                        else:
+                            self.latex_check.setChecked(True)
+                            PopOutWindow._session_latex_enabled = True
+                            try:
+                                plt.rcParams['text.usetex'] = True
+                                plt.rcParams['font.family'] = 'serif'
+                                plt.rcParams['font.serif'] = ['Computer Modern Roman']
+                            except Exception:
+                                pass
+                    else:
+                        self.latex_check.setChecked(False)
+                        PopOutWindow._session_latex_enabled = False
+                        try:
+                            plt.rcParams['text.usetex'] = False
+                            plt.rcParams['font.family'] = 'sans-serif'
+                        except Exception:
+                            pass
+                finally:
+                    self.latex_check.blockSignals(False)
+        except Exception:
+            pass
+
+        # -- series --
+        try:
+            for sid, saved in series_saved.items():
+                w = (self.line_widgets or {}).get(sid)
+                if w is None or not isinstance(saved, dict):
+                    continue
+                try:
+                    self._apply_series_widget(w, saved)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # -- canvas size (spins + unit win; figsize is the fallback) --
+        try:
+            width = glob.get('width')
+            height = glob.get('height')
+            unit = glob.get('unit')
+            if isinstance(width, (int, float)) and isinstance(height, (int, float)) \
+                    and isinstance(unit, str) and unit in ('px', 'in', 'mm', 'cm'):
+                self.unit_combo.blockSignals(True)
+                self.width_spin.blockSignals(True)
+                self.height_spin.blockSignals(True)
+                try:
+                    self.unit_combo.setCurrentText(unit)
+                    self.width_spin.setValue(float(width))
+                    self.height_spin.setValue(float(height))
+                finally:
+                    self.unit_combo.blockSignals(False)
+                    self.width_spin.blockSignals(False)
+                    self.height_spin.blockSignals(False)
+                try:
+                    self.apply_canvas_size()
+                except Exception:
+                    pass
+            elif isinstance(glob.get('figsize'), (list, tuple)) and len(glob['figsize']) == 2:
+                try:
+                    fw, fh = float(glob['figsize'][0]), float(glob['figsize'][1])
+                    self.unit_combo.blockSignals(True)
+                    self.width_spin.blockSignals(True)
+                    self.height_spin.blockSignals(True)
+                    try:
+                        self.unit_combo.setCurrentText('in')
+                        self.width_spin.setValue(fw)
+                        self.height_spin.setValue(fh)
+                    finally:
+                        self.unit_combo.blockSignals(False)
+                        self.width_spin.blockSignals(False)
+                        self.height_spin.blockSignals(False)
+                    try:
+                        self.apply_canvas_size()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            self.redraw_plot()
+        except Exception:
+            pass
+
+    def _apply_series_widget(self, w, saved):
+        w.blockSignals(True)
+        try:
+            if isinstance(saved.get('visible'), bool):
+                try:
+                    w.setChecked(bool(saved['visible']))
+                except Exception:
+                    pass
+            is_agg = hasattr(w, 'main_label')
+            if is_agg:
+                try:
+                    if isinstance(saved.get('label'), str):
+                        w.main_label.setText(saved['label'])
+                except Exception:
+                    pass
+                try:
+                    if isinstance(saved.get('show_legend'), bool):
+                        w.main_legend_check.blockSignals(True)
+                        try:
+                            w.main_legend_check.setChecked(bool(saved['show_legend']))
+                        finally:
+                            w.main_legend_check.blockSignals(False)
+                except Exception:
+                    pass
+                try:
+                    if 'color' in saved:
+                        w.main_color.blockSignals(True)
+                        try:
+                            w.main_color.set_color(_hex_to_qcolor(saved['color']))
+                        finally:
+                            w.main_color.blockSignals(False)
+                except Exception:
+                    pass
+                for attr, key in (('width_spin', 'linewidth'), ('size_spin', 'size')):
+                    try:
+                        if isinstance(saved.get(key), (int, float)):
+                            sp = getattr(w, attr, None)
+                            if sp is not None:
+                                sp.blockSignals(True)
+                                try:
+                                    sp.setValue(float(saved[key]))
+                                finally:
+                                    sp.blockSignals(False)
+                    except Exception:
+                        pass
+                for attr, key in (('style_combo', 'linestyle'), ('marker_combo', 'marker')):
+                    try:
+                        v = saved.get(key)
+                        if v is None and key == 'marker':
+                            v = 'None'
+                        if isinstance(v, str):
+                            cb = getattr(w, attr, None)
+                            if cb is not None:
+                                idx = cb.findText(v)
+                                if idx != -1:
+                                    cb.blockSignals(True)
+                                    try:
+                                        cb.setCurrentIndex(idx)
+                                    finally:
+                                        cb.blockSignals(False)
+                    except Exception:
+                        pass
+                for prefix, group_attr, has_attr in (
+                        ('std', 'std_group', 'has_std'),
+                        ('inter', 'inter_group', 'has_inter')):
+                    try:
+                        if not getattr(w, has_attr, False):
+                            continue
+                        grp = getattr(w, group_attr, None)
+                        if grp is None:
+                            continue
+                        vis = saved.get(prefix + '_visible', saved.get(prefix + '_show'))
+                        if isinstance(vis, bool):
+                            grp.blockSignals(True)
+                            try:
+                                grp.setChecked(bool(vis))
+                            finally:
+                                grp.blockSignals(False)
+                        lbl = saved.get(prefix + '_label')
+                        if isinstance(lbl, str):
+                            try:
+                                grp._le.setText(lbl)
+                            except Exception:
+                                pass
+                        sl = saved.get(prefix + '_show_legend')
+                        if isinstance(sl, bool):
+                            try:
+                                grp._lc.blockSignals(True)
+                                try:
+                                    grp._lc.setChecked(bool(sl))
+                                finally:
+                                    grp._lc.blockSignals(False)
+                            except Exception:
+                                pass
+                        if (prefix + '_color') in saved:
+                            try:
+                                grp._cb.blockSignals(True)
+                                try:
+                                    grp._cb.set_color(_hex_to_qcolor(saved[prefix + '_color']))
+                                finally:
+                                    grp._cb.blockSignals(False)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            else:
+                try:
+                    if isinstance(saved.get('label'), str):
+                        w.label_edit.setText(saved['label'])
+                except Exception:
+                    pass
+                try:
+                    if 'color' in saved:
+                        w.color_btn.blockSignals(True)
+                        try:
+                            w.color_btn.set_color(_hex_to_qcolor(saved['color']))
+                        finally:
+                            w.color_btn.blockSignals(False)
+                except Exception:
+                    pass
+                try:
+                    if isinstance(saved.get('size'), (int, float)):
+                        w.size_spin.blockSignals(True)
+                        try:
+                            w.size_spin.setValue(float(saved['size']))
+                        finally:
+                            w.size_spin.blockSignals(False)
+                except Exception:
+                    pass
+                try:
+                    if isinstance(saved.get('linewidth'), (int, float)) and hasattr(w, 'width_spin'):
+                        w.width_spin.blockSignals(True)
+                        try:
+                            w.width_spin.setValue(float(saved['linewidth']))
+                        finally:
+                            w.width_spin.blockSignals(False)
+                except Exception:
+                    pass
+                try:
+                    v = saved.get('linestyle')
+                    if isinstance(v, str) and hasattr(w, 'style_combo'):
+                        idx = w.style_combo.findText(v)
+                        if idx != -1:
+                            w.style_combo.blockSignals(True)
+                            try:
+                                w.style_combo.setCurrentIndex(idx)
+                            finally:
+                                w.style_combo.blockSignals(False)
+                except Exception:
+                    pass
+                try:
+                    if 'marker' in saved and hasattr(w, 'marker_combo'):
+                        v = saved.get('marker')
+                        if v is None:
+                            v = 'None'
+                        if isinstance(v, str):
+                            idx = w.marker_combo.findText(v)
+                            if idx != -1:
+                                w.marker_combo.blockSignals(True)
+                                try:
+                                    w.marker_combo.setCurrentIndex(idx)
+                                finally:
+                                    w.marker_combo.blockSignals(False)
+                except Exception:
+                    pass
+                try:
+                    if isinstance(saved.get('show_std'), bool) and hasattr(w, 'error_check'):
+                        w.error_check.blockSignals(True)
+                        try:
+                            w.error_check.setChecked(bool(saved['show_std']))
+                        finally:
+                            w.error_check.blockSignals(False)
+                except Exception:
+                    pass
+                try:
+                    if isinstance(saved.get('show_std_legend'), bool) and hasattr(w, 'error_legend_check'):
+                        w.error_legend_check.blockSignals(True)
+                        try:
+                            w.error_legend_check.setChecked(bool(saved['show_std_legend']))
+                        finally:
+                            w.error_legend_check.blockSignals(False)
+                except Exception:
+                    pass
+        finally:
+            try:
+                w.blockSignals(False)
+            except Exception:
+                pass
+
+    def closeEvent(self, event):
+        try:
+            cb = getattr(self, '_preset_on_close', None)
+            if cb is not None:
+                try:
+                    preset = self.collect_all()
+                except Exception:
+                    preset = None
+                if preset is not None:
+                    try:
+                        cb(self, preset)
+                    except Exception as e:
+                        logger.warning("Popout preset close-save failed: %s", e)
+        except Exception:
+            pass
+        event.accept()
 
 class LatexConfigDialog(QDialog):
     def __init__(self, parent=None, current_tex="", current_gs=""):
