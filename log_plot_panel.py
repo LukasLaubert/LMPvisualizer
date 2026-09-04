@@ -3253,6 +3253,7 @@ class LogPlotPanel(QWidget):
             if plot_info['show_original']:
                 plot_data = data.copy()
                 plot_data['row'] = plot_info['row']
+                plot_data['plot_id'] = plot_info['plot_id']
                 if not compute_raw_std: plot_data['std'] = None
                 if force_raw_std:
                     pale_std_color = QColor(plot_info['color'])
@@ -3281,7 +3282,8 @@ class LogPlotPanel(QWidget):
                             'x': running_mean_x, 'y': running_mean_y, 'std': std_inter_smooth,
                             'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
                             'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
-                            'row': plot_info['row']
+                            'row': plot_info['row'],
+                            'plot_id': plot_info['plot_id']
                         }
                         pale_color = QColor(plot_info['color'])
                         h, s, v, a = pale_color.getHsv()
@@ -3353,7 +3355,8 @@ class LogPlotPanel(QWidget):
                             'x': _rmx, 'y': _rmy, 'std': None, 
                             'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
                             'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
-                            'row': plot_info['row']
+                            'row': plot_info['row'],
+                            'plot_id': plot_info['plot_id']
                         }
                         self.plot_controller.add_or_update_plot_with_custom_colors(
                             legend_name + "_running_mean", mean_data, mean_color, 
@@ -4753,6 +4756,19 @@ class LogPlotPanel(QWidget):
             pass
         try:
             menu = QMenu(self.popout_btn)
+            self._fill_popout_menu(menu)
+            self.popout_btn.setMenu(menu)
+        except Exception as e:
+            logger.warning("[System] Popout menu rebuild failed: %s", e)
+
+    def _fill_popout_menu(self, menu):
+        """(Re)build the button menu rows into an existing menu (stays open)."""
+        try:
+            menu.clear()
+        except Exception:
+            pass
+        try:
+            presets = getattr(self, 'popout_presets', []) or []
             new_act = menu.addAction("New Pop Out")
             new_act.triggered.connect(lambda _c=False: self._open_fresh_popout())
             menu.addSeparator()
@@ -4776,24 +4792,33 @@ class LogPlotPanel(QWidget):
                 trash.setAutoRaise(True)
                 open_btn.clicked.connect(
                     lambda _c=False, n=name, m=menu: (m.close(), self._open_preset_popout(n)))
+                # No menu close here: the menu rebuilds in place so several
+                # entries can be deleted in a row; clicking away still closes.
                 trash.clicked.connect(
-                    lambda _c=False, n=name, m=menu: (m.close(), self._delete_popout_preset(n)))
+                    lambda _c=False, n=name, m=menu: self._delete_popout_preset(n, m))
                 hl.addWidget(open_btn, 1)
                 hl.addWidget(trash)
                 wa.setDefaultWidget(row)
                 menu.addAction(wa)
-            self.popout_btn.setMenu(menu)
         except Exception as e:
             logger.warning("[System] Popout menu rebuild failed: %s", e)
 
-    def _delete_popout_preset(self, name):
+    def _delete_popout_preset(self, name, menu=None):
         try:
             self.popout_presets = [p for p in (getattr(self, 'popout_presets', []) or [])
                                    if p.get('name') != name]
         except Exception:
             self.popout_presets = []
         try:
-            self._refresh_popout_button()
+            if menu is not None and (getattr(self, 'popout_presets', []) or []):
+                self._fill_popout_menu(menu)
+            else:
+                if menu is not None:
+                    try:
+                        menu.close()
+                    except Exception:
+                        pass
+                self._refresh_popout_button()
         except Exception:
             pass
         self._write_popout_autosave()

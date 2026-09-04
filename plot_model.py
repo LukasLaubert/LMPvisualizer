@@ -30,7 +30,8 @@ id, name, x, y, std, color, colors (optional per-point brushes for
 heatmap scatter), linestyle_matlab, linestyle_qt (optional, log only),
 width (line width), marker (mpl marker string), size (marker/scatter
 size), mode ('line' | 'scatter'), layer_priority, row (table row for
-legend order; fits/defaults use 1_000_000), show_legend (default True).
+legend order; fits/defaults use 1_000_000), show_legend (default True),
+uid (stable table id, e.g. log plot_id; None when unknown).
 
 Rendering helpers in this module implement the behaviours every caller
 must preserve:
@@ -79,7 +80,7 @@ def make_series(series_id, name, x, y, std=None, color=None,
                 linestyle_matlab='-', linestyle_qt=None, width=1.5,
                 marker='None', size=6, mode='line',
                 layer_priority=0, row=DEFAULT_ROW,
-                colors=None, show_legend=True):
+                colors=None, show_legend=True, uid=None):
     """Build one canonical series dict.
 
     x/y/std are stored as numpy arrays (or None for std). color is a
@@ -119,6 +120,7 @@ def make_series(series_id, name, x, y, std=None, color=None,
         'layer_priority': layer_priority,
         'row': row,
         'show_legend': show_legend,
+        'uid': uid,
     }
 
 

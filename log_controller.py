@@ -321,7 +321,8 @@ class LogController:
             'y_label': data.get('y_label', y_col_name),
             'x_col': data.get('x_col', ''),
             'x_label': data.get('x_label', data.get('x_col', '')),
-            'row': data.get('row', 1_000_000)  # table row for legend order; fits use large default
+            'row': data.get('row', 1_000_000),  # table row for legend order; fits use large default
+            'plot_id': data.get('plot_id'),  # stable table row id for preset matching
         }
         self.update_views()
 
@@ -788,6 +789,7 @@ class LogController:
                 width=pen.width(),
                 layer_priority=plot_info.get('layer_priority', 0),
                 row=plot_info.get('row', plot_model.DEFAULT_ROW),
+                uid=plot_info.get('plot_id'),
             )
             state['y_axes'][y_col]['series'].append(series_entry)
         

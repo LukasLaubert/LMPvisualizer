@@ -128,6 +128,25 @@ def _plain_series_props(props):
     except Exception:
         return {}
 
+def _should_restore_label(saved_text, saved_default, exact_hit):
+    """Custom-only text rule for preset apply.
+
+    Legend/title texts embed data names, so a saved text is restored only
+    if the user customized it (it differs from the default captured at
+    save time). Untouched defaults always follow the current data, which
+    keeps data renames (mean suffixes, columns, study/system) from
+    mislabeling curves. Legacy presets without a stored default keep the
+    old always-apply behaviour, but only on exact sid hits.
+    """
+    try:
+        if not isinstance(saved_text, str):
+            return False
+        if isinstance(saved_default, str):
+            return saved_text != saved_default
+        return bool(exact_hit)
+    except Exception:
+        return False
+
 class LinePropertiesWidget(QGroupBox):
     """Widget to control properties of a single line or scatter series."""
     propertiesChanged = pyqtSignal()
@@ -141,6 +160,7 @@ class LinePropertiesWidget(QGroupBox):
         
         super().__init__(elided_name, parent)
         self.setToolTip(full_name)
+        self._series_default = full_name
         
         self.series_id = series_id
         self.is_scatter = initial_props.get('mode') == 'scatter'
@@ -286,18 +306,21 @@ class LinePropertiesWidget(QGroupBox):
 
 
 class AggregatedLogPropertiesWidget(QGroupBox):
-    """One box per table row: main line + optional smooth/avg std bands (fill only)."""
+    """One box per table row: main (orig) line + avg line + smooth/avg/sys std bands as subboxes."""
     propertiesChanged = pyqtSignal()
 
-    def __init__(self, base_id, base_name, main_props, std_props=None, inter_props=None, parent=None):
+    def __init__(self, base_id, base_name, main_props, std_props=None, inter_props=None, mean_props=None, sys_props=None, parent=None):
         fm = QFontMetrics(QFont())
         elided = fm.elidedText(base_name, Qt.TextElideMode.ElideMiddle, 250)
         super().__init__(elided, parent)
         self.setToolTip(base_name)
         self.series_id = base_id
         self.base_name = base_name
+        self._series_default = main_props.get('name', base_name)
         self.has_std = std_props is not None
         self.has_inter = inter_props is not None
+        self.has_mean = mean_props is not None
+        self.has_sys = sys_props is not None
         self.setCheckable(True)
         self.setChecked(main_props.get('visible', True))
         self.toggled.connect(self.propertiesChanged)
@@ -372,10 +395,22 @@ class AggregatedLogPropertiesWidget(QGroupBox):
         # bands
         self.std_group = None
         self.inter_group = None
+        self.mean_group = None
+        self.sys_group = None
         if self.has_std:
             self.std_group = self._make_band("smooth std", std_props, layout)
         if self.has_inter:
             self.inter_group = self._make_band("avg std", inter_props, layout)
+        if self.has_mean:
+            # Mean curve beside the orig main line: own visibility,
+            # legend label and color; width/style/marker/size are shared
+            # with the main controls (one style per table row, as live).
+            self.mean_group = self._make_band("avg", mean_props, layout)
+        if self.has_sys:
+            # Raw system-selection std riding on the main (orig) curve
+            # (average & std system with smooth-before off): same controls.
+            # Legend stays off by default, as live (band without entry).
+            self.sys_group = self._make_band("sys std", sys_props, layout)
 
     def _make_band(self, title, props, parent_layout):
         box = QGroupBox(title, self)
@@ -405,6 +440,7 @@ class AggregatedLogPropertiesWidget(QGroupBox):
         box._le = le
         box._lc = lc
         box._cb = cb
+        box._default_label = le.text()
         parent_layout.addWidget(box)
         return box
 
@@ -434,6 +470,18 @@ class AggregatedLogPropertiesWidget(QGroupBox):
             props['inter_show_legend'] = self.inter_group._lc.isChecked()
             props['inter_color'] = self.inter_group._cb.color()
             props['inter_show'] = self.inter_group.isChecked()
+        if self.has_mean and self.mean_group:
+            props['mean_visible'] = self.mean_group.isChecked()
+            props['mean_label'] = self.mean_group._le.text()
+            props['mean_show_legend'] = self.mean_group._lc.isChecked()
+            props['mean_color'] = self.mean_group._cb.color()
+            props['mean_show'] = self.mean_group.isChecked()
+        if self.has_sys and self.sys_group:
+            props['sys_visible'] = self.sys_group.isChecked()
+            props['sys_label'] = self.sys_group._le.text()
+            props['sys_show_legend'] = self.sys_group._lc.isChecked()
+            props['sys_color'] = self.sys_group._cb.color()
+            props['sys_show'] = self.sys_group.isChecked()
         return props
 
 class PopOutWindow(QMainWindow):
@@ -499,6 +547,15 @@ class PopOutWindow(QMainWindow):
         self._populate_line_widgets()
 
         self.form_layout.addStretch()
+        if getattr(self, '_preset_on_close', None) is not None:
+            # Intermediate snapshot with close semantics; window, settings
+            # and lifecycle continue untouched (NO reset).
+            self.save_snapshot_btn = QPushButton("Save Snapshot")
+            self.save_snapshot_btn.setToolTip(
+                "Store the current settings as a preset entry and keep working; "
+                "closing still saves again")
+            self.save_snapshot_btn.clicked.connect(self._on_save_snapshot_clicked)
+            self.form_layout.addWidget(self.save_snapshot_btn)
         self.scroll.setWidget(self.scroll_content)
 
         # The two-column groups are wider than the old single-column form, so give the
@@ -739,18 +796,27 @@ class PopOutWindow(QMainWindow):
         for row, kind, payload in pending:
             if kind == 'agg':
                 y_col_key, base, layers = payload
-                main = layers['mean'] if layers['mean'] is not None else layers['orig']
+                has_orig = layers['orig'] is not None
+                # Main section always drives the Orig curve (the table row);
+                # the mean gets its own subbox. Mean-only rows keep the (avg)
+                # main label.
+                main = layers['orig'] if has_orig else layers['mean']
+                is_mean_main = not has_orig
                 std_s = layers['std']
                 inter_s = layers['inter']
-                has_std = std_s is not None and std_s.get('std') is not None
-                has_inter = inter_s is not None and inter_s.get('std') is not None
+                # Section presence follows the table intent (entry exists),
+                # not the band array content (constant data has no error bars).
+                has_std = std_s is not None
+                has_inter = inter_s is not None
                 sid = f"{y_col_key}_{base}"
                 main_color = main['color']
                 if main.get('colors'):
                     try: main_color = main['colors'][0]
                     except: pass
+                # The original keeps the plain table name; a mean shown as
+                # main (mean-only row) carries the (avg) suffix.
                 main_props = {
-                    'name': base,
+                    'name': base + ' (avg)' if is_mean_main else base,
                     'visible': True,
                     'color': main_color,
                     'linestyle': main.get('linestyle_matlab', '-'),
@@ -772,7 +838,22 @@ class PopOutWindow(QMainWindow):
                         try: c = inter_s['colors'][0]
                         except: pass
                     inter_props = {'name': base + ' (avg std)', 'visible': True, 'color': c, 'show_std': True, 'show_legend': True}
-                widget = AggregatedLogPropertiesWidget(sid, base, main_props, std_props, inter_props)
+                mean_props = None
+                mean_s = layers['mean']
+                if has_orig and mean_s is not None:
+                    mc = mean_s['color']
+                    if mean_s.get('colors'):
+                        try: mc = mean_s['colors'][0]
+                        except: pass
+                    mean_props = {'name': base + ' (avg)', 'visible': True, 'color': mc, 'show_std': True, 'show_legend': True}
+                sys_props = None
+                if main.get('std') is not None:
+                    # Raw system-selection std on the main curve (average &
+                    # std system, smooth-before off): own subbox so it can be
+                    # toggled and labeled like every other band. Defaults keep
+                    # the live look: band shown, no legend entry.
+                    sys_props = {'name': base + ' (sys std)', 'visible': True, 'color': main_color, 'show_std': True, 'show_legend': False}
+                widget = AggregatedLogPropertiesWidget(sid, base, main_props, std_props, inter_props, mean_props, sys_props)
                 widget.propertiesChanged.connect(self.redraw_plot)
                 widget.sync_btn.toggled.connect(lambda checked, w=widget: self._on_main_sync_toggled(checked, w))
                 widget.width_spin.valueChanged.connect(lambda v, w=widget: self._on_main_style_changed(w))
@@ -785,6 +866,7 @@ class PopOutWindow(QMainWindow):
                 self.lines_layout.addWidget(widget)
                 self.line_widgets[sid] = widget
                 self._aggregated_bases[(y_col_key, base)] = layers
+                widget._uid = main.get('uid')
             else:
                 series = payload
                 sid = series['id']
@@ -813,6 +895,7 @@ class PopOutWindow(QMainWindow):
                 widget.propertiesChanged.connect(self.redraw_plot)
                 self.lines_layout.addWidget(widget)
                 self.line_widgets[sid] = widget
+                widget._uid = series.get('uid')
 
     def _on_main_sync_toggled(self, checked, source):
         if self._in_sync:
@@ -1314,7 +1397,7 @@ class PopOutWindow(QMainWindow):
                     props = self.line_widgets[sid].get_properties()
                     if not props.get('visible', True):
                         continue
-                    main = layers.get('mean') if layers.get('mean') is not None else layers.get('orig')
+                    main = layers.get('orig') if layers.get('orig') is not None else layers.get('mean')
                     if main is None:
                         continue
                     all_x = main['x']
@@ -1329,6 +1412,21 @@ class PopOutWindow(QMainWindow):
                         main_label = None
                     c_main = props.get('color', main['color'])
                     color_tuple_main = plot_model.qcolor_to_rgba(c_main)
+                    main_std = main.get('std')
+                    if main_std is not None and getattr(self.line_widgets[sid], 'has_sys', False) \
+                            and props.get('sys_visible', True) and props.get('sys_show', True):
+                        # Raw system-selection std on the main curve: own
+                        # toggle, legend entry and color via the sys std
+                        # subbox (defaults: shown, unlabeled, main color).
+                        try:
+                            s_legend_on = props.get('sys_show_legend', False)
+                            s_label = props.get('sys_label') if s_legend_on else None
+                            s_c = plot_model.qcolor_to_rgba(props.get('sys_color', c_main))
+                            s_fill = plot_model.draw_std_fill(ax, all_x, all_y, main_std, s_c, label=s_label, zorder=z_val - 0.15, alpha=plot_model.AVG_FILL_ALPHA)
+                            if s_label:
+                                legend_entries.append((is_sel, row, 0, s_fill, s_label))
+                        except Exception:
+                            pass
                     std_s = layers.get('std')
                     inter_s = layers.get('inter')
                     all_std = std_s.get('std') if std_s else None
@@ -1366,12 +1464,38 @@ class PopOutWindow(QMainWindow):
                             scatter_h = plot_model.draw_scatter(ax, all_x, all_y, color_rgba=color_tuple_main, size=props.get('size', 10)**2, marker=props.get('marker', 'None') if props.get('marker') not in (None, 'None') else 'o', label=main_label, zorder=z_val)
                         if main_label:
                             legend_entries.append((is_sel, row, 2, scatter_h, main_label))
-                        continue
-                    lstyle = props.get('linestyle', '-')
-                    marker = props.get('marker', 'None')
-                    line = plot_model.draw_line(ax, all_x, all_y, color_tuple_main, linewidth=props.get('linewidth', 1.5), linestyle=lstyle, marker=marker, markersize=props.get('size', 6), label=main_label, zorder=z_val)
-                    if line is not None and main_label:
-                        legend_entries.append((is_sel, row, 2, line, main_label))
+                    else:
+                        lstyle = props.get('linestyle', '-')
+                        marker = props.get('marker', 'None')
+                        line = plot_model.draw_line(ax, all_x, all_y, color_tuple_main, linewidth=props.get('linewidth', 1.5), linestyle=lstyle, marker=marker, markersize=props.get('size', 6), label=main_label, zorder=z_val)
+                        if line is not None and main_label:
+                            legend_entries.append((is_sel, row, 2, line, main_label))
+                    mean_s = layers.get('mean')
+                    if layers.get('orig') is not None and mean_s is not None \
+                            and getattr(self.line_widgets[sid], 'has_mean', False) \
+                            and props.get('mean_visible', True) and props.get('mean_show', True):
+                        # Mean curve beside the orig main line: own color and
+                        # legend label, width/style shared with main (one
+                        # style per table row, as live).
+                        try:
+                            m_legend_on = props.get('mean_show_legend', True)
+                            m_label = props.get('mean_label') if m_legend_on else None
+                            m_c = plot_model.qcolor_to_rgba(props.get('mean_color', mean_s.get('color')))
+                            _, _, m_entries = plot_model.render_series(
+                                ax, mean_s, color=m_c, label=m_label,
+                                linestyle=props.get('linestyle', '-'),
+                                linewidth=props.get('linewidth', 1.5),
+                                marker=props.get('marker', 'None'),
+                                markersize=props.get('size', 6),
+                                show_std=False, show_legend=m_legend_on,
+                            )
+                            # render_series derives sub_prio from layer
+                            # priority (mean band prio -> 0); the avg line
+                            # belongs last per row: bands, orig, avg.
+                            m_entries = [(e[0], e[1], 3, e[3], e[4]) for e in m_entries]
+                            legend_entries.extend(m_entries)
+                        except Exception:
+                            pass
                 continue
             sorted_series = sorted(axis_data['series'], key=lambda s: s.get('layer_priority', 0))
             for series in sorted_series:
@@ -1521,6 +1645,27 @@ class PopOutWindow(QMainWindow):
         except Exception:
             glob['legend'] = {'show': True, 'loc': 'best', 'frame': True, 'draggable': True}
         try:
+            # Save-time text defaults so apply can tell customized text apart
+            # from untouched defaults (which must follow current data).
+            _pd = getattr(self, 'plot_data', {}) or {}
+            if isinstance(_pd, dict):
+                _t = _pd.get('title', '')
+                if isinstance(_t, str):
+                    glob['title_default'] = _t
+                _x = _pd.get('x_label', '')
+                if isinstance(_x, str):
+                    glob['x_default'] = _x
+                _yd = {}
+                for _yc, _ad in dict(_pd.get('y_axes', {}) or {}).items():
+                    try:
+                        _l = _ad.get('label', _yc) if isinstance(_ad, dict) else _yc
+                        _yd[_yc] = _l if isinstance(_l, str) else str(_yc)
+                    except Exception:
+                        pass
+                glob['y_defaults'] = _yd
+        except Exception:
+            pass
+        try:
             dpi = self.figure.get_dpi() if getattr(self, 'figure', None) is not None else 100
             cw, ch = self.canvas.width(), self.canvas.height()
             glob['figsize'] = [float(cw) / float(dpi), float(ch) / float(dpi)]
@@ -1539,7 +1684,45 @@ class PopOutWindow(QMainWindow):
         try:
             for sid, w in dict(getattr(self, 'line_widgets', {}) or {}).items():
                 try:
-                    series[sid] = _plain_series_props(w.get_properties())
+                    props = _plain_series_props(w.get_properties())
+                    try:
+                        _u = getattr(w, '_uid', None)
+                    except Exception:
+                        _u = None
+                    # JSON-safe stable id only; anything exotic degrades to sid matching.
+                    if _u is not None and isinstance(_u, (int, str)) and not isinstance(_u, bool):
+                        props['uid'] = _u
+                    # Save-time defaults for the custom-only text rule.
+                    try:
+                        _sd = getattr(w, '_series_default', None)
+                    except Exception:
+                        _sd = None
+                    if isinstance(_sd, str):
+                        props['label_default'] = _sd
+                    try:
+                        _sg = getattr(w, 'std_group', None)
+                        if _sg is not None:
+                            _bd = getattr(_sg, '_default_label', None)
+                            if isinstance(_bd, str):
+                                props['std_label_default'] = _bd
+                        _ig = getattr(w, 'inter_group', None)
+                        if _ig is not None:
+                            _bd = getattr(_ig, '_default_label', None)
+                            if isinstance(_bd, str):
+                                props['inter_label_default'] = _bd
+                        _og = getattr(w, 'mean_group', None)
+                        if _og is not None:
+                            _bd = getattr(_og, '_default_label', None)
+                            if isinstance(_bd, str):
+                                props['mean_label_default'] = _bd
+                        _yg = getattr(w, 'sys_group', None)
+                        if _yg is not None:
+                            _bd = getattr(_yg, '_default_label', None)
+                            if isinstance(_bd, str):
+                                props['sys_label_default'] = _bd
+                    except Exception:
+                        pass
+                    series[sid] = props
                 except Exception:
                     continue
         except Exception:
@@ -1584,8 +1767,11 @@ class PopOutWindow(QMainWindow):
 
         # -- globals --
         try:
-            if isinstance(glob.get('title'), str):
-                _set_text(self.title_edit, glob['title'])
+            _t = glob.get('title')
+            if isinstance(_t, str):
+                _td = glob.get('title_default')
+                if _should_restore_label(_t, _td if isinstance(_td, str) else None, True):
+                    _set_text(self.title_edit, _t)
         except Exception:
             pass
         try:
@@ -1613,8 +1799,11 @@ class PopOutWindow(QMainWindow):
         except Exception:
             pass
         try:
-            if isinstance(glob.get('x_label'), str):
-                _set_text(self.x_label_edit, glob['x_label'])
+            _x = glob.get('x_label')
+            if isinstance(_x, str):
+                _xd = glob.get('x_default')
+                if _should_restore_label(_x, _xd if isinstance(_xd, str) else None, True):
+                    _set_text(self.x_label_edit, _x)
         except Exception:
             pass
         try:
@@ -1625,14 +1814,19 @@ class PopOutWindow(QMainWindow):
         try:
             y_labels = glob.get('y_labels', {})
             y_logs = glob.get('y_logs', {})
+            y_defaults = glob.get('y_defaults', {})
             if not isinstance(y_labels, dict):
                 y_labels = {}
+            if not isinstance(y_defaults, dict):
+                y_defaults = {}
             if not isinstance(y_logs, dict):
                 y_logs = {}
             for y_col, cfg in dict(getattr(self, 'y_configs', {}) or {}).items():
                 try:
                     if y_col in y_labels and isinstance(y_labels[y_col], str):
-                        _set_text(cfg['label_edit'], y_labels[y_col])
+                        _yd = y_defaults.get(y_col) if isinstance(y_defaults, dict) else None
+                        if _should_restore_label(y_labels[y_col], _yd if isinstance(_yd, str) else None, True):
+                            _set_text(cfg['label_edit'], y_labels[y_col])
                 except Exception:
                     pass
                 try:
@@ -1705,14 +1899,47 @@ class PopOutWindow(QMainWindow):
         except Exception:
             pass
 
-        # -- series --
+        # -- series: exact sid first, stable uid (log plot_id) as fallback --
         try:
+            widgets = self.line_widgets or {}
+            applied = set()
+            uid_index = {}
+            try:
+                for _w in widgets.values():
+                    try:
+                        _u = getattr(_w, '_uid', None)
+                    except Exception:
+                        _u = None
+                    if _u is not None and isinstance(_u, (int, str)) and not isinstance(_u, bool):
+                        uid_index.setdefault(_u, []).append(_w)
+            except Exception:
+                uid_index = {}
             for sid, saved in series_saved.items():
-                w = (self.line_widgets or {}).get(sid)
-                if w is None or not isinstance(saved, dict):
-                    continue
                 try:
-                    self._apply_series_widget(w, saved)
+                    if not isinstance(saved, dict):
+                        continue
+                    w = widgets.get(sid)
+                    if w is None:
+                        try:
+                            _u = saved.get('uid')
+                        except Exception:
+                            _u = None
+                        if _u is not None and isinstance(_u, (int, str)) and not isinstance(_u, bool):
+                            for _c in uid_index.get(_u, []):
+                                if id(_c) not in applied:
+                                    w = _c
+                                    break
+                    if w is None:
+                        continue
+                    applied.add(id(w))
+                    try:
+                        try:
+                            _exact = (w is widgets.get(sid))
+                        except Exception:
+                            _exact = False
+                        self._apply_series_widget(w, saved, _exact)
+                    except Exception:
+                        continue
                 except Exception:
                     continue
         except Exception:
@@ -1768,7 +1995,7 @@ class PopOutWindow(QMainWindow):
         except Exception:
             pass
 
-    def _apply_series_widget(self, w, saved):
+    def _apply_series_widget(self, w, saved, exact_hit=True):
         w.blockSignals(True)
         try:
             if isinstance(saved.get('visible'), bool):
@@ -1779,7 +2006,7 @@ class PopOutWindow(QMainWindow):
             is_agg = hasattr(w, 'main_label')
             if is_agg:
                 try:
-                    if isinstance(saved.get('label'), str):
+                    if _should_restore_label(saved.get('label'), saved.get('label_default'), exact_hit):
                         w.main_label.setText(saved['label'])
                 except Exception:
                     pass
@@ -1832,7 +2059,9 @@ class PopOutWindow(QMainWindow):
                         pass
                 for prefix, group_attr, has_attr in (
                         ('std', 'std_group', 'has_std'),
-                        ('inter', 'inter_group', 'has_inter')):
+                        ('inter', 'inter_group', 'has_inter'),
+                        ('mean', 'mean_group', 'has_mean'),
+                        ('sys', 'sys_group', 'has_sys')):
                     try:
                         if not getattr(w, has_attr, False):
                             continue
@@ -1847,7 +2076,7 @@ class PopOutWindow(QMainWindow):
                             finally:
                                 grp.blockSignals(False)
                         lbl = saved.get(prefix + '_label')
-                        if isinstance(lbl, str):
+                        if _should_restore_label(lbl, saved.get(prefix + '_label_default'), exact_hit):
                             try:
                                 grp._le.setText(lbl)
                             except Exception:
@@ -1875,7 +2104,7 @@ class PopOutWindow(QMainWindow):
                         pass
             else:
                 try:
-                    if isinstance(saved.get('label'), str):
+                    if _should_restore_label(saved.get('label'), saved.get('label_default'), exact_hit):
                         w.label_edit.setText(saved['label'])
                 except Exception:
                     pass
@@ -1956,6 +2185,24 @@ class PopOutWindow(QMainWindow):
                 w.blockSignals(False)
             except Exception:
                 pass
+
+    def _on_save_snapshot_clicked(self):
+        """Store current settings via the close-save callback, change nothing else."""
+        try:
+            cb = getattr(self, '_preset_on_close', None)
+            if cb is None:
+                return
+            try:
+                preset = self.collect_all()
+            except Exception:
+                preset = None
+            if preset is not None:
+                try:
+                    cb(self, preset)
+                except Exception as e:
+                    logger.warning("Popout preset snapshot save failed: %s", e)
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         try:
