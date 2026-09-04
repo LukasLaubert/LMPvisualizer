@@ -1077,14 +1077,15 @@ class DSDPlotPanel(QWidget):
     def save_session(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save DSD Session", "", "JSON Files (*.json)")
         if not path: return
-        self.save_session_to_file(path)
+        self.save_session_to_file(path, trigger="manual save")
 
     def load_session(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load DSD Session", "", "JSON Files (*.json)")
         if not path: return
         self.load_session_from_file(path)
         
-    def save_session_to_file(self, path):
+    def save_session_to_file(self, path, trigger=None):
+        # trigger accepted for funnel uniformity; dsd stays silent on save.
         project_paths = self.main_window.get_project_paths()
         if not project_paths: return False
         
@@ -1395,9 +1396,9 @@ class DSDPlotPanel(QWidget):
             return []
         return out
 
-    def _write_popout_autosave(self):
+    def _write_popout_autosave(self, trigger=None):
         try:
-            self.main_window.save_session_for_mode(self.main_window.MODE_DSD)
+            self.main_window.save_session_for_mode(self.main_window.MODE_DSD, trigger=trigger)
         except Exception as e:
             logger.warning("[System] Popout preset autosave failed: %s", e)
 
@@ -1484,9 +1485,9 @@ class DSDPlotPanel(QWidget):
                 self._refresh_popout_button()
         except Exception:
             pass
-        self._write_popout_autosave()
+        self._write_popout_autosave("preset deleted")
 
-    def _on_popout_closed(self, window, preset):
+    def _on_popout_closed(self, window, preset, trigger=None):
         try:
             src = getattr(window, 'source_name', None)
             existing = [p.get('name') for p in (getattr(self, 'popout_presets', []) or [])]
@@ -1520,7 +1521,7 @@ class DSDPlotPanel(QWidget):
             self._refresh_popout_button()
         except Exception:
             pass
-        self._write_popout_autosave()
+        self._write_popout_autosave(trigger or "popout closed")
 
     def _track_popout(self, win):
         if not hasattr(self.main_window, 'dsd_popouts'):

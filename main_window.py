@@ -269,7 +269,7 @@ class MainWindow(QMainWindow):
     def on_mode_combo_changed(self, index):
         """Handles user changing mode via dropdown."""
         # 1. Save Old Mode State
-        self.save_session_for_mode(self.current_mode_index)
+        self.save_session_for_mode(self.current_mode_index, trigger="mode switch")
         
         # 2. Save Keywords for Old Mode
         self.mode_keywords[self.current_mode_index] = self.chip_input.get_chips()
@@ -310,7 +310,7 @@ class MainWindow(QMainWindow):
         else:
             logger.info("[System] Switching to %s. Loading skipped.", mode_name)
 
-    def save_session_for_mode(self, mode_index):
+    def save_session_for_mode(self, mode_index, trigger=None):
         """Saves the session state for the given mode index."""
         if mode_index == self.MODE_NEUTRAL:
             return
@@ -326,12 +326,12 @@ class MainWindow(QMainWindow):
         filename = self.AUTOSAVE_FILES.get(mode_index)
         
         if panel and filename:
-             config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
-             os.makedirs(config_dir, exist_ok=True)
-             path = os.path.join(config_dir, filename)
-             
-             if has_panel_method(panel, 'save_session_to_file'):
-                  panel.save_session_to_file(path)
+            config_dir = os.path.join(os.path.expanduser('~'), '.LMPvisualizer')
+            os.makedirs(config_dir, exist_ok=True)
+            path = os.path.join(config_dir, filename)
+
+            if has_panel_method(panel, 'save_session_to_file'):
+                panel.save_session_to_file(path, trigger=trigger)
 
     def load_session_for_mode(self, mode_index):
         """Loads the session state for the given mode index."""
@@ -581,5 +581,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle application exit: Save state for current mode."""
         if self.current_mode_index != self.MODE_NEUTRAL:
-            self.save_session_for_mode(self.current_mode_index)
+            self.save_session_for_mode(self.current_mode_index, trigger="app close")
         super().closeEvent(event)

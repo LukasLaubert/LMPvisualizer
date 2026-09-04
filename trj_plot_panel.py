@@ -1623,9 +1623,9 @@ class TrjPlotPanel(QWidget):
             return []
         return out
 
-    def _write_popout_autosave(self):
+    def _write_popout_autosave(self, trigger=None):
         try:
-            self.main_window.save_session_for_mode(self.main_window.MODE_TRJ)
+            self.main_window.save_session_for_mode(self.main_window.MODE_TRJ, trigger=trigger)
         except Exception as e:
             logger.warning("[System] Popout preset autosave failed: %s", e)
 
@@ -1712,9 +1712,9 @@ class TrjPlotPanel(QWidget):
                 self._refresh_popout_button()
         except Exception:
             pass
-        self._write_popout_autosave()
+        self._write_popout_autosave("preset deleted")
 
-    def _on_popout_closed(self, window, preset):
+    def _on_popout_closed(self, window, preset, trigger=None):
         try:
             src = getattr(window, 'source_name', None)
             existing = [p.get('name') for p in (getattr(self, 'popout_presets', []) or [])]
@@ -1748,7 +1748,7 @@ class TrjPlotPanel(QWidget):
             self._refresh_popout_button()
         except Exception:
             pass
-        self._write_popout_autosave()
+        self._write_popout_autosave(trigger or "popout closed")
 
     def _track_popout(self, win):
         try:
@@ -1887,7 +1887,7 @@ class TrjPlotPanel(QWidget):
                         break
         return has_valid_row
 
-    def save_session_to_file(self, path):
+    def save_session_to_file(self, path, trigger=None):
         """Saves session to a specific file path."""
         # Update current row state before saving to capture latest view changes
         self._save_current_row_state()
@@ -1924,22 +1924,23 @@ class TrjPlotPanel(QWidget):
             }
             session_data['rows'].append(row_data)
             
+        tag = f" ({trigger})" if trigger else ""
         try:
             success = SettingsManager.save_state(path, session_data)
             if success:
-                logger.info("[System] Saved session: %s for mode Trajectory Plot", path)
+                logger.info("[System] Saved session: %s for mode Trajectory Plot%s", path, tag)
             else:
-                logger.warning("[System] Failed to save session: %s", path)
+                logger.warning("[System] Failed to save session: %s%s", path, tag)
             return success
         except Exception as e:
-            logger.warning("[System] Error saving session: %s", e)
+            logger.warning("[System] Error saving session%s: %s", tag, e)
             return False
 
     def save_session(self):
         """Opens file dialog to save session manually."""
         path, _ = QFileDialog.getSaveFileName(self, "Save Trj Session", "", "JSON Files (*.json)")
         if not path: return
-        self.save_session_to_file(path)
+        self.save_session_to_file(path, trigger="manual save")
 
     def load_session(self):
         """Opens file dialog to load session manually."""

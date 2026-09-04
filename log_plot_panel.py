@@ -4379,22 +4379,23 @@ class LogPlotPanel(QWidget):
         
         return has_valid_row
 
-    def save_session_to_file(self, path):
+    def save_session_to_file(self, path, trigger=None):
         """Saves session to a specific file path."""
         # Validate before saving to prevent overwriting good data with an empty state
         if not self._is_session_valid():
             logger.info("[System] Save aborted: Session contains no valid data.")
             return False
 
+        tag = f" ({trigger})" if trigger else ""
         try:
             success = SettingsManager.save_state(path, self._get_current_state_dict())
             if success:
-                logger.info("[System] Saved session: %s for mode Log Plot", path)
+                logger.info("[System] Saved session: %s for mode Log Plot%s", path, tag)
             else:
-                logger.warning("[System] Failed to save session: %s", path)
+                logger.warning("[System] Failed to save session: %s%s", path, tag)
             return success
         except Exception as e:
-            logger.warning("[System] Error saving session: %s", e)
+            logger.warning("[System] Error saving session%s: %s", tag, e)
             return False
 
     def _save_state_on_exit(self):
@@ -4409,7 +4410,7 @@ class LogPlotPanel(QWidget):
         if not path:
             return
         
-        if self.save_session_to_file(path):
+        if self.save_session_to_file(path, trigger="manual save"):
             QMessageBox.information(self, "Success", "Session saved successfully.")
         else:
             logger.warning("[System] Failed to save session: %s", path)
@@ -4732,9 +4733,9 @@ class LogPlotPanel(QWidget):
             return []
         return out
 
-    def _write_popout_autosave(self):
+    def _write_popout_autosave(self, trigger=None):
         try:
-            self.main_window.save_session_for_mode(self.main_window.MODE_LOG)
+            self.main_window.save_session_for_mode(self.main_window.MODE_LOG, trigger=trigger)
         except Exception as e:
             logger.warning("[System] Popout preset autosave failed: %s", e)
 
@@ -4821,9 +4822,9 @@ class LogPlotPanel(QWidget):
                 self._refresh_popout_button()
         except Exception:
             pass
-        self._write_popout_autosave()
+        self._write_popout_autosave("preset deleted")
 
-    def _on_popout_closed(self, window, preset):
+    def _on_popout_closed(self, window, preset, trigger=None):
         try:
             src = getattr(window, 'source_name', None)
             existing = [p.get('name') for p in (getattr(self, 'popout_presets', []) or [])]
@@ -4857,7 +4858,7 @@ class LogPlotPanel(QWidget):
             self._refresh_popout_button()
         except Exception:
             pass
-        self._write_popout_autosave()
+        self._write_popout_autosave(trigger or "popout closed")
 
     def _open_fresh_popout(self):
         """Creates a new independent window with the current plot data."""

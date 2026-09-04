@@ -2198,7 +2198,7 @@ class PopOutWindow(QMainWindow):
                 preset = None
             if preset is not None:
                 try:
-                    cb(self, preset)
+                    cb(self, preset, "snapshot")
                 except Exception as e:
                     logger.warning("Popout preset snapshot save failed: %s", e)
         except Exception:
