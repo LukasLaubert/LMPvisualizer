@@ -1,13 +1,14 @@
 # lmp_visualizer/trj_plot_panel.py
 
 import os
+import copy
 import random
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout, 
     QComboBox, QPushButton, QTableWidget, QHeaderView, QTableWidgetItem,
     QSizePolicy, QCheckBox, QSplitter, QFrame, QMenu, QLineEdit,
-    QMessageBox, QFileDialog, QAbstractItemView, QWidget
+    QMessageBox, QFileDialog, QAbstractItemView, QWidgetAction, QToolButton
 )
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QColor, QIntValidator, QFont
@@ -85,6 +86,8 @@ class TrjPlotPanel(QWidget):
 
         # Track last selected row to save state before switching
         self.last_selected_row = -1
+        self.popout_presets = []
+        self.popout_windows = []
         
         # UI Setup
         self._init_ui()
@@ -92,6 +95,10 @@ class TrjPlotPanel(QWidget):
         self._connect_signals()
         
         self._update_ui_state(project_loaded=False)
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -423,7 +430,7 @@ class TrjPlotPanel(QWidget):
         self.heatmap_bar.boundsReset.connect(self._on_heatmap_bounds_reset)
 
 
-        self.popout_btn.clicked.connect(self.launch_popout)
+        self.popout_btn.clicked.connect(self._on_popout_button_clicked)
         # self.export_btn click is handled by its dropdown menu
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
@@ -1560,18 +1567,233 @@ class TrjPlotPanel(QWidget):
         self.lock_axes_btn.setText(text)
 
     def launch_popout(self):
+        self._open_fresh_popout()
+
+    def _on_popout_button_clicked(self):
+        if getattr(self, 'popout_presets', None):
+            try:
+                self.popout_btn.showMenu()
+            except Exception:
+                pass
+            return
+        self._open_fresh_popout()
+
+    def _mint_preset_name(self, existing):
+        try:
+            from popout_window import mint_preset_name as _mint
+            return _mint(existing)
+        except Exception:
+            pass
+        try:
+            import datetime
+            try:
+                from zoneinfo import ZoneInfo
+                now = datetime.datetime.now(datetime.timezone.utc).astimezone(ZoneInfo("Europe/Berlin"))
+            except Exception:
+                now = datetime.datetime.now().astimezone()
+            base = now.strftime("%Y-%m-%d_%H:%M:%S")
+        except Exception:
+            base = "preset"
+        if base not in (existing or []):
+            return base
+        i = 2
+        while f"{base}_{i}" in (existing or []):
+            i += 1
+        return f"{base}_{i}"
+
+    def _sanitize_popout_presets(self, raw):
+        out = []
+        try:
+            if not isinstance(raw, list):
+                return []
+            for p in raw:
+                if not isinstance(p, dict):
+                    continue
+                name = p.get('name')
+                if not isinstance(name, str) or not name:
+                    continue
+                if not isinstance(p.get('global'), dict) or not isinstance(p.get('series'), dict):
+                    continue
+                try:
+                    out.append(copy.deepcopy(p))
+                except Exception:
+                    out.append({'name': name, 'global': dict(p.get('global')),
+                                'series': dict(p.get('series'))})
+        except Exception:
+            return []
+        return out
+
+    def _write_popout_autosave(self):
+        try:
+            self.main_window.save_session_for_mode(self.main_window.MODE_TRJ)
+        except Exception as e:
+            logger.warning("[System] Popout preset autosave failed: %s", e)
+
+    def _refresh_popout_button(self):
+        presets = getattr(self, 'popout_presets', []) or []
+        if not presets:
+            try:
+                self.popout_btn.setMenu(None)
+            except Exception:
+                pass
+            try:
+                self.popout_btn.setText("Pop Out")
+            except Exception:
+                pass
+            return
+        try:
+            self.popout_btn.setText("Pop Out")
+        except Exception:
+            pass
+        try:
+            menu = QMenu(self.popout_btn)
+            new_act = menu.addAction("New Pop Out")
+            new_act.triggered.connect(lambda _c=False: self._open_fresh_popout())
+            menu.addSeparator()
+            for preset in list(presets):
+                try:
+                    name = preset.get('name', 'preset')
+                except Exception:
+                    continue
+                wa = QWidgetAction(menu)
+                row = QWidget()
+                hl = QHBoxLayout(row)
+                hl.setContentsMargins(4, 2, 4, 2)
+                hl.setSpacing(6)
+                open_btn = QPushButton(name)
+                open_btn.setFlat(True)
+                open_btn.setStyleSheet("text-align: left;")
+                open_btn.setMinimumWidth(160)
+                trash = QToolButton()
+                trash.setText("\U0001f5d1")
+                trash.setToolTip("Delete preset")
+                trash.setAutoRaise(True)
+                open_btn.clicked.connect(
+                    lambda _c=False, n=name, m=menu: (m.close(), self._open_preset_popout(n)))
+                trash.clicked.connect(
+                    lambda _c=False, n=name, m=menu: (m.close(), self._delete_popout_preset(n)))
+                hl.addWidget(open_btn, 1)
+                hl.addWidget(trash)
+                wa.setDefaultWidget(row)
+                menu.addAction(wa)
+            self.popout_btn.setMenu(menu)
+        except Exception as e:
+            logger.warning("[System] Popout menu rebuild failed: %s", e)
+
+    def _delete_popout_preset(self, name):
+        try:
+            self.popout_presets = [p for p in (getattr(self, 'popout_presets', []) or [])
+                                   if p.get('name') != name]
+        except Exception:
+            self.popout_presets = []
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
+        self._write_popout_autosave()
+
+    def _on_popout_closed(self, window, preset):
+        try:
+            src = getattr(window, 'source_name', None)
+            existing = [p.get('name') for p in (getattr(self, 'popout_presets', []) or [])]
+            if src:
+                replaced = False
+                for i, p in enumerate(self.popout_presets):
+                    if p.get('name') == src:
+                        try:
+                            preset['name'] = src
+                        except Exception:
+                            pass
+                        self.popout_presets[i] = copy.deepcopy(preset)
+                        replaced = True
+                        break
+                if not replaced:
+                    try:
+                        preset['name'] = self._mint_preset_name(existing)
+                    except Exception:
+                        pass
+                    self.popout_presets.append(copy.deepcopy(preset))
+            else:
+                try:
+                    preset['name'] = self._mint_preset_name(existing)
+                except Exception:
+                    pass
+                self.popout_presets.append(copy.deepcopy(preset))
+        except Exception as e:
+            logger.warning("[System] Popout preset save failed: %s", e)
+            return
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
+        self._write_popout_autosave()
+
+    def _track_popout(self, win):
+        try:
+            self.popout_windows.append(win)
+        except Exception:
+            pass
+        try:
+            self.pop_win = win
+        except Exception:
+            pass
+        try:
+            win.destroyed.connect(
+                lambda: self.popout_windows.remove(win) if win in self.popout_windows else None)
+        except Exception:
+            pass
+
+    def _open_fresh_popout(self):
         from popout_window import PopOutWindow
         state = self.controller.get_current_plot_state()
-        if not state or not state.get('y_axes'): 
+        if not state or not state.get('y_axes'):
             QMessageBox.information(self, "Info", "No valid data to pop out.")
             return
-            
+
         dpi = self.logicalDpiX()
         w_in = self.plot_widget.width() / dpi
         h_in = self.plot_widget.height() / dpi
-        
-        self.pop_win = PopOutWindow(state, figsize=(w_in, h_in))
+
+        self.pop_win = PopOutWindow(state, figsize=(w_in, h_in),
+                                    source_name=None, on_close=self._on_popout_closed)
         self.pop_win.show()
+        self._track_popout(self.pop_win)
+
+    def _open_preset_popout(self, name):
+        try:
+            preset = next((p for p in (getattr(self, 'popout_presets', []) or [])
+                           if p.get('name') == name), None)
+        except Exception:
+            preset = None
+        if preset is None:
+            return
+        try:
+            from popout_window import PopOutWindow
+        except ImportError:
+            logger.warning("Matplotlib is required for the Pop Out feature.")
+            QMessageBox.critical(self, "Error", "Matplotlib is required for the Pop Out feature.\nPlease install it via pip: pip install matplotlib")
+            return
+        try:
+            state = self.controller.get_current_plot_state()
+        except Exception:
+            return
+        if not state or not state.get('y_axes'):
+            QMessageBox.information(self, "Info", "No valid data to pop out.")
+            return
+        try:
+            dpi = self.logicalDpiX()
+            w_in = self.plot_widget.width() / dpi
+            h_in = self.plot_widget.height() / dpi
+        except Exception:
+            w_in, h_in = 11.0, 6.5
+        win = PopOutWindow(state, figsize=(w_in, h_in),
+                           source_name=name, on_close=self._on_popout_closed)
+        try:
+            win.apply_all(copy.deepcopy(preset))
+        except Exception as e:
+            logger.warning("[System] Popout preset apply failed: %s", e)
+        win.show()
+        self._track_popout(win)
 
     def export_image(self):
         filters = (
@@ -1663,7 +1885,8 @@ class TrjPlotPanel(QWidget):
             'initial_step': self.controller.timesteps[0] if self.controller.timesteps else None,
             'final_step': self.controller.timesteps[-1] if self.controller.timesteps else None,
             'rows': [],
-            'global_label_map': self.global_label_map
+            'global_label_map': self.global_label_map,
+            'popout_presets': copy.deepcopy(getattr(self, 'popout_presets', []) or [])
         }
         
         for row in range(self.plot_table.rowCount()):
@@ -1754,6 +1977,14 @@ class TrjPlotPanel(QWidget):
 
         # --- Load Logic ---
         self.global_label_map = data.get('global_label_map', {})
+        try:
+            self.popout_presets = self._sanitize_popout_presets(data.get('popout_presets', []))
+        except Exception:
+            self.popout_presets = []
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
         project_paths = self.main_window.session_paths(data)
         keywords = data.get('keywords', [])
 

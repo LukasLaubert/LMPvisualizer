@@ -1,11 +1,12 @@
 import os
+import copy
 import random
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout, 
     QComboBox, QPushButton, QHeaderView, QTableWidgetItem,
     QSizePolicy, QSplitter, QFrame, QMessageBox, QFileDialog, QAbstractItemView,
-    QMenu, QCheckBox, QTextEdit, QTableWidget
+    QMenu, QCheckBox, QTextEdit, QTableWidget, QWidgetAction, QToolButton
 )
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QColor, QIntValidator, QActionGroup, QAction, QFont, QFontMetrics
@@ -19,7 +20,7 @@ from trj_widgets import FilterBarWidget, PlayerControlWidget
 from ui_components import ColorButton, NoNewLineDelegate, RightClickButton, MissingPathResolver
 from settings_manager import SettingsManager
 from log_parser import LogParser
-from popout_window import PopOutWindow
+from popout_window import PopOutWindow, mint_preset_name
 from auto_index_dialog import AutoIndexDialog
 from video_export_dialog import VideoExportDialog
 from logger_setup import get_logger
@@ -42,12 +43,17 @@ class DSDPlotPanel(QWidget):
         # Set while load_project() rebuilds the data manager, so on_system_changed()
         # forces the controller to re-derive its timestep lists.
         self._force_system_reload = False
+        self.popout_presets = []
 
         self._init_ui()
         self.controller = DSDController(self.plot_widget, self.data_manager)
         self._connect_signals()
         
         self._update_ui_state(project_loaded=False)
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -434,7 +440,7 @@ class DSDPlotPanel(QWidget):
         self.player_controls.rangeRequested.connect(self._on_range_requested)
         self.player_controls.jumpToStepRequested.connect(self._on_jump_to_step)
         
-        self.popout_btn.clicked.connect(self.launch_popout)
+        self.popout_btn.clicked.connect(self._on_popout_button_clicked)
         # self.export_btn click is handled by its dropdown menu
         self.save_btn.clicked.connect(self.save_session)
         self.load_btn.clicked.connect(self.load_session)
@@ -1135,7 +1141,8 @@ class DSDPlotPanel(QWidget):
                 'current_step_index': self.player_controls.slider.value(),
                 'current_step_pct': current_pct,
                 'last_target_strain': getattr(self.controller, 'last_target_strain', None)
-            }
+            },
+            'popout_presets': copy.deepcopy(getattr(self, 'popout_presets', []) or [])
         }
         
         return SettingsManager.save_state(path, session_data)
@@ -1194,6 +1201,14 @@ class DSDPlotPanel(QWidget):
         self._loading_session = True
 
         try:
+            try:
+                self.popout_presets = self._sanitize_popout_presets(data.get('popout_presets', []))
+            except Exception:
+                self.popout_presets = []
+            try:
+                self._refresh_popout_button()
+            except Exception:
+                pass
             # 1. Load Project Data
             project_paths = self.main_window.session_paths(data)
             keywords = data.get('keywords', [])
@@ -1347,6 +1362,151 @@ class DSDPlotPanel(QWidget):
             self.main_window.chip_input.blockSignals(False)
 
     def launch_popout(self):
+        self._open_fresh_popout()
+
+    def _on_popout_button_clicked(self):
+        if getattr(self, 'popout_presets', None):
+            try:
+                self.popout_btn.showMenu()
+            except Exception:
+                pass
+            return
+        self._open_fresh_popout()
+
+    def _sanitize_popout_presets(self, raw):
+        out = []
+        try:
+            if not isinstance(raw, list):
+                return []
+            for p in raw:
+                if not isinstance(p, dict):
+                    continue
+                name = p.get('name')
+                if not isinstance(name, str) or not name:
+                    continue
+                if not isinstance(p.get('global'), dict) or not isinstance(p.get('series'), dict):
+                    continue
+                try:
+                    out.append(copy.deepcopy(p))
+                except Exception:
+                    out.append({'name': name, 'global': dict(p.get('global')),
+                                'series': dict(p.get('series'))})
+        except Exception:
+            return []
+        return out
+
+    def _write_popout_autosave(self):
+        try:
+            self.main_window.save_session_for_mode(self.main_window.MODE_DSD)
+        except Exception as e:
+            logger.warning("[System] Popout preset autosave failed: %s", e)
+
+    def _refresh_popout_button(self):
+        presets = getattr(self, 'popout_presets', []) or []
+        if not presets:
+            try:
+                self.popout_btn.setMenu(None)
+            except Exception:
+                pass
+            try:
+                self.popout_btn.setText("Pop Out")
+            except Exception:
+                pass
+            return
+        try:
+            self.popout_btn.setText("Pop Out")
+        except Exception:
+            pass
+        try:
+            menu = QMenu(self.popout_btn)
+            new_act = menu.addAction("New Pop Out")
+            new_act.triggered.connect(lambda _c=False: self._open_fresh_popout())
+            menu.addSeparator()
+            for preset in list(presets):
+                try:
+                    name = preset.get('name', 'preset')
+                except Exception:
+                    continue
+                wa = QWidgetAction(menu)
+                row = QWidget()
+                hl = QHBoxLayout(row)
+                hl.setContentsMargins(4, 2, 4, 2)
+                hl.setSpacing(6)
+                open_btn = QPushButton(name)
+                open_btn.setFlat(True)
+                open_btn.setStyleSheet("text-align: left;")
+                open_btn.setMinimumWidth(160)
+                trash = QToolButton()
+                trash.setText("\U0001f5d1")
+                trash.setToolTip("Delete preset")
+                trash.setAutoRaise(True)
+                open_btn.clicked.connect(
+                    lambda _c=False, n=name, m=menu: (m.close(), self._open_preset_popout(n)))
+                trash.clicked.connect(
+                    lambda _c=False, n=name, m=menu: (m.close(), self._delete_popout_preset(n)))
+                hl.addWidget(open_btn, 1)
+                hl.addWidget(trash)
+                wa.setDefaultWidget(row)
+                menu.addAction(wa)
+            self.popout_btn.setMenu(menu)
+        except Exception as e:
+            logger.warning("[System] Popout menu rebuild failed: %s", e)
+
+    def _delete_popout_preset(self, name):
+        try:
+            self.popout_presets = [p for p in (getattr(self, 'popout_presets', []) or [])
+                                   if p.get('name') != name]
+        except Exception:
+            self.popout_presets = []
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
+        self._write_popout_autosave()
+
+    def _on_popout_closed(self, window, preset):
+        try:
+            src = getattr(window, 'source_name', None)
+            existing = [p.get('name') for p in (getattr(self, 'popout_presets', []) or [])]
+            if src:
+                replaced = False
+                for i, p in enumerate(self.popout_presets):
+                    if p.get('name') == src:
+                        try:
+                            preset['name'] = src
+                        except Exception:
+                            pass
+                        self.popout_presets[i] = copy.deepcopy(preset)
+                        replaced = True
+                        break
+                if not replaced:
+                    try:
+                        preset['name'] = mint_preset_name(existing)
+                    except Exception:
+                        pass
+                    self.popout_presets.append(copy.deepcopy(preset))
+            else:
+                try:
+                    preset['name'] = mint_preset_name(existing)
+                except Exception:
+                    pass
+                self.popout_presets.append(copy.deepcopy(preset))
+        except Exception as e:
+            logger.warning("[System] Popout preset save failed: %s", e)
+            return
+        try:
+            self._refresh_popout_button()
+        except Exception:
+            pass
+        self._write_popout_autosave()
+
+    def _track_popout(self, win):
+        if not hasattr(self.main_window, 'dsd_popouts'):
+            self.main_window.dsd_popouts = []
+        self.main_window.dsd_popouts.append(win)
+        win.destroyed.connect(lambda: self.main_window.dsd_popouts.remove(win) if win in self.main_window.dsd_popouts else None)
+
+    def _open_fresh_popout(self):
         state = self.controller.get_current_plot_state()
         if not state or not state.get('y_axes'):
             QMessageBox.information(self, "Info", "No valid data to pop out.")
@@ -1356,13 +1516,41 @@ class DSDPlotPanel(QWidget):
         w_in = self.plot_widget.width() / dpi
         h_in = self.plot_widget.height() / dpi
 
-        win = PopOutWindow(state, self, figsize=(w_in, h_in))
+        win = PopOutWindow(state, self, figsize=(w_in, h_in),
+                           source_name=None, on_close=self._on_popout_closed)
         win.show()
         # Keep reference
-        if not hasattr(self.main_window, 'dsd_popouts'):
-            self.main_window.dsd_popouts = []
-        self.main_window.dsd_popouts.append(win)
-        win.destroyed.connect(lambda: self.main_window.dsd_popouts.remove(win) if win in self.main_window.dsd_popouts else None)
+        self._track_popout(win)
+
+    def _open_preset_popout(self, name):
+        try:
+            preset = next((p for p in (getattr(self, 'popout_presets', []) or [])
+                           if p.get('name') == name), None)
+        except Exception:
+            preset = None
+        if preset is None:
+            return
+        try:
+            state = self.controller.get_current_plot_state()
+        except Exception:
+            return
+        if not state or not state.get('y_axes'):
+            QMessageBox.information(self, "Info", "No valid data to pop out.")
+            return
+        try:
+            dpi = self.logicalDpiX()
+            w_in = self.plot_widget.width() / dpi
+            h_in = self.plot_widget.height() / dpi
+        except Exception:
+            w_in, h_in = 11.0, 6.5
+        win = PopOutWindow(state, self, figsize=(w_in, h_in),
+                           source_name=name, on_close=self._on_popout_closed)
+        try:
+            win.apply_all(copy.deepcopy(preset))
+        except Exception as e:
+            logger.warning("[System] Popout preset apply failed: %s", e)
+        win.show()
+        self._track_popout(win)
 
     def export_image(self):
         filters = (
