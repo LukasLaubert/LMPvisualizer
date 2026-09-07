@@ -199,6 +199,15 @@ def qcolor_to_rgba(qcolor, default=(0.0, 0.0, 0.0, 1.0)):
         return default
 
 
+def qcolor_to_hex(qcolor, default="#000000ff"):
+    """QColor -> '#rrggbbaa' string (actual on-screen color incl. alpha)."""
+    try:
+        r, g, b, a = qcolor.getRgb()
+        return f"#{r:02x}{g:02x}{b:02x}{a:02x}"
+    except Exception:
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Limits: orientation (inverted axes) + log-safe clamping
 # ---------------------------------------------------------------------------

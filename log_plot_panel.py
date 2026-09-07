@@ -3255,6 +3255,9 @@ class LogPlotPanel(QWidget):
                 plot_data['row'] = plot_info['row']
                 plot_data['plot_id'] = plot_info['plot_id']
                 if not compute_raw_std: plot_data['std'] = None
+                elif plot_data.get('std') is not None:
+                    # Orig band = raw inter-system std (average systems only).
+                    plot_data['std_type'] = 'raw-inter'
                 if force_raw_std:
                     pale_std_color = QColor(plot_info['color'])
                     h, s, v, a = pale_std_color.getHsv()
@@ -3280,6 +3283,7 @@ class LogPlotPanel(QWidget):
                     if force_raw_std and std_inter_smooth is not None and len(std_inter_smooth) == len(running_mean_y):
                         pale_data = {
                             'x': running_mean_x, 'y': running_mean_y, 'std': std_inter_smooth,
+                            'std_type': 'smooth-inter',
                             'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
                             'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
                             'row': plot_info['row'],
@@ -3302,6 +3306,7 @@ class LogPlotPanel(QWidget):
                         if running_std is not None and len(running_std) == len(running_mean_y):
                             std_data = {
                                 'x': running_mean_x, 'y': running_mean_y, 'std': running_std,
+                                'std_type': f"running-presmooth-mean:{self.running_mean_setting}",
                                 'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
                                 'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
                                 'row': plot_info['row']
@@ -3317,6 +3322,7 @@ class LogPlotPanel(QWidget):
                         if running_std is not None and len(running_std) == len(running_mean_y):
                             std_data = {
                                 'x': running_mean_x, 'y': running_mean_y, 'std': running_std, 
+                                'std_type': f"running:{self.running_mean_setting}",
                                 'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
                                 'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
                                 'row': plot_info['row']

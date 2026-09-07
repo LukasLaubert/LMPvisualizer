@@ -323,6 +323,7 @@ class LogController:
             'x_label': data.get('x_label', data.get('x_col', '')),
             'row': data.get('row', 1_000_000),  # table row for legend order; fits use large default
             'plot_id': data.get('plot_id'),  # stable table row id for preset matching
+            'std_type': data.get('std_type'),  # raw-inter / running:* / smooth-inter, for text export
         }
         self.update_views()
 
@@ -605,17 +606,46 @@ class LogController:
 
         delimiter = '\t' if filename.lower().endswith('.tsv') else ','
 
+        # Suffixes of band-only plots: their fill belongs to the parent
+        # line, never to a dataset of their own (their line is NoPen).
+        BAND_SUFFIXES = ("_running_mean_std_inter", "_running_mean_std")
+
+        def _band_base(name: str):
+            for suffix in BAND_SUFFIXES:
+                if name.endswith(suffix):
+                    return name[:-len(suffix)]
+            return None
+
+        def _band_values(error_item):
+            """(std_values, fill QColor) read back from a drawn band."""
+            try:
+                c1 = error_item.curves[0].getData()
+                c2 = error_item.curves[1].getData()
+                if c1[1] is None or c2[1] is None:
+                    return None, None
+                std = np.abs(np.asarray(c2[1]) - np.asarray(c1[1])) / 2.0
+                try:
+                    fill = error_item.brush().color()
+                except Exception:
+                    fill = None
+                return std, fill
+            except Exception:
+                return None, None
+
         plots_by_yaxis = {}
         axis_max_priority = {}
+        band_plots = []
+        datasets_by_name = {}
         for name, plot_info in self.plots.items():
-            if name.endswith("_running_mean_std"):
-                continue
-
             item = plot_info.get('item')
             if not item or not item.isVisible():
                 continue
             y_col = plot_info.get('y_col')
             if not y_col:
+                continue
+
+            if _band_base(name) is not None:
+                band_plots.append((name, plot_info))
                 continue
 
             plots_by_yaxis.setdefault(y_col, []).append((name, plot_info))
@@ -641,29 +671,32 @@ class LogController:
 
             x_values = np.asarray(x_data)
             y_values = np.asarray(y_data)
-            std_data = None
 
-            std_plot_name = name + "_std"
-            if std_plot_name in self.plots:
-                error_item = self.plots[std_plot_name].get('error_item')
-                if error_item:
-                    c1 = error_item.curves[0].getData()
-                    c2 = error_item.curves[1].getData()
-                    if c1[1] is not None and c2[1] is not None:
-                        std_data = np.abs(c2[1] - c1[1]) / 2.0
-            elif plot_info.get('error_item'):
-                error_item = plot_info.get('error_item')
-                c1 = error_item.curves[0].getData()
-                c2 = error_item.curves[1].getData()
-                if c1[1] is not None and c2[1] is not None:
-                    std_data = np.abs(c2[1] - c1[1]) / 2.0
+            # Own band (Orig pale / average std): values read back from
+            # the drawn fill, type tagged at draw time.
+            stds = []
+            if plot_info.get('error_item') is not None:
+                std_values, fill = _band_values(plot_info['error_item'])
+                if std_values is not None:
+                    stds.append({
+                        'values': np.asarray(std_values),
+                        'type': plot_info.get('std_type') or 'raw-inter',
+                        'color': plot_model.qcolor_to_hex(fill) if fill is not None else '',
+                        'x': x_values,
+                    })
+
+            try:
+                line_hex = plot_model.qcolor_to_hex(item.opts['pen'].color())
+            except Exception:
+                line_hex = ''
 
             dataset = {
                 'name': name,
                 'info': plot_info,
                 'x': x_values,
                 'y': y_values,
-                'std': np.asarray(std_data) if std_data is not None else None,
+                'stds': stds,
+                'color': line_hex,
             }
 
             target_group = None
@@ -681,19 +714,60 @@ class LogController:
                 target_positions = list(range(len(x_values)))
                 x_groups.append(target_group)
 
-            target_group['datasets'].append({
+            entry = {
                 'name': dataset['name'],
                 'info': dataset['info'],
                 'y': self._align_values(len(target_group['x']), target_positions, dataset['y']),
-                'std': self._align_values(len(target_group['x']), target_positions, dataset['std']) if dataset['std'] is not None else None,
+                'color': dataset['color'],
+                'stds': dataset['stds'],
+                'positions': target_positions,
+            }
+            target_group['datasets'].append(entry)
+            datasets_by_name[name] = entry
+
+        # Attach band-only plots to their parent line (mean line first,
+        # Orig base as fallback). Orphan bands are skipped: without the
+        # parent line they have no meaning as a dataset.
+        for name, plot_info in band_plots:
+            base = _band_base(name)
+            parent = datasets_by_name.get(base + "_running_mean")
+            if parent is None:
+                parent = datasets_by_name.get(base)
+            if parent is None:
+                continue
+            if plot_info.get('error_item') is None:
+                continue
+            std_values, fill = _band_values(plot_info['error_item'])
+            if std_values is None:
+                continue
+            try:
+                band_x, _ = plot_info['item'].getData()
+            except Exception:
+                band_x = None
+            parent['stds'].append({
+                'values': np.asarray(std_values),
+                'type': plot_info.get('std_type') or 'running',
+                'color': plot_model.qcolor_to_hex(fill) if fill is not None else '',
+                'x': np.asarray(band_x) if band_x is not None else None,
             })
 
         header_row_1 = []
         header_row_2 = []
         header_row_3 = []
+        header_row_4 = []
         data_columns = []
         max_rows = 0
         x_inverted = self._x_inverted()
+
+        # Repeated kinds are numbered from zero (x_0, y_0, std_0);
+        # a lone column keeps its plain name.
+        n_x = len(x_groups)
+        n_y = sum(len(group['datasets']) for group in x_groups)
+        n_std = sum(len(ds['stds']) for group in x_groups for ds in group['datasets'])
+        xi = yi = si = 0
+
+        def _kind_name(kind, idx, total):
+            return kind if total < 2 else f"{kind}_{idx}"
 
         for group in x_groups:
             order = list(range(len(group['x'])))
@@ -702,25 +776,33 @@ class LogController:
             rows_in_group = len(order)
             max_rows = max(max_rows, rows_in_group)
 
-            header_row_1.append('x')
+            header_row_1.append(_kind_name('x', xi, n_x)); xi += 1
             header_row_2.append(group.get('x_label', self.x_axis_label))
             header_row_3.append('')
+            header_row_4.append('')
             data_columns.append([group['x'][i] for i in order])
 
             for ds in group['datasets']:
                 y_col_name = ds['info'].get('y_col', '')
                 y_axis_label = self.y_axis_labels.get(y_col_name, y_col_name)
 
-                header_row_1.append('y')
+                header_row_1.append(_kind_name('y', yi, n_y)); yi += 1
                 header_row_2.append(y_axis_label)
                 header_row_3.append(ds['name'])
+                header_row_4.append(ds.get('color', ''))
                 data_columns.append([ds['y'][i] for i in order])
 
-                if ds['std'] is not None:
-                    header_row_1.append('std')
-                    header_row_2.append('')
-                    header_row_3.append('')
-                    data_columns.append([ds['std'][i] for i in order])
+                for std in ds['stds']:
+                    std_x = std.get('x')
+                    pos = self._subset_positions(group['x'], std_x) if std_x is not None else None
+                    if pos is None:
+                        pos = ds['positions']
+                    aligned = self._align_values(len(group['x']), pos, std['values'])
+                    header_row_1.append(_kind_name('std', si, n_std)); si += 1
+                    header_row_2.append(y_axis_label)
+                    header_row_3.append(f"{ds['name']} [std:{std['type']}]")
+                    header_row_4.append(std.get('color', ''))
+                    data_columns.append([aligned[i] for i in order])
 
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as f:
@@ -728,6 +810,7 @@ class LogController:
                 writer.writerow(header_row_1)
                 writer.writerow(header_row_2)
                 writer.writerow(header_row_3)
+                writer.writerow(header_row_4)
 
                 for i in range(max_rows):
                     row_data = []
