@@ -195,6 +195,10 @@ class LogDataManager:
             "tan": np.tan,
             "min": formula_min,
             "max": formula_max,
+            "abs": np.abs,
+            "sign": np.sign,
+            "exp": np.exp,
+            "log": np.log,
             "e": np.e,
             "pi": np.pi,
         }

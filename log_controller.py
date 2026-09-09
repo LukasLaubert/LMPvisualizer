@@ -3,6 +3,7 @@ from PyQt6.QtGui import QColor
 from typing import Dict, Any
 import numpy as np
 import copy
+import re
 import plot_model
 from logger_setup import get_logger
 
@@ -324,6 +325,7 @@ class LogController:
             'row': data.get('row', 1_000_000),  # table row for legend order; fits use large default
             'plot_id': data.get('plot_id'),  # stable table row id for preset matching
             'std_type': data.get('std_type'),  # raw-inter / running:* / smooth-inter, for text export
+            'mean_info': data.get('mean_info'),  # smoothing provenance for text export source row
         }
         self.update_views()
 
@@ -632,6 +634,22 @@ class LogController:
             except Exception:
                 return None, None
 
+        # Virtual average systems carry the combined "average & std" token in
+        # the legend name, but an export column holds exactly one statistic:
+        # a y-column is the average line, a std-column is the spread. Split
+        # the token accordingly so each header names what it contains.
+        # Fit labels ("Fit: ...") are left untouched.
+        _AVG_SYSTEMS = ("average", "average & std")
+
+        def _export_label(name: str, stat: str):
+            if name.startswith("Fit:"):
+                return name
+            parts = name.split(" | ", 3)
+            if len(parts) == 4 and parts[1] in _AVG_SYSTEMS:
+                parts[1] = stat
+                return " | ".join(parts)
+            return name
+
         plots_by_yaxis = {}
         axis_max_priority = {}
         band_plots = []
@@ -751,10 +769,11 @@ class LogController:
                 'x': np.asarray(band_x) if band_x is not None else None,
             })
 
-        header_row_1 = []
-        header_row_2 = []
-        header_row_3 = []
-        header_row_4 = []
+        header_row_kind = []
+        header_row_label = []
+        header_row_identity = []
+        header_row_source = []
+        header_row_color = []
         data_columns = []
         max_rows = 0
         x_inverted = self._x_inverted()
@@ -769,6 +788,48 @@ class LogController:
         def _kind_name(kind, idx, total):
             return kind if total < 2 else f"{kind}_{idx}"
 
+        def _base_name(ds):
+            # Row-3 identity without the technical _running_mean suffix:
+            # the processing lives in the source row instead.
+            name = ds['name']
+            if ds['info'].get('mean_info') is not None and name.endswith('_running_mean'):
+                name = name[:-len('_running_mean')]
+            return name
+
+        def _is_avg_name(name):
+            if name.startswith('Fit:'):
+                return False
+            parts = name.split(' | ', 3)
+            return len(parts) == 4 and parts[1] in _AVG_SYSTEMS
+
+        def _y_source(ds):
+            mi = ds['info'].get('mean_info')
+            if mi is None:
+                return 'orig'
+            if _is_avg_name(ds['name']):
+                order = 'smooth before averaging' if mi.get('smooth_before') else 'average then smooth'
+                return f"running mean, {order}: {mi.get('setting')}, w={mi.get('window')}"
+            return f"running mean: {mi.get('setting')}, w={mi.get('window')}"
+
+        def _std_source(ds, std):
+            src = f"std: {std['type']}"
+            mi = ds['info'].get('mean_info')
+            if mi is not None and std['type'] != 'raw-inter' and mi.get('window'):
+                src += f", w={mi['window']}"
+            return src
+
+        def _fit_identity_source(name):
+            # Panel names fits 'Fit: <source> (<type>) [ID:<n>]': the identity
+            # row keeps only the source, the source row only the fit type.
+            base = re.sub(r" \[ID:[^\]]*\]$", "", name)
+            m = re.match(r"^Fit: (.*) \(([^()]*)\)$", base)
+            if m is None:
+                return base, "fit"
+            src = m.group(1)
+            if src.endswith("_running_mean"):
+                src = src[: -len("_running_mean")]
+            return f"Fit: {_export_label(src, 'average')}", f"fit: {m.group(2)}"
+
         for group in x_groups:
             order = list(range(len(group['x'])))
             if x_inverted:
@@ -776,20 +837,27 @@ class LogController:
             rows_in_group = len(order)
             max_rows = max(max_rows, rows_in_group)
 
-            header_row_1.append(_kind_name('x', xi, n_x)); xi += 1
-            header_row_2.append(group.get('x_label', self.x_axis_label))
-            header_row_3.append('')
-            header_row_4.append('')
+            header_row_kind.append(_kind_name('x', xi, n_x)); xi += 1
+            header_row_label.append(group.get('x_label', self.x_axis_label))
+            header_row_identity.append('')
+            header_row_source.append('')
+            header_row_color.append('')
             data_columns.append([group['x'][i] for i in order])
 
             for ds in group['datasets']:
                 y_col_name = ds['info'].get('y_col', '')
                 y_axis_label = self.y_axis_labels.get(y_col_name, y_col_name)
 
-                header_row_1.append(_kind_name('y', yi, n_y)); yi += 1
-                header_row_2.append(y_axis_label)
-                header_row_3.append(ds['name'])
-                header_row_4.append(ds.get('color', ''))
+                header_row_kind.append(_kind_name('y', yi, n_y)); yi += 1
+                header_row_label.append(y_axis_label)
+                if ds['name'].startswith('Fit:'):
+                    ident, src = _fit_identity_source(ds['name'])
+                    header_row_identity.append(ident)
+                    header_row_source.append(src)
+                else:
+                    header_row_identity.append(_export_label(_base_name(ds), 'average'))
+                    header_row_source.append(_y_source(ds))
+                header_row_color.append(ds.get('color', ''))
                 data_columns.append([ds['y'][i] for i in order])
 
                 for std in ds['stds']:
@@ -798,19 +866,22 @@ class LogController:
                     if pos is None:
                         pos = ds['positions']
                     aligned = self._align_values(len(group['x']), pos, std['values'])
-                    header_row_1.append(_kind_name('std', si, n_std)); si += 1
-                    header_row_2.append(y_axis_label)
-                    header_row_3.append(f"{ds['name']} [std:{std['type']}]")
-                    header_row_4.append(std.get('color', ''))
+                    header_row_kind.append(_kind_name('std', si, n_std)); si += 1
+                    header_row_label.append(y_axis_label)
+                    header_row_identity.append(_export_label(_base_name(ds), 'std'))
+                    header_row_source.append(_std_source(ds, std))
+                    header_row_color.append(std.get('color', ''))
                     data_columns.append([aligned[i] for i in order])
 
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f, delimiter=delimiter)
-                writer.writerow(header_row_1)
-                writer.writerow(header_row_2)
-                writer.writerow(header_row_3)
-                writer.writerow(header_row_4)
+                # Order: kind, identity, source, axis label, color.
+                writer.writerow(header_row_kind)
+                writer.writerow(header_row_identity)
+                writer.writerow(header_row_source)
+                writer.writerow(header_row_label)
+                writer.writerow(header_row_color)
 
                 for i in range(max_rows):
                     row_data = []

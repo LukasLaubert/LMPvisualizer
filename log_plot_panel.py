@@ -3362,7 +3362,11 @@ class LogPlotPanel(QWidget):
                             'x_col': plot_info['x_ax'], 'x_label': data['x_label'],
                             'y_col': plot_info['y_ax'], 'y_label': data['y_label'],
                             'row': plot_info['row'],
-                            'plot_id': plot_info['plot_id']
+                            'plot_id': plot_info['plot_id'],
+                            # Smoothing provenance for the text export source row.
+                            'mean_info': {'setting': self.running_mean_setting,
+                                          'window': plot_info['mean_window'],
+                                          'smooth_before': bool(_smooth_before_active)},
                         }
                         self.plot_controller.add_or_update_plot_with_custom_colors(
                             legend_name + "_running_mean", mean_data, mean_color, 
