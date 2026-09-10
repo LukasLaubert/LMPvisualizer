@@ -375,9 +375,21 @@ class VideoExportDialog(QDialog):
         else:
             ext, filter_str = ".gif", "Animated GIF Image (*.gif)"
             
-        path, _ = QFileDialog.getSaveFileName(self, "Save Video", "", filter_str)
+        main_window = getattr(self.plot_panel, 'main_window', None)
+        start_dir = ""
+        try:
+            if main_window is not None:
+                start_dir = main_window.get_last_dialog_dir("video")
+        except Exception:
+            start_dir = ""
+        path, _ = QFileDialog.getSaveFileName(self, "Save Video", start_dir, filter_str)
         if not path:
             return
+        try:
+            if main_window is not None:
+                main_window.remember_dialog_dir("video", path)
+        except Exception:
+            pass
             
         if not path.lower().endswith(ext):
             path += ext

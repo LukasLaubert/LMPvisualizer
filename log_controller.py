@@ -326,6 +326,7 @@ class LogController:
             'plot_id': data.get('plot_id'),  # stable table row id for preset matching
             'std_type': data.get('std_type'),  # raw-inter / running:* / smooth-inter, for text export
             'mean_info': data.get('mean_info'),  # smoothing provenance for text export source row
+            'fit_info': data.get('fit_info'),  # fit function/range/params for text export source row
         }
         self.update_views()
 
@@ -400,8 +401,44 @@ class LogController:
                 if vb is not main_vb:
                     vb.setGeometry(main_vb_rect)
                     vb.linkedViewChanged(main_vb, vb.XAxis)
+
+            # Geometry settled (or is about to): heal any axis label sitting at
+            # a previous text's center.
+            self._recenter_axis_labels()
         finally:
             self._in_update_views = False
+
+    def _recenter_axis_labels(self):
+        """Recompute every axis label position from current geometry.
+
+        AxisItem only repositions its label in resizeEvent, so a label change
+        that leaves the item size untouched leaves the label sitting at the
+        previous text's center - and a long label then grows off-center. The
+        persistent default axes (left, bottom) are exposed to this on every
+        label change, while recreated right axes only get away with it by luck
+        of a fresh layout pass. Re-running pyqtgraph's own computation heals
+        every such state at once.
+        """
+        axes = []
+        try:
+            for key in ('left', 'right', 'top', 'bottom'):
+                axes.append(self.plot_item.getAxis(key))
+        except Exception:
+            pass
+        try:
+            for info in self.y_axes.values():
+                axes.append(info.get('axis'))
+        except Exception:
+            pass
+        seen = set()
+        for axis in axes:
+            if axis is None or id(axis) in seen:
+                continue
+            seen.add(id(axis))
+            try:
+                axis.resizeEvent(None)
+            except Exception:
+                pass
 
     def set_axis_labels(self, x_label: str, y_labels: Dict[str, str]):
         self.plot_item.setLabel('bottom', text=x_label)
@@ -416,6 +453,11 @@ class LogController:
             if y_col in self.y_axes:
                 self.y_axes[y_col]['axis'].setLabel(text=label)
                 self.y_axis_labels[y_col] = label  # Store for export
+
+        # Labels were just swapped on persistent items: reposition from the
+        # live geometry instead of waiting for a size change that may never
+        # come (see _recenter_axis_labels).
+        self._recenter_axis_labels()
 
     def set_axis_color(self, y_col: str, color: QColor):
         """Sets the color of a specific y-axis, including its label and axis line.
@@ -460,10 +502,10 @@ class LogController:
     def _align_values(length, positions, values):
         return plot_model.align_values(length, positions, values)
 
-    def export_plot(self, filename: str, figsize=None):
+    def export_plot(self, filename: str, figsize=None, fits_at_data_x=False):
         # Dispatch to text export if applicable
         if filename.lower().endswith(('.csv', '.tsv')):
-            self._export_text_data(filename)
+            self._export_text_data(filename, fits_at_data_x=fits_at_data_x)
             return
 
         try:
@@ -602,7 +644,7 @@ class LogController:
         finally:
             plt.close(fig)
 
-    def _export_text_data(self, filename: str):
+    def _export_text_data(self, filename: str, fits_at_data_x=False):
         """Internal handler for exporting data to CSV or TSV."""
         import csv
 
@@ -778,15 +820,8 @@ class LogController:
         max_rows = 0
         x_inverted = self._x_inverted()
 
-        # Repeated kinds are numbered from zero (x_0, y_0, std_0);
-        # a lone column keeps its plain name.
-        n_x = len(x_groups)
-        n_y = sum(len(group['datasets']) for group in x_groups)
-        n_std = sum(len(ds['stds']) for group in x_groups for ds in group['datasets'])
-        xi = yi = si = 0
-
-        def _kind_name(kind, idx, total):
-            return kind if total < 2 else f"{kind}_{idx}"
+        # Kinds are per-source: y_N, y_N_std, y_N_mean, y_N_mean_std, y_N_fit
+        # (multiples: _2, _3 ...). x columns number in emission order.
 
         def _base_name(ds):
             # Row-3 identity without the technical _running_mean suffix:
@@ -818,60 +853,313 @@ class LogController:
                 src += f", w={mi['window']}"
             return src
 
-        def _fit_identity_source(name):
+        def _fit_identity_type(name):
             # Panel names fits 'Fit: <source> (<type>) [ID:<n>]': the identity
-            # row keeps only the source, the source row only the fit type.
+            # row keeps only the source; the type goes to the source row.
             base = re.sub(r" \[ID:[^\]]*\]$", "", name)
             m = re.match(r"^Fit: (.*) \(([^()]*)\)$", base)
             if m is None:
-                return base, "fit"
+                return base, ""
             src = m.group(1)
             if src.endswith("_running_mean"):
                 src = src[: -len("_running_mean")]
-            return f"Fit: {_export_label(src, 'average')}", f"fit: {m.group(2)}"
+            return f"Fit: {_export_label(src, 'average')}", m.group(2)
 
-        for group in x_groups:
-            order = list(range(len(group['x'])))
+        def _fmt_num(value):
+            try:
+                f = float(value)
+            except Exception:
+                return str(value)
+            try:
+                if np.isfinite(f) and f.is_integer() and abs(f) < 1e15:
+                    return str(int(f))
+            except Exception:
+                pass
+            return repr(f)
+
+        def _substitute_params(func, params):
+            # Full formula: fitted values in place of names. Longest names
+            # first, identifier boundaries only; 'x' is the variable, never
+            # a parameter. A successful fit cannot use a name both as a
+            # function and a parameter, so shadowing names are safe to fill.
+            try:
+                items = sorted(params.items(), key=lambda kv: -len(kv[0]))
+            except Exception:
+                return func
+            out = func
+            for key, val in items:
+                if not key or key == 'x':
+                    continue
+                try:
+                    out = re.sub(r"(?<![\w.])" + re.escape(key) + r"(?![\w])",
+                                 _fmt_num(val), out)
+                except Exception:
+                    pass
+            return out
+
+        def _fit_source(ds, fallback_type, at_data_x=False):
+            fi = ds['info'].get('fit_info') or {}
+            ftype = fi.get('type') or fallback_type
+            parts = [f"fit: {ftype}" if ftype else "fit"]
+            if fi.get('min') is not None and fi.get('max') is not None:
+                parts.append(f"range=[{_fmt_num(fi['min'])}, {_fmt_num(fi['max'])}]")
+            func = fi.get('function', '')
+            if func:
+                params = fi.get('params') or {}
+                if params:
+                    func = _substitute_params(func, params)
+                parts.append(f"func: {func}")
+            if at_data_x:
+                parts.append("at data x")
+            return ", ".join(parts)
+
+        def _eval_fit_at_x(func, params, xs):
+            # Same sandbox the fit itself ran in; per-point so one bad
+            # point blanks only itself.
+            try:
+                code = compile(func.replace('^', '**'), '<fit-export>', 'eval')
+            except Exception:
+                return None
+            safe = {"__builtins__": None, "np": np,
+                    "sqrt": np.sqrt, "sin": np.sin, "cos": np.cos, "tan": np.tan,
+                    "exp": np.exp, "log": np.log, "log10": np.log10, "abs": np.abs,
+                    "e": np.e, "pi": np.pi, "power": np.power}
+            out = np.full(len(xs), np.nan)
+            loc = dict(params)
+            for i, xv in enumerate(xs):
+                try:
+                    loc['x'] = xv
+                    out[i] = eval(code, safe, loc)
+                except Exception:
+                    pass
+            return out
+
+        def _fit_values_at_anchor(fds, group):
+            # Fit evaluated at the source grid; points outside the fit
+            # range (and non-finite results) become blank cells.
+            fi = fds['info'].get('fit_info') or {}
+            func = fi.get('function', '')
+            if not func:
+                return None
+            try:
+                xs = np.asarray(group['x'], dtype=float)
+            except Exception:
+                return None
+            mask = np.ones(len(xs), dtype=bool)
+            if fi.get('min') is not None and fi.get('max') is not None:
+                try:
+                    mask = (xs >= float(fi['min'])) & (xs <= float(fi['max']))
+                except Exception:
+                    pass
+            vals = _eval_fit_at_x(func, fi.get('params') or {}, xs)
+            if vals is None:
+                return None
+            return [float(v) if m and np.isfinite(v) else None
+                    for v, m in zip(vals, mask)]
+
+        def _match_key(name):
+            # Fit legend sources and dataset names reduced to the same form:
+            # no _running_mean suffix, average token normalized.
+            base = name
+            if base.endswith("_running_mean"):
+                base = base[: -len("_running_mean")]
+            return _export_label(base, 'average')
+
+        _FIT_SRC_RE = re.compile(r"^Fit: (.*) \([^()]*\)(?: \[ID:[^\]]*\])?$")
+
+        def _fit_source_key(name):
+            m = _FIT_SRC_RE.match(name)
+            return _match_key(m.group(1)) if m else None
+
+        # --- Column plan: one numbered source after another ------------------
+        # A source is the orig dataset (or a lone mean); its mean line, its
+        # bands and its fits follow it, the fit last. Kinds: y_N, y_N_std,
+        # y_N_mean, y_N_mean_std, y_N_fit (multiples: _2, _3 ...).
+        anchors = []          # [{key, base, group_idx, orig, means[]}]
+        anchor_by_key = {}
+        for gi, group in enumerate(x_groups):
+            for ds in group['datasets']:
+                if ds['name'].startswith('Fit:'):
+                    continue
+                key = (_match_key(ds['name']), gi)
+                anchor = anchor_by_key.get(key)
+                if anchor is None:
+                    anchor = {'key': key, 'base': _match_key(ds['name']),
+                              'group_idx': gi, 'orig': None, 'means': []}
+                    anchor_by_key[key] = anchor
+                    anchors.append(anchor)
+                if ds['info'].get('mean_info') is not None:
+                    anchor['means'].append(ds)
+                elif anchor['orig'] is None:
+                    anchor['orig'] = ds
+                else:  # duplicate orig on one grid: own source number
+                    dup = {'key': (key[0], gi, len(anchors)), 'base': key[0],
+                           'group_idx': gi, 'orig': ds, 'means': []}
+                    anchors.append(dup)
+
+        def _fit_seq_id(name):
+            m = re.search(r"\[ID:(\d+)\]$", name)
+            return int(m.group(1)) if m else 10 ** 9
+
+        fits_by_anchor = {id(a): [] for a in anchors}
+        orphan_fits = []  # [(group_idx, ds)] source row gone (e.g. deleted)
+        fit_order = 0
+        for gi, group in enumerate(x_groups):
+            for ds in group['datasets']:
+                if not ds['name'].startswith('Fit:'):
+                    continue
+                src_key = _fit_source_key(ds['name'])
+                anchor = anchor_by_key.get((src_key, gi))
+                if anchor is None:
+                    for cand in anchors:
+                        if cand['base'] == src_key:
+                            anchor = cand
+                            break
+                if anchor is None:
+                    orphan_fits.append((gi, ds))
+                else:
+                    fits_by_anchor[id(anchor)].append((gi, ds, fit_order))
+                    fit_order += 1
+        for flist in fits_by_anchor.values():
+            # _fit / _fit_2 ... follow creation order, not grid order.
+            flist.sort(key=lambda t: (_fit_seq_id(t[1]['name']), t[2]))
+            for i, (gi, ds, _) in enumerate(flist):
+                flist[i] = (gi, ds)
+
+        for n, anchor in enumerate(anchors, start=1):
+            anchor['num'] = n
+        for k, (_, ds) in enumerate(orphan_fits, start=len(anchors) + 1):
+            ds['_orphan_num'] = k
+
+        def _emit_std(stds, owner, num, mean_tag, y_axis_label, order, group, xidx):
+            counts = {}
+            x_state['sets'][xidx].add(num)
+            for std in stds:
+                std_x = std.get('x')
+                pos = self._subset_positions(group['x'], std_x) if std_x is not None else None
+                if pos is None:
+                    continue
+                aligned = self._align_values(len(group['x']), pos, std['values'])
+                tag = f"y_{num}{mean_tag}_std"
+                counts[tag] = counts.get(tag, 0) + 1
+                if counts[tag] > 1:
+                    tag = f"{tag}_{counts[tag]}"
+                header_row_kind.append(tag)
+                header_row_label.append(y_axis_label)
+                header_row_identity.append(_export_label(_base_name(owner), 'std'))
+                header_row_source.append(_std_source(owner, std))
+                header_row_color.append(std.get('color', ''))
+                data_columns.append([aligned[i] for i in order])
+
+        def _order_for(length):
+            order = list(range(length))
             if x_inverted:
                 order.reverse()
-            rows_in_group = len(order)
-            max_rows = max(max_rows, rows_in_group)
+            return order
 
-            header_row_kind.append(_kind_name('x', xi, n_x)); xi += 1
+        def _emit_y(ds, kind, order, xidx, y_values=None, at_data_x=False):
+            y_col_name = ds['info'].get('y_col', '')
+            y_axis_label = self.y_axis_labels.get(y_col_name, y_col_name)
+            header_row_kind.append(kind)
+            m = re.match(r"y_(\d+)", kind)
+            if m is not None:
+                x_state['sets'][xidx].add(int(m.group(1)))
+            header_row_label.append(y_axis_label)
+            if ds['name'].startswith('Fit:'):
+                ident, ftype = _fit_identity_type(ds['name'])
+                header_row_identity.append(ident)
+                header_row_source.append(_fit_source(ds, ftype, at_data_x))
+            else:
+                header_row_identity.append(_export_label(_base_name(ds), 'average'))
+                header_row_source.append(_y_source(ds))
+            header_row_color.append(ds.get('color', ''))
+            values = y_values if y_values is not None else ds['y']
+            data_columns.append([values[i] if i < len(values) else None for i in order])
+            return y_axis_label
+
+        def _emit_x(group, is_copy=False):
+            order = _order_for(len(group['x']))
+            max_rows[0] = max(max_rows[0], len(order))
+            header_row_kind.append('x')
             header_row_label.append(group.get('x_label', self.x_axis_label))
             header_row_identity.append('')
             header_row_source.append('')
             header_row_color.append('')
             data_columns.append([group['x'][i] for i in order])
+            x_state['sets'].append(set())
+            x_state['copies'].append(is_copy)
+            return len(x_state['sets']) - 1
 
-            for ds in group['datasets']:
-                y_col_name = ds['info'].get('y_col', '')
-                y_axis_label = self.y_axis_labels.get(y_col_name, y_col_name)
-
-                header_row_kind.append(_kind_name('y', yi, n_y)); yi += 1
-                header_row_label.append(y_axis_label)
-                if ds['name'].startswith('Fit:'):
-                    ident, src = _fit_identity_source(ds['name'])
-                    header_row_identity.append(ident)
-                    header_row_source.append(src)
+        max_rows = [max_rows]
+        x_state = {'sets': [], 'copies': []}
+        emitted_x = set()
+        copied_x = {}
+        group_x_idx = {}
+        for anchor in anchors:
+            group = x_groups[anchor['group_idx']]
+            order = _order_for(len(group['x']))
+            max_rows[0] = max(max_rows[0], len(order))
+            if anchor['group_idx'] not in emitted_x:
+                emitted_x.add(anchor['group_idx'])
+                group_x_idx[anchor['group_idx']] = _emit_x(group)
+            gx = group_x_idx[anchor['group_idx']]
+            num = anchor['num']
+            line = anchor['orig'] if anchor['orig'] is not None else anchor['means'][0]
+            mean_tag = '' if anchor['orig'] is not None else '_mean'
+            y_axis_label = _emit_y(line, f"y_{num}{mean_tag}", order, gx)
+            _emit_std(line['stds'], line, num, mean_tag, y_axis_label, order, group, gx)
+            if anchor['orig'] is not None:
+                for mean_ds in anchor['means']:
+                    y_axis_label = _emit_y(mean_ds, f"y_{num}_mean", order, gx)
+                    _emit_std(mean_ds['stds'], mean_ds, num, '_mean', y_axis_label, order, group, gx)
+            # Fits last: same-grid fits need no x, moved fits share one x copy
+            # per grid, emitted at first use and named for all its users.
+            fit_seq = 0
+            for gi, fds in fits_by_anchor[id(anchor)]:
+                fit_seq += 1
+                tag = f"y_{num}_fit" + (f"_{fit_seq}" if fit_seq > 1 else "")
+                if fits_at_data_x:
+                    # Evaluated at the source grid: no x copy, values align
+                    # with the anchor columns. Falls back to own grid below.
+                    grid_vals = _fit_values_at_anchor(fds, group)
+                    if grid_vals is not None:
+                        _emit_y(fds, tag, order, gx, y_values=grid_vals, at_data_x=True)
+                        continue
+                if gi == anchor['group_idx']:
+                    xidx = group_x_idx[gi]
                 else:
-                    header_row_identity.append(_export_label(_base_name(ds), 'average'))
-                    header_row_source.append(_y_source(ds))
-                header_row_color.append(ds.get('color', ''))
-                data_columns.append([ds['y'][i] for i in order])
+                    if gi not in copied_x:
+                        copied_x[gi] = _emit_x(x_groups[gi], is_copy=True)
+                    xidx = copied_x[gi]
+                _emit_y(fds, tag, _order_for(len(x_groups[gi]['x'])), xidx)
 
-                for std in ds['stds']:
-                    std_x = std.get('x')
-                    pos = self._subset_positions(group['x'], std_x) if std_x is not None else None
-                    if pos is None:
-                        pos = ds['positions']
-                    aligned = self._align_values(len(group['x']), pos, std['values'])
-                    header_row_kind.append(_kind_name('std', si, n_std)); si += 1
-                    header_row_label.append(y_axis_label)
-                    header_row_identity.append(_export_label(_base_name(ds), 'std'))
-                    header_row_source.append(_std_source(ds, std))
-                    header_row_color.append(std.get('color', ''))
-                    data_columns.append([aligned[i] for i in order])
+        # Orphan fits (source row gone, e.g. deleted): after all sources,
+        # grouped by origin grid with their x.
+        orphans_by_group = {}
+        for gi, ds in orphan_fits:
+            orphans_by_group.setdefault(gi, []).append(ds)
+        for gi in sorted(orphans_by_group):
+            group = x_groups[gi]
+            if gi not in emitted_x:
+                emitted_x.add(gi)
+                group_x_idx[gi] = _emit_x(group)
+            order = _order_for(len(group['x']))
+            for ds in orphans_by_group[gi]:
+                _emit_y(ds, f"y_{ds['_orphan_num']}_fit", order, group_x_idx[gi])
+        max_rows = max_rows[0]
+
+        # Every x is named for the sources it serves (x_1,3,4); fit-grid
+        # copies take a _fit suffix so they cannot collide with a data x
+        # serving the same sources.
+        xi = 0
+        for idx, k in enumerate(header_row_kind):
+            if k == 'x':
+                served = sorted(x_state['sets'][xi])
+                name = f"x_{','.join(str(n) for n in served)}" if served else 'x'
+                if x_state['copies'][xi] and name != 'x':
+                    name += '_fit'
+                header_row_kind[idx] = name
+                xi += 1
 
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as f:

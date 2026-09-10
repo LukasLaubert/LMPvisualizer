@@ -3464,6 +3464,10 @@ class LogPlotPanel(QWidget):
                             fit_x_col = src_data.get('raw_x_ax', src_data.get('x_label', 'N/A'))
                             fit_x_label = src_data.get('x_label', fit_x_col)
                             
+                            try:
+                                dlg_state = dialog.get_state() or {}
+                            except Exception:
+                                dlg_state = {}
                             fit_plot_data = {
                                 'x': res['x_fit'],
                                 'y': res['y_fit'],
@@ -3471,7 +3475,14 @@ class LogPlotPanel(QWidget):
                                 'x_col': fit_x_col,
                                 'x_label': fit_x_label,
                                 'y_col': fit_y_col,
-                                'y_label': fit_y_label
+                                'y_label': fit_y_label,
+                                'fit_info': {
+                                    'type': fit_type,
+                                    'function': dlg_state.get('function', ''),
+                                    'min': dlg_state.get('min'),
+                                    'max': dlg_state.get('max'),
+                                    'params': dict(res.get('best_params') or {}),
+                                },
                             }
                             
                             self.plot_controller.add_or_update_plot_with_custom_colors(
@@ -4416,11 +4427,14 @@ class LogPlotPanel(QWidget):
 
     def save_session(self):
         """Opens file dialog to save session manually."""
-        path, _ = QFileDialog.getSaveFileName(self, "Save Session", "", "JSON Files (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
         if not path:
             return
+        self.main_window.remember_dialog_dir("session", path)
         
         if self.save_session_to_file(path, trigger="manual save"):
+            self.main_window.set_loaded_session(path)
             QMessageBox.information(self, "Success", "Session saved successfully.")
         else:
             logger.warning("[System] Failed to save session: %s", path)
@@ -4435,8 +4449,10 @@ class LogPlotPanel(QWidget):
 
     def load_session(self):
         """Opens file dialog to load session manually."""
-        path, _ = QFileDialog.getOpenFileName(self, "Load Session", "", "JSON Files (*.json)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
         if path:
+            self.main_window.remember_dialog_dir("session", path)
             self.load_session_from_file(path)
 
     def load_session_from_file(self, path: str):
@@ -4538,6 +4554,10 @@ class LogPlotPanel(QWidget):
                 # load_project clears for a fresh project — restore AFTER
                 self.load_project(project_paths, keywords, show_discovery_warnings=False, keep_table=False)
                 self.average_user_choices = saved_average
+                # load_project short-circuits when the same project is already
+                # loaded, but the session may bring new custom properties —
+                # always rebuild the axis dropdowns from them.
+                self._refresh_axis_combos()
             else:
                 self.average_user_choices = saved_average
                 # Refresh combos
@@ -4673,6 +4693,11 @@ class LogPlotPanel(QWidget):
             self.main_window.path_input.blockSignals(False)
             self.main_window.chip_input.blockSignals(False)
 
+        try:
+            self.main_window.set_loaded_session(path)
+        except Exception:
+            pass
+
     def export_image(self):
         filters = (
             "PNG Image (*.png);;"
@@ -4686,8 +4711,10 @@ class LogPlotPanel(QWidget):
             "PGF Code (*.pgf);;"
             "Raw Pixel Data (*.raw *.rgba)"
         )
-        path, _ = QFileDialog.getSaveFileName(self, "Export Image", "", filters)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Image", self.main_window.get_last_dialog_dir("export_image"), filters)
         if path:
+            self.main_window.remember_dialog_dir("export_image", path)
             dpi = self.logicalDpiX()
             width_in = self.plot_widget.width() / dpi
             height_in = self.plot_widget.height() / dpi
@@ -4698,12 +4725,35 @@ class LogPlotPanel(QWidget):
             "CSV Data (*.csv);;"
             "TSV Data (*.tsv)"
         )
-        path, _ = QFileDialog.getSaveFileName(self, "Export Raw Data", "", filters)
+        fits_at_data_x = False
+        try:
+            has_fits = any(
+                name.startswith('Fit:') and (pi.get('item') is not None and pi['item'].isVisible())
+                for name, pi in self.plot_controller.plots.items())
+        except Exception:
+            has_fits = False
+        if has_fits:
+            btn = QMessageBox.question(
+                self, "Fits in Export",
+                "Evaluate fits at the data x-values (shared grid)?\n\n"
+                "Yes: one x column; fit values at your data points "
+                "(blank outside the fit range).\n"
+                "No: fits keep their own 1000-point grid with extra x columns.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes)
+            if btn == QMessageBox.StandardButton.Cancel:
+                return
+            fits_at_data_x = (btn == QMessageBox.StandardButton.Yes)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Raw Data", self.main_window.get_last_dialog_dir("export_data"), filters)
         if path:
+            self.main_window.remember_dialog_dir("export_data", path)
             dpi = self.logicalDpiX()
             width_in = self.plot_widget.width() / dpi
             height_in = self.plot_widget.height() / dpi
-            self.plot_controller.export_plot(path, figsize=(width_in, height_in))
+            self.plot_controller.export_plot(path, figsize=(width_in, height_in),
+                                            fits_at_data_x=fits_at_data_x)
 
     def launch_popout_window(self):
         """Creates a new independent window with the current plot data."""

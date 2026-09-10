@@ -46,6 +46,8 @@ class MainWindow(QMainWindow):
         self.current_project_path = ""
         self.autoload_enabled = startup_autoload
         self._skip_next_orchestration = False
+        # Last-used file dialog folders, per purpose; running session only.
+        self._last_dialog_dirs = {}
         
         # Keyword Storage for Modes
         # 0: Log Plot, 1: Trj Plot, 2: DSD Mode
@@ -67,6 +69,52 @@ class MainWindow(QMainWindow):
             self.switch_to_mode(self.MODE_DSD)
         else:
             self.switch_to_neutral()
+
+    def get_last_dialog_dir(self, purpose):
+        """Folder a file dialog for `purpose` should open in ("" = Qt default)."""
+        try:
+            folder = self._last_dialog_dirs.get(purpose, "")
+            if folder and os.path.isdir(folder):
+                return folder
+        except Exception:
+            pass
+        return ""
+
+    def remember_dialog_dir(self, purpose, path):
+        """Remember the folder of a dialog-chosen `path` for the running session."""
+        try:
+            if not path:
+                return
+            folder = os.path.dirname(os.path.abspath(path))
+            if os.path.isdir(folder):
+                self._last_dialog_dirs[purpose] = folder
+        except Exception:
+            pass
+
+    def set_loaded_session(self, path):
+        """Shows the loaded session file name in the window title.
+
+        Autosave files reset to the bare title; anything else appends
+        the file stem after a bullet (e.g. "LMPvisualizer • my_run").
+        """
+        try:
+            stem = os.path.splitext(os.path.basename(str(path)))[0] if path else ""
+        except Exception:
+            stem = ""
+        try:
+            if not stem or stem == "autosave" or stem.startswith("autosave_"):
+                self.setWindowTitle("LMPvisualizer")
+            else:
+                self.setWindowTitle(f"LMPvisualizer • {stem}")
+        except Exception:
+            pass
+
+    def clear_session_title(self):
+        """Drops the session name, back to the bare application title."""
+        try:
+            self.setWindowTitle("LMPvisualizer")
+        except Exception:
+            pass
 
     def _init_ui(self):
         # Central Container
@@ -215,10 +263,16 @@ class MainWindow(QMainWindow):
         self.mode_combo.setCurrentIndex(-1)
         self.mode_combo.blockSignals(False)
 
+        self.clear_session_title()
+
     def switch_to_mode(self, mode_index):
         """Switches to a specific active mode (Log/Trj)."""
         previous_index = self.current_mode_index
         self.current_mode_index = mode_index
+
+        # A mode switch leaves any named session behind; an explicit load
+        # right after (if any) sets the title again.
+        self.clear_session_title()
         
         # 1. Unlock Interface
         self.set_interface_locked(False)

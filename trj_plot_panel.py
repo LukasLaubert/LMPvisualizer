@@ -1830,9 +1830,11 @@ class TrjPlotPanel(QWidget):
             "PGF Code (*.pgf);;"
             "Raw Pixel Data (*.raw *.rgba)"
         )
-        path, _ = QFileDialog.getSaveFileName(self, "Export Image", "", filters)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Image", self.main_window.get_last_dialog_dir("export_image"), filters)
         
         if path:
+            self.main_window.remember_dialog_dir("export_image", path)
             dpi = self.logicalDpiX()
             width_in = self.plot_widget.width() / dpi
             height_in = self.plot_widget.height() / dpi
@@ -1843,9 +1845,11 @@ class TrjPlotPanel(QWidget):
             "CSV Data (*.csv);;"
             "TSV Data (*.tsv)"
         )
-        path, _ = QFileDialog.getSaveFileName(self, "Export Raw Data", "", filters)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Raw Data", self.main_window.get_last_dialog_dir("export_data"), filters)
         
         if path:
+            self.main_window.remember_dialog_dir("export_data", path)
             dpi = self.logicalDpiX()
             width_in = self.plot_widget.width() / dpi
             height_in = self.plot_widget.height() / dpi
@@ -1938,14 +1942,19 @@ class TrjPlotPanel(QWidget):
 
     def save_session(self):
         """Opens file dialog to save session manually."""
-        path, _ = QFileDialog.getSaveFileName(self, "Save Trj Session", "", "JSON Files (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Trj Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
         if not path: return
-        self.save_session_to_file(path, trigger="manual save")
+        self.main_window.remember_dialog_dir("session", path)
+        if self.save_session_to_file(path, trigger="manual save"):
+            self.main_window.set_loaded_session(path)
 
     def load_session(self):
         """Opens file dialog to load session manually."""
-        path, _ = QFileDialog.getOpenFileName(self, "Load Trj Session", "", "JSON Files (*.json)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Trj Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
         if not path: return
+        self.main_window.remember_dialog_dir("session", path)
         self.load_session_from_file(path)
 
     def load_session_from_file(self, path: str):
@@ -2076,3 +2085,8 @@ class TrjPlotPanel(QWidget):
         finally:
             self.main_window.path_input.blockSignals(False)
             self.main_window.chip_input.blockSignals(False)
+
+        try:
+            self.main_window.set_loaded_session(path)
+        except Exception:
+            pass

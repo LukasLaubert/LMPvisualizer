@@ -1075,13 +1075,18 @@ class DSDPlotPanel(QWidget):
 
     # --- Session Saving/Loading ---
     def save_session(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save DSD Session", "", "JSON Files (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save DSD Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
         if not path: return
-        self.save_session_to_file(path, trigger="manual save")
+        self.main_window.remember_dialog_dir("session", path)
+        if self.save_session_to_file(path, trigger="manual save"):
+            self.main_window.set_loaded_session(path)
 
     def load_session(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Load DSD Session", "", "JSON Files (*.json)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load DSD Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
         if not path: return
+        self.main_window.remember_dialog_dir("session", path)
         self.load_session_from_file(path)
         
     def save_session_to_file(self, path, trigger=None):
@@ -1362,6 +1367,11 @@ class DSDPlotPanel(QWidget):
             self.main_window.path_input.blockSignals(False)
             self.main_window.chip_input.blockSignals(False)
 
+        try:
+            self.main_window.set_loaded_session(path)
+        except Exception:
+            pass
+
     def launch_popout(self):
         self._open_fresh_popout()
 
@@ -1588,9 +1598,11 @@ class DSDPlotPanel(QWidget):
             "PGF Code (*.pgf);;"
             "Raw Pixel Data (*.raw *.rgba)"
         )
-        path, _ = QFileDialog.getSaveFileName(self, "Export Image", "", filters)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Image", self.main_window.get_last_dialog_dir("export_image"), filters)
         
         if path:
+            self.main_window.remember_dialog_dir("export_image", path)
             dpi = self.logicalDpiX()
             width_in = self.plot_widget.width() / dpi
             height_in = self.plot_widget.height() / dpi
@@ -1601,9 +1613,11 @@ class DSDPlotPanel(QWidget):
             "CSV Data (*.csv);;"
             "TSV Data (*.tsv)"
         )
-        path, _ = QFileDialog.getSaveFileName(self, "Export Raw Data", "", filters)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Raw Data", self.main_window.get_last_dialog_dir("export_data"), filters)
         
         if path:
+            self.main_window.remember_dialog_dir("export_data", path)
             dpi = self.logicalDpiX()
             width_in = self.plot_widget.width() / dpi
             height_in = self.plot_widget.height() / dpi
