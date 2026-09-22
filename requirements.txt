@@ -3,3 +3,8 @@ PyQt6
 pyqtgraph
 pandas
 numpy
+# optional: matplotlib for pop-out window and image export, scipy for curve fitting and smoothing, Pillow for video/GIF frame handling
+matplotlib
+scipy
+Pillow
+# note: video/GIF export also needs an ffmpeg binary on PATH (not a pip package)
