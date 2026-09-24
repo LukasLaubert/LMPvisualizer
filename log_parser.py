@@ -55,8 +55,14 @@ class LogParser:
         all_found = []
         search_keywords = log_keywords if log_keywords else ["log.lammps"]
         for kw in search_keywords:
-            # Use rglob for deep discovery
-            pattern = f"*{kw}*" if "." not in kw else f"*{kw}"
+            # Leading dot = suffix (".out"), trailing dot = prefix ("in."),
+            # otherwise the keyword matches anywhere in the file name.
+            if kw.startswith("."):
+                pattern = f"*{kw}"
+            elif kw.endswith("."):
+                pattern = f"{kw}*"
+            else:
+                pattern = f"*{kw}*"
             all_found.extend(list(path.rglob(pattern)))
         
         # 2. Filter and Group by directory

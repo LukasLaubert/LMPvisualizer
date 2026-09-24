@@ -70,6 +70,19 @@ class MainWindow(QMainWindow):
         else:
             self.switch_to_neutral()
 
+    def _session_purpose(self):
+        """Dialog memory key for sessions: one per mode."""
+        try:
+            if self.current_mode_index == self.MODE_LOG:
+                return "session:log"
+            if self.current_mode_index == self.MODE_TRJ:
+                return "session:trj"
+            if self.current_mode_index == self.MODE_DSD:
+                return "session:dsd"
+        except Exception:
+            pass
+        return "session"
+
     def get_last_dialog_dir(self, purpose):
         """Folder a file dialog for `purpose` should open in ("" = Qt default)."""
         try:
@@ -82,6 +95,10 @@ class MainWindow(QMainWindow):
 
     def remember_dialog_dir(self, purpose, path):
         """Remember the folder of a dialog-chosen `path` for the running session."""
+        # Session folders are remembered per mode - each mode has its own
+        # "last path opened" memory.
+        if purpose == "session":
+            purpose = self._session_purpose()
         try:
             if not path:
                 return
@@ -90,6 +107,26 @@ class MainWindow(QMainWindow):
                 self._last_dialog_dirs[purpose] = folder
         except Exception:
             pass
+
+    def get_session_dialog_dir(self):
+        """Start folder for the session Load/Save dialogs.
+
+        The remembered folder wins; without one, the project path holding
+        most table rows does, so the dialog opens where the bulk of the
+        loaded data lives.
+        """
+        folder = self.get_last_dialog_dir(self._session_purpose())
+        if folder:
+            return folder
+        try:
+            panel = self.stacked_widget.currentWidget()
+            get = getattr(panel, 'dominant_project_path', None)
+            path = get() if callable(get) else ""
+            if path and os.path.isdir(path):
+                return path
+        except Exception:
+            pass
+        return ""
 
     def set_loaded_session(self, path):
         """Shows the loaded session file name in the window title.

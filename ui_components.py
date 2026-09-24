@@ -3,7 +3,7 @@
 from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget,
                              QDialogButtonBox, QHeaderView, QTableWidgetItem,
                              QCheckBox, QSpinBox, QLabel, QFormLayout, QColorDialog,
-                             QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication,
+                              QWidget, QHBoxLayout, QLineEdit, QFrame, QApplication, QToolTip,
                              QStyledItemDelegate, QComboBox, QSizePolicy, QMessageBox, QFileDialog,
                              QStyleOptionButton, QStyle)
 from PyQt6.QtGui import QColor, QPalette, QFontMetrics, QFont, QPainter
@@ -462,6 +462,18 @@ class PathChip(QFrame):
 
     def on_remove(self):
         self.removed.emit(self.path)
+
+    def mouseReleaseEvent(self, event):
+        # Right-click copies the full path straight to the clipboard - no menu.
+        # On release: a tooltip shown during the press is hidden again by Qt
+        # the moment the button state changes.
+        if event.button() == Qt.MouseButton.RightButton:
+            QApplication.clipboard().setText(self.path)
+            QToolTip.showText(event.globalPosition().toPoint(),
+                              f"Path copied to clipboard:\n{self.path}", self)
+            QTimer.singleShot(3000, QToolTip.hideText)
+            return
+        super().mouseReleaseEvent(event)
 
 
 class PathChipInputWidget(QWidget):

@@ -1943,16 +1943,30 @@ class TrjPlotPanel(QWidget):
     def save_session(self):
         """Opens file dialog to save session manually."""
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Trj Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
+            self, "Save Trj Session", self.main_window.get_session_dialog_dir(), "JSON Files (*.json)")
         if not path: return
         self.main_window.remember_dialog_dir("session", path)
         if self.save_session_to_file(path, trigger="manual save"):
             self.main_window.set_loaded_session(path)
 
+    def dominant_project_path(self):
+        """Project path holding most table rows ("" when the table is empty)."""
+        counts = {}
+        try:
+            for row in range(self.plot_table.rowCount()):
+                item = self.plot_table.item(row, 1)
+                state = item.data(Qt.ItemDataRole.UserRole) if item else None
+                path = (state or {}).get('source_path')
+                if path:
+                    counts[path] = counts.get(path, 0) + 1
+        except Exception:
+            return ""
+        return max(counts, key=counts.get) if counts else ""
+
     def load_session(self):
         """Opens file dialog to load session manually."""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Trj Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
+            self, "Load Trj Session", self.main_window.get_session_dialog_dir(), "JSON Files (*.json)")
         if not path: return
         self.main_window.remember_dialog_dir("session", path)
         self.load_session_from_file(path)

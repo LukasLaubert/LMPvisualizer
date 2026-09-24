@@ -1076,15 +1076,23 @@ class DSDPlotPanel(QWidget):
     # --- Session Saving/Loading ---
     def save_session(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save DSD Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
+            self, "Save DSD Session", self.main_window.get_session_dialog_dir(), "JSON Files (*.json)")
         if not path: return
         self.main_window.remember_dialog_dir("session", path)
         if self.save_session_to_file(path, trigger="manual save"):
             self.main_window.set_loaded_session(path)
 
+    def dominant_project_path(self):
+        """DSD has one global selection instead of per-row studies."""
+        try:
+            origin = (self.study_origins or {}).get(self.study_combo.currentText(), {})
+            return origin.get('path') or ""
+        except Exception:
+            return ""
+
     def load_session(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load DSD Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
+            self, "Load DSD Session", self.main_window.get_session_dialog_dir(), "JSON Files (*.json)")
         if not path: return
         self.main_window.remember_dialog_dir("session", path)
         self.load_session_from_file(path)

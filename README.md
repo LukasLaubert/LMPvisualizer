@@ -36,13 +36,15 @@ Studies and systems are read from the folder structure:
 - **study** = grandparent folder (one study can hold several systems)
 - **system** = parent folder
 
-The file search uses the (custom) file extensions specified, e.g. (default): `.lammpslog` / `.out` for log mode, `.lammpstrj` / `.dump` for trajectory and DSD modes.
+The file search uses the (custom) keywords specified, e.g. (default): `.lammpslog` / `.out` / `log.` for log mode, `.lammpstrj` / `.dump` for trajectory and DSD modes.
+A keyword with a trailing (starting) dot matches file names starting (ending) with it, e.g. `in.` finds `in.myFile`; `.in` finds `myFile.in`.
 If your project has an `input_files` folder, the app also picks up the simulation units and timestep and shows them in the top bar.
 
 ### Several project folders at once
 
 The path bar can hold multiple projects (paths) as chips.
 The Browse button and pasting a path adds one, the `x` removes it.
+Right-click a chip to copy its full path to the clipboard.
 Plots have their properties in a table row.
 Each table row and plot belongs to their project chip: adding or removing a project keeps the other rows, and rows of a removed project disappear.
 If two projects contain a study folder with the same name, the study list shows each with its path prefix so you can tell them apart.

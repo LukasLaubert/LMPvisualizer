@@ -4428,7 +4428,7 @@ class LogPlotPanel(QWidget):
     def save_session(self):
         """Opens file dialog to save session manually."""
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
+            self, "Save Session", self.main_window.get_session_dialog_dir(), "JSON Files (*.json)")
         if not path:
             return
         self.main_window.remember_dialog_dir("session", path)
@@ -4447,10 +4447,24 @@ class LogPlotPanel(QWidget):
         if os.path.exists(path):
             self.load_session_from_file(path)
 
+    def dominant_project_path(self):
+        """Project path holding most plot rows ("" when the table is empty)."""
+        counts = {}
+        try:
+            for row in range(self.plot_table.rowCount()):
+                item = self.plot_table.item(row, 1)
+                origin = item.data(Qt.ItemDataRole.UserRole + 2) if item else None
+                path = (origin or {}).get('path')
+                if path:
+                    counts[path] = counts.get(path, 0) + 1
+        except Exception:
+            return ""
+        return max(counts, key=counts.get) if counts else ""
+
     def load_session(self):
         """Opens file dialog to load session manually."""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Session", self.main_window.get_last_dialog_dir("session"), "JSON Files (*.json)")
+            self, "Load Session", self.main_window.get_session_dialog_dir(), "JSON Files (*.json)")
         if path:
             self.main_window.remember_dialog_dir("session", path)
             self.load_session_from_file(path)
