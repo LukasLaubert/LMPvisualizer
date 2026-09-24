@@ -6,7 +6,7 @@ import pandas as pd
 from pathlib import Path
 from io import StringIO
 from typing import Dict, List, Tuple, Optional
-from logger_setup import get_logger
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 

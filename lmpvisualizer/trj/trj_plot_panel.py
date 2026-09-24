@@ -15,15 +15,15 @@ from PyQt6.QtGui import QColor, QIntValidator, QFont
 import pyqtgraph as pg
 import numpy as np
 
-from trj_data_manager import TrjDataManager
-from trj_controller import TrjController
-from trj_widgets import FilterBarWidget, HeatmapBarWidget, PlayerControlWidget
-from ui_components import ColorButton, NoNewLineDelegate, RightClickButton, MissingPathResolver
-from settings_manager import SettingsManager
-from log_parser import LogParser
-from global_label_editor_dialog import GlobalLabelEditorDialog
-from auto_index_dialog import AutoIndexDialog
-from logger_setup import get_logger
+from lmpvisualizer.trj.trj_data_manager import TrjDataManager
+from lmpvisualizer.trj.trj_controller import TrjController
+from lmpvisualizer.trj.trj_widgets import FilterBarWidget, HeatmapBarWidget, PlayerControlWidget
+from lmpvisualizer.shared.ui_components import ColorButton, NoNewLineDelegate, RightClickButton, MissingPathResolver
+from lmpvisualizer.shared.settings_manager import SettingsManager
+from lmpvisualizer.log.log_parser import LogParser
+from lmpvisualizer.shared.global_label_editor_dialog import GlobalLabelEditorDialog
+from lmpvisualizer.shared.auto_index_dialog import AutoIndexDialog
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -1580,7 +1580,7 @@ class TrjPlotPanel(QWidget):
 
     def _mint_preset_name(self, existing):
         try:
-            from popout_window import mint_preset_name as _mint
+            from lmpvisualizer.shared.popout_window import mint_preset_name as _mint
             return _mint(existing)
         except Exception:
             pass
@@ -1766,7 +1766,7 @@ class TrjPlotPanel(QWidget):
             pass
 
     def _open_fresh_popout(self):
-        from popout_window import PopOutWindow
+        from lmpvisualizer.shared.popout_window import PopOutWindow
         state = self.controller.get_current_plot_state()
         if not state or not state.get('y_axes'):
             QMessageBox.information(self, "Info", "No valid data to pop out.")
@@ -1790,7 +1790,7 @@ class TrjPlotPanel(QWidget):
         if preset is None:
             return
         try:
-            from popout_window import PopOutWindow
+            from lmpvisualizer.shared.popout_window import PopOutWindow
         except ImportError:
             logger.warning("Matplotlib is required for the Pop Out feature.")
             QMessageBox.critical(self, "Error", "Matplotlib is required for the Pop Out feature.\nPlease install it via pip: pip install matplotlib")
@@ -1856,7 +1856,7 @@ class TrjPlotPanel(QWidget):
             self.controller.export_plot(path, figsize=(width_in, height_in))
 
     def export_video(self):
-        from video_export_dialog import VideoExportDialog
+        from lmpvisualizer.shared.video_export_dialog import VideoExportDialog
         dlg = VideoExportDialog(self)
         dlg.exec()
 

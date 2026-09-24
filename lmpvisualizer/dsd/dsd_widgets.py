@@ -11,7 +11,7 @@ from PyQt6.QtGui import (
     QColor, QIntValidator, QDoubleValidator, QStandardItemModel, QStandardItem, 
     QMouseEvent, QPalette, QPainter, QBrush, QPen, QFont, QLinearGradient
 )
-from ui_components import ColorButton
+from lmpvisualizer.shared.ui_components import ColorButton
 import random
 import bisect
 import numpy as np

@@ -13,17 +13,17 @@ from PyQt6.QtGui import QColor, QIntValidator, QActionGroup, QAction, QFont, QFo
 import pyqtgraph as pg
 import numpy as np
 
-from dsd_data_manager import DSDDataManager
-from dsd_controller import DSDController
-from dsd_widgets import DSDTableWidget, DSDAddDomainDialog
-from trj_widgets import FilterBarWidget, PlayerControlWidget
-from ui_components import ColorButton, NoNewLineDelegate, RightClickButton, MissingPathResolver
-from settings_manager import SettingsManager
-from log_parser import LogParser
-from popout_window import PopOutWindow, mint_preset_name
-from auto_index_dialog import AutoIndexDialog
-from video_export_dialog import VideoExportDialog
-from logger_setup import get_logger
+from lmpvisualizer.dsd.dsd_data_manager import DSDDataManager
+from lmpvisualizer.dsd.dsd_controller import DSDController
+from lmpvisualizer.dsd.dsd_widgets import DSDTableWidget, DSDAddDomainDialog
+from lmpvisualizer.trj.trj_widgets import FilterBarWidget, PlayerControlWidget
+from lmpvisualizer.shared.ui_components import ColorButton, NoNewLineDelegate, RightClickButton, MissingPathResolver
+from lmpvisualizer.shared.settings_manager import SettingsManager
+from lmpvisualizer.log.log_parser import LogParser
+from lmpvisualizer.shared.popout_window import PopOutWindow, mint_preset_name
+from lmpvisualizer.shared.auto_index_dialog import AutoIndexDialog
+from lmpvisualizer.shared.video_export_dialog import VideoExportDialog
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -682,7 +682,7 @@ class DSDPlotPanel(QWidget):
             self.add_btn.setEnabled(True)
 
             try:
-                from log_parser import LogParser as _LP
+                from lmpvisualizer.log.log_parser import LogParser as _LP
                 studies = sorted(list(self.data_manager.parsers.keys()),
                                  key=lambda k: (_LP._is_virtual_study_key(k), k))
             except Exception:
@@ -1632,6 +1632,6 @@ class DSDPlotPanel(QWidget):
             self.controller.export_plot(path, figsize=(width_in, height_in))
 
     def export_video(self):
-        from video_export_dialog import VideoExportDialog
+        from lmpvisualizer.shared.video_export_dialog import VideoExportDialog
         dlg = VideoExportDialog(self)
         dlg.exec()

@@ -16,17 +16,17 @@ import numpy as np
 import pandas as pd
 import os
 
-from log_parser import LogParser
-from log_data_manager import LogDataManager
-from log_controller import LogController, ColoredAxis
-from settings_manager import SettingsManager
-from ui_components import ColorButton, InconsistentDataDialog, RightClickButton, NoNewLineDelegate, MissingPathResolver
-from global_label_editor_dialog import GlobalLabelEditorDialog
-from custom_property_dialog import CustomPropertyDialog
-from popout_window import PopOutWindow, mint_preset_name
-from fit_dialog import FitFunctionDialog
-from header_selection_dialog import HeaderSelectionDialog
-from logger_setup import get_logger
+from lmpvisualizer.log.log_parser import LogParser
+from lmpvisualizer.log.log_data_manager import LogDataManager
+from lmpvisualizer.log.log_controller import LogController, ColoredAxis
+from lmpvisualizer.shared.settings_manager import SettingsManager
+from lmpvisualizer.shared.ui_components import ColorButton, InconsistentDataDialog, RightClickButton, NoNewLineDelegate, MissingPathResolver
+from lmpvisualizer.shared.global_label_editor_dialog import GlobalLabelEditorDialog
+from lmpvisualizer.log.custom_property_dialog import CustomPropertyDialog
+from lmpvisualizer.shared.popout_window import PopOutWindow, mint_preset_name
+from lmpvisualizer.log.fit_dialog import FitFunctionDialog
+from lmpvisualizer.log.header_selection_dialog import HeaderSelectionDialog
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 

@@ -11,8 +11,8 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QListWidget,
                              QMessageBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QKeyEvent
-from trajectory_parser import TrajectoryParser
-from logger_setup import get_logger
+from lmpvisualizer.shared.trajectory_parser import TrajectoryParser
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -48,7 +48,7 @@ def index_file_worker(task_data: dict):
         parser._build_full_index()
         
         if mode == 'dsd' and task_data.get('dsd_config'):
-            from dsd_data_manager import DSDDataManager
+            from lmpvisualizer.dsd.dsd_data_manager import DSDDataManager
             dm = DSDDataManager()
             dm.parsers[""] = {"": parser}
             conf = task_data['dsd_config']
@@ -198,7 +198,7 @@ class AutoIndexDialog(QDialog):
 
     def _check_all_statuses(self):
         """Logic to accurately find pre-calculated results in the .idx files."""
-        from dsd_data_manager import DSDDataManager
+        from lmpvisualizer.dsd.dsd_data_manager import DSDDataManager
         dm = DSDDataManager()
         
         for i in range(self.list_widget.count()):
@@ -206,7 +206,7 @@ class AutoIndexDialog(QDialog):
             self._update_single_item_status(item, dm)
 
     def _update_single_item_status(self, item, dm=None):
-        from dsd_data_manager import DSDDataManager
+        from lmpvisualizer.dsd.dsd_data_manager import DSDDataManager
         if dm is None: dm = DSDDataManager()
 
         path_str = item.data(Qt.ItemDataRole.UserRole)

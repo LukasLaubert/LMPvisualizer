@@ -6,9 +6,9 @@ import pandas as pd
 import time
 from PyQt6.QtCore import QTimer, QObject, pyqtSignal
 from PyQt6.QtGui import QColor, QBrush
-from trj_data_manager import TrjDataManager
-import plot_model
-from logger_setup import get_logger
+from lmpvisualizer.trj.trj_data_manager import TrjDataManager
+from lmpvisualizer.shared import plot_model
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 

@@ -1,10 +1,10 @@
-# lmp_visualizer/main.py
+# main.py — thin entry shim, run from the repo root.
 
 import sys
 import argparse
 from PyQt6.QtWidgets import QApplication
-from main_window import MainWindow
-from logger_setup import get_logger, setup_logging
+from lmpvisualizer.main_window import MainWindow
+from lmpvisualizer.shared.logger_setup import get_logger, setup_logging
 
 logger = get_logger(__name__)
 

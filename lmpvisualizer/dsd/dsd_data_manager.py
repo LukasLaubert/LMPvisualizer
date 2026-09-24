@@ -7,8 +7,8 @@ import json
 from io import StringIO
 from typing import Dict, List, Tuple, Optional, Set
 from pathlib import Path
-from trajectory_parser import TrajectoryParser
-from logger_setup import get_logger
+from lmpvisualizer.shared.trajectory_parser import TrajectoryParser
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -204,7 +204,7 @@ class DSDDataManager:
         if file_map is None: file_map = {}
 
         try:
-            from log_parser import LogParser as _LP
+            from lmpvisualizer.log.log_parser import LogParser as _LP
             _is_virtual = _LP._is_virtual_study_key
             _wildcard = _LP._wildcard_pattern
         except Exception:

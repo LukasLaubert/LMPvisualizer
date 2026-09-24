@@ -12,15 +12,15 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
-from ui_components import (ChipInputWidget, PathChipInputWidget, NoNewLineDelegate,
+from lmpvisualizer.shared.ui_components import (ChipInputWidget, PathChipInputWidget, NoNewLineDelegate,
                            ColorButton, NeutralPanel)
-from log_parser import LogParser
-from panel_protocol import call_load_project, has_panel_method
-from log_plot_panel import LogPlotPanel
-from trj_plot_panel import TrjPlotPanel
-from dsd_plot_panel import DSDPlotPanel
-from settings_manager import SettingsManager
-from logger_setup import get_logger
+from lmpvisualizer.log.log_parser import LogParser
+from lmpvisualizer.shared.panel_protocol import call_load_project, has_panel_method
+from lmpvisualizer.log.log_plot_panel import LogPlotPanel
+from lmpvisualizer.trj.trj_plot_panel import TrjPlotPanel
+from lmpvisualizer.dsd.dsd_plot_panel import DSDPlotPanel
+from lmpvisualizer.shared.settings_manager import SettingsManager
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -527,7 +527,7 @@ class MainWindow(QMainWindow):
         Returns (paths, relocated, action). An action of 'cancel', 'reset' or 'change'
         means the caller must abort - the resolver has already taken over.
         """
-        from ui_components import MissingPathResolver
+        from lmpvisualizer.shared.ui_components import MissingPathResolver
 
         resolved, relocated = [], False
         for project_path in paths:

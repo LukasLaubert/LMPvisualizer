@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QThreadPool
 from PyQt6.QtGui import QIcon, QValidator
 
-from fitting_engine import FitWorker
+from lmpvisualizer.shared.fitting_engine import FitWorker
 
 class ScientificSpinBox(QDoubleSpinBox):
     """

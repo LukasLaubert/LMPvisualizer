@@ -3,8 +3,8 @@
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set, Any
 import pandas as pd
-from trajectory_parser import TrajectoryParser
-from logger_setup import get_logger
+from lmpvisualizer.shared.trajectory_parser import TrajectoryParser
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -31,7 +31,7 @@ class TrjDataManager:
         # Build parsers only from real studies and recompute virtual from the
         # actual stem list afterwards.
         try:
-            from log_parser import LogParser as _LP
+            from lmpvisualizer.log.log_parser import LogParser as _LP
             _is_virtual = _LP._is_virtual_study_key
             _wildcard = _LP._wildcard_pattern
         except Exception:
@@ -192,7 +192,7 @@ class TrjDataManager:
 
     def get_study_names(self) -> List[str]:
         try:
-            from log_parser import LogParser as _LP
+            from lmpvisualizer.log.log_parser import LogParser as _LP
             return sorted(self.parsers.keys(), key=lambda k: (_LP._is_virtual_study_key(k), k))
         except Exception:
             return sorted(list(self.parsers.keys()))

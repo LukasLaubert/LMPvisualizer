@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtGui import QFont
 import re
 import numpy as np
-from log_data_manager import split_indexed_token, formula_min, formula_max
+from lmpvisualizer.log.log_data_manager import split_indexed_token, formula_min, formula_max
 
 class ClickableListWidget(QListWidget):
     """A ListWidget that deselects items when clicking on empty space."""

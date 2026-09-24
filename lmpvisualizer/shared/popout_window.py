@@ -22,9 +22,9 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
-from ui_components import ColorButton
-import plot_model
-from logger_setup import get_logger
+from lmpvisualizer.shared.ui_components import ColorButton
+from lmpvisualizer.shared import plot_model
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 

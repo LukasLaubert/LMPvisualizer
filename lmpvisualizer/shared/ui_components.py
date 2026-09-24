@@ -568,7 +568,7 @@ class PathChipInputWidget(QWidget):
         # One spelling per path, so the chip set, discovery's origins and the paths
         # stored on the table rows compare equal - and so "D:/proj" and "D:\proj"
         # cannot end up as two chips over the same project.
-        from log_parser import LogParser
+        from lmpvisualizer.log.log_parser import LogParser
         path = LogParser.canonical_path(path)
         if not path or any(LogParser.same_path(path, p) for p in self._paths):
             return False
@@ -583,7 +583,7 @@ class PathChipInputWidget(QWidget):
         return True
 
     def remove_path(self, path: str, silent: bool = False):
-        from log_parser import LogParser
+        from lmpvisualizer.log.log_parser import LogParser
         path = next((p for p in self._paths if LogParser.same_path(p, path)), None)
         if path is None:
             return

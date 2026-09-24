@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, Qt
 from PyQt6.QtGui import QColor
-import plot_model
-from logger_setup import get_logger
+from lmpvisualizer.shared import plot_model
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 # Shared appearance defaults, so the plot cannot diverge from what the table row shows.
-from dsd_widgets import DEFAULT_STYLE, DEFAULT_SIZE, DEFAULT_STRAIN_STYLE, DEFAULT_STRAIN_SIZE
+from lmpvisualizer.dsd.dsd_widgets import DEFAULT_STYLE, DEFAULT_SIZE, DEFAULT_STRAIN_STYLE, DEFAULT_STRAIN_SIZE
 
 class DSDController(QObject):
     frameChanged = pyqtSignal(int)

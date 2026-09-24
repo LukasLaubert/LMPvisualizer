@@ -6,7 +6,7 @@ import pandas as pd
 from pathlib import Path
 import ast
 from typing import Dict, Optional, Tuple, List, Set
-from logger_setup import get_logger
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
@@ -122,7 +122,7 @@ class LogDataManager:
             
         # If it's a list (of paths), parse it now
         if isinstance(entry, list):
-            from log_parser import LogParser
+            from lmpvisualizer.log.log_parser import LogParser
             df = LogParser.parse_multiple_logs(entry, allowed_headers=self.allowed_headers)
             if df is not None and not df.empty:
                 self.data[study][system] = df # Replace list with DF (Memoization)
@@ -261,7 +261,7 @@ class LogDataManager:
         Peeks at headers to populate available_columns immediately.
         If allowed_headers is not None, only those header types are considered for columns.
         """
-        from log_parser import LogParser # Local import
+        from lmpvisualizer.log.log_parser import LogParser # Local import
         self.data.clear()
         self.warnings = []
         self.available_columns = []
@@ -336,7 +336,7 @@ class LogDataManager:
     def get_study_names(self) -> List[str]:
         # Virtual wildcard studies (Study/System with *) at the end, bold in UI
         try:
-            from log_parser import LogParser as _LP
+            from lmpvisualizer.log.log_parser import LogParser as _LP
             return sorted(self.data.keys(), key=lambda k: (_LP._is_virtual_study_key(k), k))
         except Exception:
             return sorted(list(self.data.keys()))

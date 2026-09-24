@@ -4,8 +4,8 @@ from typing import Dict, Any
 import numpy as np
 import copy
 import re
-import plot_model
-from logger_setup import get_logger
+from lmpvisualizer.shared import plot_model
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 

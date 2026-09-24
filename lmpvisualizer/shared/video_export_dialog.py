@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QBuffer, QIODevice
 from PIL import Image, ImageOps
-from logger_setup import get_logger
+from lmpvisualizer.shared.logger_setup import get_logger
 
 logger = get_logger(__name__)
 
