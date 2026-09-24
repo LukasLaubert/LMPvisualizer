@@ -1,6 +1,6 @@
 # LMPvisualizer
 
-A desktop application for exploring LAMMPS molecular-dynamics output: thermo logs, trajectory dumps, and domain-based displacement/strain analysis.
+A desktop application for interactively exploring LAMMPS molecular dynamics output: thermo logs, trajectory dumps, and domain-based displacement/strain analysis.
 
 | Mode | Features |
 | --- | --- |
@@ -53,12 +53,12 @@ If two projects contain a study folder with the same name, the study list shows 
 
 ### Log mode
 
-![Log mode](docs/screenshots/log_mode.png)
+![Log mode](assets/log_mode.png)
 
 Plot thermo quantities (temperature, pressure, energies, volume, ...) or custom functions depending on them over steps or against each other.
 
-- Pick Study, System, X-Axis, and Y-Axis, then Add.
-  New rows copy the selected row, so variants are cheap to create.
+- Pick Study, System, and logged/custom properties (on X-Axis and Y-Axis).
+  Click `Add` to copy the plot: Plotting/Adding variants needs only few clicks.
 - Each row can show the raw curve (Orig), a smoothed curve (Mean, with adjustable window and method via right-click on the Mean header), and a spread band (Std).
 - With several y-axes, each gets its own axis on the side.
   The lock buttons align their zero lines or share their zoom. Right-click on it to align their 0 mark.
@@ -70,11 +70,11 @@ Plot thermo quantities (temperature, pressure, energies, volume, ...) or custom 
 
 ### Trajectory (trj) mode
 
-![Trajectory mode demo](docs/screenshots/trj_mode.gif)
+![Trajectory mode demo](assets/trj_mode.gif)
 
 Step through trajectory frames as scatter plots.
 
-- Pick Study, System, X-Axis, and Y-Axis.
+- Pick Study, System, and dumped properties (on X-Axis and Y-Axis).
   A player controls play/pause, speed (FPS), replay loop, the step slider, and the editable step range.
 - Z-Filter restricts which atoms are shown based on another dump column/property, relative to the initial, current, or final frame, or a fixed step; left/right clicking in the appearing bar allows adding filtering subranges.
 - Heatmap colors atoms by another column with the same reference choices and several gradients; click the scale numbers to pin the color range.
@@ -84,9 +84,9 @@ Step through trajectory frames as scatter plots.
 
 ### DSD mode (domain strain decomposition method)
 
-![DSD mode demo](docs/screenshots/dsd_mode.gif)
+![DSD mode](assets/dsd_mode.png)
 
-Project 3D particle motion onto one axis and derive strains, following the projection framework in [[1](#ref-1)] and the strain/error computation in [[2](#ref-2), [3](#ref-3)].
+Project 3D particle motion onto one axis and derive strains of subdomains, following the projection framework in [[1](#ref-1)] and the strain/error computation in [[2](#ref-2), [3](#ref-3)].
 
 - One Study / System selection, plus a slice axis (the direction you project along), an observe axis (the displacement component), an optional Z-Filter (as in trj mode), and the plot type: `Displacement plot`, `Strain Over Step`, or `Strain Over Strain`.
 - Domains divide the sample into boxes along the observe axis: set atom types, box count, arrangement and overlap, periodic boundary handling, weighted averaging, and optional splits that activate only specified parts of a domain.
