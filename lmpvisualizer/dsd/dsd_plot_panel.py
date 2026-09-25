@@ -757,13 +757,26 @@ class DSDPlotPanel(QWidget):
 
         if text != "Select System":
             study = self.study_combo.currentText()
-            
+            study_parsers = self.data_manager.parsers.get(study, {})
+
             # For "Strain average", we use the first system as reference for axes
             ref_system = text
             if text == "Strain average":
-                ref_system = next(iter(self.data_manager.parsers[study].keys()))
+                if not study_parsers:
+                    logger.warning("No trajectory data for study %s.", study)
+                    QMessageBox.warning(self, "No data", f"No loadable trajectory files for study '{study}'.")
+                    return
+                ref_system = next(iter(study_parsers.keys()))
+            elif text not in study_parsers:
+                logger.warning("No trajectory data for %s / %s.", study, text)
+                QMessageBox.warning(self, "No data", f"No loadable trajectory files for '{text}'.")
+                return
 
             self.controller.set_active_system(study, text, force=self._force_system_reload)
+            if not self.controller.timesteps:
+                logger.warning("No timesteps for %s / %s.", study, text)
+                QMessageBox.warning(self, "No data", f"System '{text}' has no readable timesteps.")
+                return
             self.player_controls.set_timesteps(self.controller.get_available_timesteps())
             
             # Capture currently selected axes before repopulating
@@ -887,6 +900,8 @@ class DSDPlotPanel(QWidget):
         timestep = self.controller.current_timestep if self.controller else None
         
         if not study or not system or timestep is None:
+            return
+        if not self.controller.timesteps:
             return
 
         # Load Frames (assume fast if cached or handled by manager)

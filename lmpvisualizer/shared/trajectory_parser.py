@@ -21,7 +21,9 @@ class TrajectoryParser:
     # older sidecars are discarded via the version check in _load_index.
     # v2: centralized DSD hash identity (dsd_data_manager helpers) — domain +
     # reference fields unified across persistent hash and controller cache key.
-    IDX_VERSION = 2
+    # v3: per-frame marker validation — frames without NUMBER OF ATOMS /
+    # BOX BOUNDS / ATOMS (e.g. bond dumps) are skipped instead of indexed.
+    IDX_VERSION = 3
 
     def __init__(self, filepath: Path):
         self.filepath = Path(filepath)
@@ -82,34 +84,60 @@ class TrajectoryParser:
                     
                     mm.seek(0)
                     last_pos = 0
+                    skipped = 0
                     while True:
                         pos = mm.find(timestep_pattern, last_pos)
                         if pos == -1: break
                         eol = mm.find(b'\n', pos)
+                        if eol == -1: break
                         val_start = eol + 1
                         val_end = mm.find(b'\n', val_start)
+                        if val_end == -1: break
                         try:
                             step_val = int(mm[val_start:val_end])
                         except ValueError:
-                            last_pos = val_end
+                            last_pos = val_end + 1
                             continue
+                        # A standard atom frame needs all three markers, in order,
+                        # before the next TIMESTEP. Anything else (e.g. bond dumps
+                        # with NUMBER OF ENTRIES) is skipped instead of indexed
+                        # with garbage offsets.
+                        next_ts = mm.find(timestep_pattern, val_end)
                         natoms_pos = mm.find(b"ITEM: NUMBER OF ATOMS", val_end)
+                        box_pos = mm.find(b"ITEM: BOX BOUNDS", val_end)
+                        atoms_pos = mm.find(atom_header_pattern, val_end)
+                        markers = (natoms_pos, box_pos, atoms_pos)
+                        if -1 in markers or not (val_end < natoms_pos < box_pos < atoms_pos):
+                            last_pos = val_end + 1
+                            skipped += 1
+                            continue
+                        if next_ts != -1 and not (atoms_pos < next_ts):
+                            last_pos = val_end + 1
+                            skipped += 1
+                            continue
                         natoms_eol = mm.find(b'\n', natoms_pos)
+                        atoms_eol = mm.find(b'\n', atoms_pos)
+                        if natoms_eol == -1 or atoms_eol == -1:
+                            last_pos = val_end + 1
+                            skipped += 1
+                            continue
                         n_start, n_end = natoms_eol + 1, mm.find(b'\n', natoms_eol + 1)
                         try:
                             num_atoms = int(mm[n_start:n_end])
                         except ValueError:
                             num_atoms = 0
-                        box_pos = mm.find(b"ITEM: BOX BOUNDS", n_end)
-                        atoms_pos = mm.find(atom_header_pattern, n_end)
-                        data_start = mm.find(b'\n', atoms_pos) + 1
+                        data_start = atoms_eol + 1
                         self.index_map[step_val] = (data_start, num_atoms, box_pos)
                         self.timesteps.append(step_val)
                         last_pos = data_start
 
             self.timesteps.sort()
             self.is_indexed = True
-            self._save_index(idx_path)
+            if not self.index_map:
+                logger.warning("No valid atom frames in %s%s — skipping file.",
+                               self.filepath, f" ({skipped} non-atom frames ignored)" if skipped else "")
+            else:
+                self._save_index(idx_path)
         except Exception as e:
             logger.warning("Error indexing trajectory file %s: %s", self.filepath, e)
 

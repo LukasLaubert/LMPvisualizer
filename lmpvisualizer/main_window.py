@@ -448,7 +448,11 @@ class MainWindow(QMainWindow):
                 panel = self.dsd_plot_panel
             
             if panel and has_panel_method(panel, 'load_session_from_file'):
-                panel.load_session_from_file(path)
+                try:
+                    panel.load_session_from_file(path)
+                except Exception as e:
+                    # A broken session must never kill the mode switch.
+                    logger.warning("[System] Session load failed for %s: %s", mode_str, e)
         else:
              logger.info("[System] No autosave found for %s.", mode_str)
 

@@ -54,7 +54,10 @@ class TrjDataManager:
                                 target_files.extend(list(system_path.glob(f"*{keyword}*")))
                 
                 if not target_files: continue
-                target_files.sort()
+                # Index sidecars (*.idx) contain the keyword as substring — never
+                # treat them as trajectories (they would also grow *.idx.idx).
+                target_files = sorted(f for f in target_files if Path(f).suffix != ".idx")
+                if not target_files: continue
                 
                 # Store only the PATH. TrajectoryParser will be created on-demand in get_parser()
                 for fpath in target_files:
