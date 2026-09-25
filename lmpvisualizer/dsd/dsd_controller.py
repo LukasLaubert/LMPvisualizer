@@ -5,6 +5,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QTimer, Qt
 from PyQt6.QtGui import QColor
 from lmpvisualizer.shared import plot_model
 from lmpvisualizer.shared.logger_setup import get_logger
+from lmpvisualizer.shared.ui_components import parse_float
 
 logger = get_logger(__name__)
 # Shared appearance defaults, so the plot cannot diverge from what the table row shows.
@@ -716,7 +717,7 @@ class DSDController(QObject):
                 # and 'o' additionally draws a connecting line that "Dots" does not.
                 style_str = domain.get('style', DEFAULT_STYLE)
                 symbol, pen_style = self._get_pyqtgraph_style(style_str)
-                try: width = float(domain.get('size', DEFAULT_SIZE))
+                try: width = parse_float(domain.get('size', DEFAULT_SIZE))
                 except: width = float(DEFAULT_SIZE)
 
                 # Plot Error Band
@@ -946,7 +947,7 @@ class DSDController(QObject):
 
             # Visual Properties
             color = QColor(domain.get('color', 'blue'))
-            try: width = float(domain.get('strain_size', DEFAULT_STRAIN_SIZE))
+            try: width = parse_float(domain.get('strain_size', DEFAULT_STRAIN_SIZE))
             except: width = float(DEFAULT_STRAIN_SIZE)
 
             # Resolve Starting Style
@@ -1012,7 +1013,7 @@ class DSDController(QObject):
         show_opt = bool(opt_settings) and opt_settings.get('strain_show', True)
         
         # Get properties from settings, defaulting to strain defaults
-        try: opt_width = float(opt_settings.get('strain_size', 2.0)) if opt_settings else 2.0
+        try: opt_width = parse_float(opt_settings.get('strain_size', 2.0)) if opt_settings else 2.0
         except: opt_width = 2.0
         
         opt_style_str = opt_settings.get('strain_style', '--') if opt_settings else '--'

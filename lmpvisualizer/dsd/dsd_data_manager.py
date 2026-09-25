@@ -40,8 +40,9 @@ def canonicalize_dsd_domain(domain):
     number_boxes = d.get('number_boxes', d.get('num_boxes', 10))
     box_arrangement = d.get('box_arrangement', d.get('arrangement', 'inside'))
     overlap = d.get('overlap_percentage', d.get('overlap', 0.0))
+    from lmpvisualizer.shared.ui_components import parse_float
     try:
-        splits = sorted(float(s) for s in (d.get('splits') or []))
+        splits = sorted(parse_float(s) for s in (d.get('splits') or []))
     except Exception:
         splits = list(d.get('splits') or [])
     act = d.get('active_segments', [])
@@ -59,7 +60,7 @@ def canonicalize_dsd_domain(domain):
     be = d.get('box_edges')
     if isinstance(be, (list, tuple)) and len(be) == 2:
         def _c(v):
-            return None if v is None else float(v)
+            return None if v is None else parse_float(v)
         try:
             box_edges = [_c(be[0]), _c(be[1])]
         except Exception:
@@ -68,7 +69,7 @@ def canonicalize_dsd_domain(domain):
         box_edges = None
     else:
         try:
-            f = float(be)
+            f = parse_float(be)
             box_edges = None if f == float('inf') else f
         except Exception:
             box_edges = be
@@ -104,7 +105,8 @@ def canonicalize_dsd_reference(slice_axis, observe_axis, options, z_ranges=_DSD_
     else:
         if z_ranges:
             try:
-                z_ranges_c = sorted([[float(lo), float(hi)] for (lo, hi) in z_ranges])
+                from lmpvisualizer.shared.ui_components import parse_float
+                z_ranges_c = sorted([[parse_float(lo), parse_float(hi)] for (lo, hi) in z_ranges])
             except Exception:
                 try:
                     z_ranges_c = sorted(list(z_ranges))

@@ -20,7 +20,7 @@ from lmpvisualizer.log.log_parser import LogParser
 from lmpvisualizer.log.log_data_manager import LogDataManager
 from lmpvisualizer.log.log_controller import LogController, ColoredAxis
 from lmpvisualizer.shared.settings_manager import SettingsManager
-from lmpvisualizer.shared.ui_components import ColorButton, InconsistentDataDialog, RightClickButton, NoNewLineDelegate, MissingPathResolver
+from lmpvisualizer.shared.ui_components import ColorButton, InconsistentDataDialog, RightClickButton, NoNewLineDelegate, MissingPathResolver, parse_float
 from lmpvisualizer.shared.global_label_editor_dialog import GlobalLabelEditorDialog
 from lmpvisualizer.log.custom_property_dialog import CustomPropertyDialog
 from lmpvisualizer.shared.popout_window import PopOutWindow, mint_preset_name
@@ -2966,7 +2966,7 @@ class LogPlotPanel(QWidget):
                 color = self.plot_table.cellWidget(row, 5).color()
                 style_text = self.plot_table.cellWidget(row, 6).currentText()
                 style = {'Solid': Qt.PenStyle.SolidLine, '-': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, '--': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine, ':': Qt.PenStyle.DotLine, '-.': Qt.PenStyle.DashDotLine, 'DashDot': Qt.PenStyle.DashDotLine}.get(style_text, Qt.PenStyle.SolidLine)
-                thickness = float(self.plot_table.cellWidget(row, 7).findChild(QLineEdit).text())
+                thickness = parse_float(self.plot_table.cellWidget(row, 7).findChild(QLineEdit).text())
 
                 is_active = show_original or (mean_window > 0) or show_std
                 
@@ -3416,7 +3416,7 @@ class LogPlotPanel(QWidget):
                     fit_color = color_btn.color()
                     style_text = self.fit_table.cellWidget(r, 6).currentText()
                     style = {'Solid': Qt.PenStyle.SolidLine, '-': Qt.PenStyle.SolidLine, 'Dash': Qt.PenStyle.DashLine, '--': Qt.PenStyle.DashLine, 'Dot': Qt.PenStyle.DotLine, ':': Qt.PenStyle.DotLine, '-.': Qt.PenStyle.DashDotLine, 'DashDot': Qt.PenStyle.DashDotLine}.get(style_text, Qt.PenStyle.SolidLine)
-                    thickness = float(self.fit_table.cellWidget(r, 7).findChild(QLineEdit).text())
+                    thickness = parse_float(self.fit_table.cellWidget(r, 7).findChild(QLineEdit).text())
 
                     # Data Push (only if source is valid and we are not in preview/loading)
                     if 'x' in src_data and fit_id in self.fit_dialogs:

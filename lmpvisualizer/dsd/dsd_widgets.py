@@ -6,12 +6,13 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QListView, QFrame, QScrollArea, QTextEdit,
     QGroupBox, QToolButton, QSizePolicy, QGridLayout
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QEvent, QRect, QSize, QRectF, QLocale
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QEvent, QRect, QSize, QRectF, QRegularExpression
 from PyQt6.QtGui import (
-    QColor, QIntValidator, QDoubleValidator, QStandardItemModel, QStandardItem, 
-    QMouseEvent, QPalette, QPainter, QBrush, QPen, QFont, QLinearGradient
+    QColor, QIntValidator, QStandardItemModel, QStandardItem,
+    QMouseEvent, QPalette, QPainter, QBrush, QPen, QFont, QLinearGradient,
+    QRegularExpressionValidator
 )
-from lmpvisualizer.shared.ui_components import ColorButton
+from lmpvisualizer.shared.ui_components import ColorButton, parse_float
 import random
 import bisect
 import numpy as np
@@ -56,7 +57,7 @@ class HorizontalFilterBarWidget(QWidget):
         self.update()
 
     def set_data(self, splits, states):
-        self.splits = sorted([float(s) for s in splits])
+        self.splits = sorted([parse_float(s) for s in splits])
         num_segs = len(self.splits) + 1
         if len(states) != num_segs:
             new_states = states[:num_segs]
@@ -288,7 +289,8 @@ class HorizontalFilterBarWidget(QWidget):
         val = self.splits[index]
         
         self.editor = QLineEdit(self)
-        self.editor.setValidator(QDoubleValidator())
+        # Permissive while typing (point and comma); strict parse on commit.
+        self.editor.setValidator(QRegularExpressionValidator(QRegularExpression(r"[+-]?[0-9]*[.,]?[0-9]*([eE][+-]?[0-9]*)?")))
         
         # Use full precision string instead of rounding
         text_val = str(val)
@@ -317,7 +319,7 @@ class HorizontalFilterBarWidget(QWidget):
     def _finish_edit(self):
         if not self.editor: return
         try:
-            new_val = float(self.editor.text())
+            new_val = parse_float(self.editor.text())
             new_val = max(self.data_min, min(self.data_max, new_val))
             self.splits[self._current_edit_index] = new_val
             self.splits.sort()
@@ -762,7 +764,7 @@ class DSDTableWidget(QTableWidget):
         """Updates displayed Style and Size values based on current context."""
         def format_val(val):
             try:
-                f = float(val)
+                f = parse_float(val)
                 return f"{f:g}"
             except: return str(val)
 
@@ -827,7 +829,7 @@ class DSDTableWidget(QTableWidget):
 
         def format_val(val):
             try:
-                f = float(val)
+                f = parse_float(val)
                 return f"{f:g}"
             except: return str(val)
 
@@ -923,11 +925,8 @@ class DSDTableWidget(QTableWidget):
         init_size = settings.get('size', DEFAULT_SIZE) if self.context_mode == 'displacement' else settings.get('strain_size', DEFAULT_STRAIN_SIZE)
         size_edit = QLineEdit(format_val(init_size))
         
-        # Use Double Validator for decimal support with C Locale (International)
-        from PyQt6.QtCore import QLocale
-        val = QDoubleValidator(0.1, 100.0, 2)
-        val.setLocale(QLocale(QLocale.Language.C))
-        val.setNotation(QDoubleValidator.Notation.StandardNotation)
+        # Point and comma both allowed while typing; strict parse on read.
+        val = QRegularExpressionValidator(QRegularExpression(r"[+-]?[0-9]*[.,]?[0-9]*([eE][+-]?[0-9]*)?"))
         size_edit.setValidator(val)
         
         size_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)

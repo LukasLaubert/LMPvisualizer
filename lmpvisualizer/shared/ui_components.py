@@ -9,6 +9,23 @@ from PyQt6.QtWidgets import (QDialog, QPushButton, QVBoxLayout, QTableWidget,
 from PyQt6.QtGui import QColor, QPalette, QFontMetrics, QFont, QPainter
 from PyQt6.QtCore import pyqtSignal, Qt, QEvent, QTimer
 
+def parse_float(value):
+    """Locale-tolerant float() for user-typed numbers.
+
+    Plain float() only understands the decimal point, so numeric fields
+    silently reject comma decimals ('1,5'). A comma acts as the decimal
+    separator when the text holds no point; '1,000' therefore reads as 1.0,
+    never as one thousand. Non-string values pass through float();
+    unparseable text raises ValueError exactly like float(), so existing
+    try/except fallbacks behave unchanged.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if ',' in text and '.' not in text:
+        text = text.replace(',', '.')
+    return float(text)
+
 class NeutralPanel(QWidget):
     """
     The Neutral 'Boot' Panel displayed when no mode is selected.
