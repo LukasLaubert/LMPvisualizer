@@ -146,7 +146,7 @@ class TrajectoryParser:
         try:
             import json
             if os.path.getmtime(self.filepath) > os.path.getmtime(idx_path): return False
-            with open(idx_path, 'r') as f:
+            with open(idx_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if data.get('version') != self.IDX_VERSION: return False
             self.columns = data.get('columns', [])
@@ -166,7 +166,7 @@ class TrajectoryParser:
     def _save_index(self, idx_path: Path):
         try:
             import json
-            with open(idx_path, 'w') as f:
+            with open(idx_path, 'w', encoding='utf-8') as f:
                 f.write('{\n')
                 f.write(f'  "version": {self.IDX_VERSION},\n')
                 f.write(f'  "file_size": {os.path.getsize(self.filepath)},\n')

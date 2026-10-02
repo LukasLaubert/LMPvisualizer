@@ -1042,7 +1042,7 @@ class PopOutWindow(QMainWindow):
         path = self._get_global_config_path()
         if os.path.exists(path):
             try:
-                with open(path, 'r') as f:
+                with open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     return data.get('tex_path', ''), data.get('gs_path', '')
             except:
@@ -1055,7 +1055,7 @@ class PopOutWindow(QMainWindow):
         data = {}
         if os.path.exists(config_path):
             try:
-                with open(config_path, 'r') as f:
+                with open(config_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
             except:
                 pass
@@ -1063,7 +1063,7 @@ class PopOutWindow(QMainWindow):
         data['tex_path'] = tex_path
         data['gs_path'] = gs_path
         
-        with open(config_path, 'w') as f:
+        with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
 
     def _update_system_path(self, tex_path, gs_path):

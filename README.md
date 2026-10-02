@@ -12,9 +12,9 @@ A desktop application for interactively exploring LAMMPS molecular dynamics outp
 
 ## Quickstart
 
-Start the app from the repository root:
+Start the app from the repository root (`python` on Windows, `python3` on Linux/macOS):
 
-```powershell
+```sh
 python main.py                       # boots into the neutral mode-selection panel
 python main.py -mode log             # log | trj | dsd
 python main.py -autoload off         # ask before restoring the per-mode autosave
@@ -22,11 +22,12 @@ python main.py -autoload off         # ask before restoring the per-mode autosav
 
 ## Installation
 
-```powershell
-pip install -r requirements.txt
+```sh
+pip install -r requirements.txt      # Linux/macOS: pip3 install -r requirements.txt
 ```
 
-Video export additionally needs an `ffmpeg` program on your PATH, which cannot be installed via pip.
+Linux needs the Qt6 system libraries for PyQt6, e.g. `sudo apt install libxcb-cursor0 libGL1 libEGL1`.
+Video export additionally needs an `ffmpeg` program on your PATH, which cannot be installed via pip: Windows via `winget install ffmpeg` or ffmpeg.org, Linux via `sudo apt install ffmpeg`, macOS via `brew install ffmpeg`.
 
 ## Parsing simulation data
 
@@ -100,7 +101,7 @@ Project 3D particle motion onto one axis and derive strains of subdomains, follo
 Sessions store project paths, keywords, table rows, styles, view ranges, and plot settings in a `.json` file.
 Typing or browsing to a session `.json` file in the path field loads that session and switches to its mode automatically.
 
-- Autosaves live in `~/.LMPvisualizer/autosaves/` (one per mode), written whenever you switch modes or close the app.
+- Autosaves live in `~/.LMPvisualizer/` as `autosave_log.json`, `autosave_trj.json`, `autosave_dsd.json` (one per mode), written whenever you switch modes or close the app.
   Autosaves update only when the table holds content, so an empty table keeps the previous autosave.
 - If a session points at a folder that no longer exists, a dialog offers to relocate it, pick a different project, or reset.
 

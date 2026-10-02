@@ -72,7 +72,7 @@ class TrjDataManager:
                     if idx_path.exists():
                         try:
                             import json
-                            with open(idx_path, 'r') as f:
+                            with open(idx_path, 'r', encoding='utf-8') as f:
                                 data = json.load(f)
                                 for col in data.get('columns', []):
                                     all_cols_found.add(col)

@@ -596,7 +596,7 @@ class MainWindow(QMainWindow):
 
     def _load_session_file(self, path: Path):
         try:
-            with open(path, 'r') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except Exception as e:
             logger.warning("Failed to parse JSON file %s: %s", path, e)

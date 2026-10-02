@@ -220,7 +220,7 @@ class AutoIndexDialog(QDialog):
             bg_color = "#fff59d" # Trj Indexed
             try:
                 if os.path.getmtime(fpath) <= os.path.getmtime(idx_path):
-                    with open(idx_path, 'r') as f:
+                    with open(idx_path, 'r', encoding='utf-8') as f:
                         idx_data = json.load(f)
                     
                     lib = idx_data.get('results_library', {})

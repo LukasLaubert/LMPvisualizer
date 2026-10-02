@@ -10,7 +10,7 @@ class SettingsManager:
     def save_state(filepath: str, configuration: Dict[str, Any]):
         """Saves the given configuration dictionary to a JSON file."""
         try:
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(configuration, f, indent=4)
             return True
         except Exception as e:
@@ -21,7 +21,7 @@ class SettingsManager:
     def load_state(filepath: str) -> Dict[str, Any]:
         """Loads a configuration dictionary from a JSON file."""
         try:
-            with open(filepath, 'r') as f:
+            with open(filepath, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
             print(f"Error loading state: {e}")
