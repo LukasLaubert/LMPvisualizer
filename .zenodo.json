@@ -1,0 +1,48 @@
+{
+  "upload_type": "software",
+  "title": "LMPvisualizer",
+  "description": "A desktop application for interactively exploring LAMMPS molecular dynamics output: thermo logs, trajectory dumps, and domain-based displacement/strain analysis. Log mode plots thermo quantities, averages across systems, defines custom properties, and fits curves. Trajectory mode steps through dump frames as scatter plots with playback, filtering, and heatmap coloring. DSD mode implements the domain strain decomposition method, projecting particle displacements onto one axis inside configurable domains and differentiating them into strains.<br>Source code: <a href=\"https://github.com/LukasLaubert/LMPvisualizer\">https://github.com/LukasLaubert/LMPvisualizer</a>",
+  "license": "MIT",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Laubert, Lukas",
+      "affiliation": "Friedrich-Alexander-Universität Erlangen-Nürnberg",
+      "orcid": "0009-0009-4524-2621"
+    }
+  ],
+  "contributors": [
+    {
+      "name": "Pfaller, Sebastian",
+      "type": "Supervisor",
+      "affiliation": "Friedrich-Alexander-Universität Erlangen-Nürnberg",
+      "orcid": "0000-0001-8577-5048"
+    },
+    {
+      "name": "Detrez, Fabrice",
+      "type": "Researcher",
+      "affiliation": "MSME, UMR 8208 CNRS, Université Gustave Eiffel, Marne-la-Vallée, France",
+      "orcid": "0000-0003-4745-8054"
+    },
+    {
+      "name": "Lamamra, Moussa",
+      "type": "Researcher",
+      "affiliation": "MSME, UMR 8208 CNRS, Université Gustave Eiffel, Marne-la-Vallée, France"
+    }
+  ],
+  "keywords": [
+    "LAMMPS",
+    "molecular dynamics",
+    "LAMMPS output visualization",
+    "LAMMPS log plot",
+    "log plots",
+    "thermo logs",
+    "trajectory visualization",
+    "strain analysis",
+    "domain strain decomposition",
+    "Python",
+    "PyQt",
+    "visualization",
+    "plotting"
+  ]
+}

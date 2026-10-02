@@ -23,7 +23,7 @@ python main.py -autoload off         # ask before restoring the per-mode autosav
 ## Installation
 
 ```sh
-pip install -r requirements.txt      # Linux/macOS: pip3 install -r requirements.txt
+pip install -r requirements.txt      # on Linux, either apt get install one-by-one or create a venv
 ```
 
 Linux needs the Qt6 system libraries for PyQt6, e.g. `sudo apt install libxcb-cursor0 libGL1 libEGL1`.
