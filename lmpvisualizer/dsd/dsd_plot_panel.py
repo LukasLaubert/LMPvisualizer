@@ -620,8 +620,9 @@ class DSDPlotPanel(QWidget):
             LogParser.qualify_study(origins, previous['path'], previous['study'])
             if previous else None)
 
-        load_warns, _ = self.data_manager.load_project_data(studies, paths, keywords, file_map)
+        load_warns, successful_keywords = self.data_manager.load_project_data(studies, paths, keywords, file_map)
         warnings.extend(load_warns)
+        self.main_window.chip_input.update_chip_styles(successful_keywords)
 
         self.loaded_path = paths
         # The data manager was just rebuilt, so the controller's cached timestep lists

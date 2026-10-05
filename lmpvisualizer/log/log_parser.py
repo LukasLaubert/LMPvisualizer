@@ -707,7 +707,7 @@ class LogParser:
             target_file = in_files[0]
         else:
             for f in in_files:
-                if 'base_input' in f.name:
+                if 'base_input' in f.name.lower():
                     target_file = f
                     break
         
@@ -724,7 +724,7 @@ class LogParser:
 
     @staticmethod
     def get_units(root_path: Path) -> Optional[str]:
-        """Looks for a .data file in input_files to get units."""
+        """Looks for a .data file under input_files to get units."""
         input_dir = None
         for d in root_path.iterdir():
             if "input_files" in d.name and d.is_dir():
@@ -734,7 +734,7 @@ class LogParser:
         if not input_dir:
             return None
             
-        data_files = [p for p in input_dir.iterdir() if p.name.lower().endswith(".data")]
+        data_files = sorted(p for p in input_dir.rglob("*") if p.is_file() and p.name.lower().endswith(".data"))
         if not data_files:
             return None
             

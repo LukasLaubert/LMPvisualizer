@@ -18,11 +18,11 @@ license: MIT
 repository-code: "https://github.com/LukasLaubert/LMPvisualizer"
 url: "https://github.com/LukasLaubert/LMPvisualizer"
 keywords:
+  - LMPvisualizer
   - LAMMPS
   - molecular dynamics
-  - LAMMPS output visualization
+  - LAMMPS trajectory
   - LAMMPS log plot
-  - log plots
   - thermo logs
   - trajectory visualization
   - strain analysis

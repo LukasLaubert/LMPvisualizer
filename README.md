@@ -10,12 +10,14 @@ A desktop application for interactively exploring LAMMPS molecular dynamics outp
 
 `dsd` implements the domain strain decomposition (DSD) method: particle displacements are projected onto one axis inside configurable domains (slices/boxes), averaged per box, and differentiated into strains for comparison against an end-to-end target strain [[1](#ref-1)–[3](#ref-3)].
 
+**LMPvisualizer** works universally and seamlessly supports **[LAMMPSdeformer](https://github.com/LukasLaubert/LAMMPSdeformer)**'s multi-study output structure.
+
 ## Quickstart
 
 Start the app from the repository root (`python` on Windows, `python3` on Linux/macOS):
 
 ```sh
-python main.py                       # boots into the neutral mode-selection panel
+python main.py                       # boots into the neutral mode selection panel
 python main.py -mode log             # log | trj | dsd
 python main.py -autoload off         # ask before restoring the per-mode autosave
 ```
@@ -23,10 +25,10 @@ python main.py -autoload off         # ask before restoring the per-mode autosav
 ## Installation
 
 ```sh
-pip install -r requirements.txt      # on Linux, either apt get install one-by-one or create a venv
+pip install -r requirements.txt
 ```
 
-Linux needs the Qt6 system libraries for PyQt6, e.g. `sudo apt install libxcb-cursor0 libGL1 libEGL1`.
+On Linux, use a venv; PyQt6 may additionally need the Qt6 system libraries, e.g. `sudo apt install libxcb-cursor0 libGL1 libEGL1`.
 Video export additionally needs an `ffmpeg` program on your PATH, which cannot be installed via pip: Windows via `winget install ffmpeg` or ffmpeg.org, Linux via `sudo apt install ffmpeg`, macOS via `brew install ffmpeg`.
 
 ## Parsing simulation data

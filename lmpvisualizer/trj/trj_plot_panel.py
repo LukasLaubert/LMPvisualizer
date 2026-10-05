@@ -473,8 +473,9 @@ class TrjPlotPanel(QWidget):
         self._pending_study_key = (
             LogParser.qualify_study(origins, previous['path'], previous['study'])
             if previous else None)
-        warnings_load, _ = self.data_manager.load_project_data(studies, paths, keywords, file_map)
+        warnings_load, successful_keywords = self.data_manager.load_project_data(studies, paths, keywords, file_map)
         warnings.extend(warnings_load)
+        self.main_window.chip_input.update_chip_styles(successful_keywords)
 
         self.loaded_path = paths
         # Rows remember (path, raw study); re-point them at the study keys this load
