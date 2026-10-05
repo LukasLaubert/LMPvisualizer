@@ -228,8 +228,10 @@ class DSDDataManager:
                     for base in (root_path if isinstance(root_path, (list, tuple)) else [root_path]):
                         system_path = Path(base) / study_name / system_name
                         if system_path.is_dir():
+                            entries = list(system_path.iterdir())
                             for keyword in keywords:
-                                target_files.extend(list(system_path.glob(f"*{keyword}*")))
+                                lkw = keyword.lower()
+                                target_files.extend(p for p in entries if lkw in p.name.lower())
                 
                 if not target_files: continue
                 # Index sidecars (*.idx) contain the keyword as substring — never
@@ -243,7 +245,7 @@ class DSDDataManager:
                     self.parsers[study_name][key_name] = fpath
                     
                     for kw in keywords:
-                        if kw in fpath.name: successful_keywords.add(kw)
+                        if kw.lower() in fpath.name.lower(): successful_keywords.add(kw)
 
         # --- Virtual wildcard studies from actual displayed systems ---
         # For single-system studies the displayed System is the folder name, but the

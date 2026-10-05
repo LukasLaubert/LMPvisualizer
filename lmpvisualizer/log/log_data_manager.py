@@ -285,11 +285,15 @@ class LogDataManager:
                     # root_path may be several project paths.
                     for base in (root_path if isinstance(root_path, (list, tuple)) else [root_path]):
                         log_path = Path(base) / study_name / system_name
+                        if not log_path.is_dir():
+                            continue
+                        entries = list(log_path.iterdir())
                         if not log_keywords:
-                            log_files.extend(log_path.glob("log.lammps"))
+                            log_files.extend(p for p in entries if p.name.lower() == "log.lammps")
                         else:
                             for keyword in log_keywords:
-                                log_files.extend(log_path.glob(f"*{keyword}*"))
+                                lkw = keyword.lower()
+                                log_files.extend(p for p in entries if lkw in p.name.lower())
                     log_files = sorted(list(set(log_files)))
 
                 if not log_files:
@@ -298,7 +302,7 @@ class LogDataManager:
                 # Update successful keywords
                 for fpath in log_files:
                     for kw in (log_keywords or []):
-                        if kw in fpath.name:
+                        if kw.lower() in fpath.name.lower():
                             successful_keywords.add(kw)
 
                 # STORE PATHS ONLY (Lazy Loading)

@@ -571,21 +571,43 @@ class TrjController(QObject):
         # Fallback to prevent crashes if data is missing
         return 0.0, 1.0
 
-    def _generate_lut(self, gradient_name):
-        import matplotlib.cm
-        map_name = 'jet' 
-        if gradient_name == 'Viridis': map_name = 'viridis'
-        elif gradient_name == 'Hot': map_name = 'hot'
-        elif gradient_name == 'Blue-Red': map_name = 'coolwarm'
-        elif gradient_name == 'Plasma': map_name = 'plasma'
-        elif gradient_name == 'Magma': map_name = 'magma'
-        try: cmap = matplotlib.cm.get_cmap(map_name)
-        except: cmap = matplotlib.cm.get_cmap('jet')
-        x = np.linspace(0, 1, 256)
-        rgba = cmap(x)
-        rgba = (rgba * 255).astype(np.uint8)
-        brushes = np.array([pg.mkBrush(QColor(r, g, b, 255)) for r,g,b,a in rgba])
-        return brushes
+    @staticmethod
+    def _resolve_cmap(name):
+        """Returns a matplotlib colormap by name, or None.
+
+        Tries the modern registry first (`matplotlib.cm.get_cmap` was
+        deprecated in 3.7 and removed in 3.9+, which froze heatmaps on
+        systems with a newer matplotlib); falls back to the legacy API.
+        """
+        try:
+            from matplotlib import colormaps
+            return colormaps[name]
+        except Exception:
+            pass
+        try:
+            import matplotlib.cm
+            get_cmap = getattr(matplotlib.cm, 'get_cmap', None)
+            if get_cmap is not None:
+                return get_cmap(name)
+        except Exception:
+            pass
+        try:
+            import matplotlib.pyplot as plt
+            return plt.get_cmap(name)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _generate_lut(gradient_name):
+        map_name = {'Viridis': 'viridis', 'Hot': 'hot', 'Blue-Red': 'coolwarm',
+                    'Plasma': 'plasma', 'Magma': 'magma'}.get(gradient_name, 'jet')
+        cmap = TrjController._resolve_cmap(map_name) or TrjController._resolve_cmap('jet')
+        if cmap is None:
+            # Last resort: grayscale gradient so the scene never freezes.
+            gray = (np.linspace(0, 1, 256) * 255).astype(np.uint8)
+            return np.array([pg.mkBrush(QColor(v, v, v, 255)) for v in gray])
+        rgba = (cmap(np.linspace(0, 1, 256)) * 255).astype(np.uint8)
+        return np.array([pg.mkBrush(QColor(r, g, b, 255)) for r, g, b, a in rgba])
 
     def get_data_min_max(self, study, system, col):
         return self.data_manager.get_global_min_max(study, system, col)

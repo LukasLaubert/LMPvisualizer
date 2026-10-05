@@ -2853,7 +2853,19 @@ class LogPlotPanel(QWidget):
         self.update_plots()
 
     def add_new_plot_row(self):
-        source_row_index = self.plot_table.currentRow()
+        # Copy source = first highlighted (selected) row, if any. With
+        # ExtendedSelection several rows can be highlighted at once, so the
+        # lowest row index wins. Only when nothing is highlighted is a fresh
+        # row added. currentRow is deliberately NOT used: it can point at a
+        # row that is no longer highlighted.
+        source_row_index = -1
+        try:
+            sel_model = self.plot_table.selectionModel()
+            selected = sel_model.selectedRows() if sel_model is not None else []
+            if selected:
+                source_row_index = min(idx.row() for idx in selected)
+        except Exception:
+            source_row_index = -1
 
         # Rows are appended, matching trj/dsd. Appending also leaves every existing
         # row index untouched, so the fit table keeps pointing at the same plots.
@@ -2884,7 +2896,9 @@ class LogPlotPanel(QWidget):
         self.next_plot_id += 1
         
         copied_from_selection = False
-        # If a row was selected, copy its Study, System, X-Axis, and Y-Axis
+        # If a row is highlighted, copy its Study/System/X/Y as well as its
+        # Orig (show), Mean and Std settings. Color, Style and Thickness are
+        # always fresh (see plot_data defaults above).
         if source_row_index != -1:
             try:
                 # The new row went to the end, so the source kept its index
@@ -2897,6 +2911,11 @@ class LogPlotPanel(QWidget):
                     study, system, x_ax, y_ax = parts
                     # Construct the new plot name, copying all four parts
                     plot_data['plot_name'] = f"{study} | {system} | {x_ax} | {y_ax}"
+                    plot_data['show'] = source_plot_data.get('show', True)
+                    plot_data['mean'] = source_plot_data.get('mean', "0")
+                    plot_data['std'] = source_plot_data.get('std', False)
+                    if source_plot_data.get('origin'):
+                        plot_data['origin'] = source_plot_data.get('origin')
                     copied_from_selection = True
 
             except (AttributeError, ValueError, IndexError):
@@ -2907,13 +2926,15 @@ class LogPlotPanel(QWidget):
             is_single_file_mode = len(self.data_manager.get_study_names()) == 1 and self.data_manager.get_study_names()[0] == '.'
             if is_single_file_mode:
                 study = '.'
-                system = self.data_manager.get_system_names(study)[0]
-                x_ax = "N/A"
-                if "Step" in self.data_manager.available_columns:
-                    x_ax = "Step"
-                elif self.data_manager.available_columns:
-                    x_ax = self.data_manager.available_columns[0]
-                plot_data['plot_name'] = f"{study} | {system} | {x_ax} | N/A"
+                systems = self.data_manager.get_system_names(study)
+                if systems:
+                    system = systems[0]
+                    x_ax = "N/A"
+                    if "Step" in self.data_manager.available_columns:
+                        x_ax = "Step"
+                    elif self.data_manager.available_columns:
+                        x_ax = self.data_manager.available_columns[0]
+                    plot_data['plot_name'] = f"{study} | {system} | {x_ax} | N/A"
 
         self._populate_row_data(insert_row, plot_data)
 

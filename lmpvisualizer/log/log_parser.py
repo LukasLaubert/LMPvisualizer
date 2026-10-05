@@ -34,6 +34,22 @@ class LogParser:
         raise FileNotFoundError(f"Could not find a valid LAMMPS project root in or above '{path}'.")
 
     @staticmethod
+    def keyword_hit(keyword: str, filename: str) -> bool:
+        """Case-insensitive keyword hit on a file name.
+
+        Leading dot = suffix (".out"), trailing dot = prefix ("in."),
+        otherwise the keyword matches anywhere in the name. Lowering both
+        sides keeps discovery identical on case-insensitive (Windows) and
+        case-sensitive (Linux) filesystems.
+        """
+        name, kw = filename.lower(), keyword.lower()
+        if keyword.startswith("."):
+            return name.endswith(kw)
+        if keyword.endswith("."):
+            return name.startswith(kw)
+        return kw in name
+
+    @staticmethod
     def discover_studies_systems(path: Path, log_keywords: List[str]) -> Tuple[Dict[str, List[str]], List[str], Dict[str, List[Path]]]:
         """
         Discovers studies and systems by recursively finding log files.
@@ -51,19 +67,12 @@ class LogParser:
                 return studies, warnings, file_map
             return {}, ["Path does not exist."], {}
 
-        # 1. Find all potential log files recursively
+        # 1. Find all potential log files recursively (one walk, all keywords)
         all_found = []
         search_keywords = log_keywords if log_keywords else ["log.lammps"]
-        for kw in search_keywords:
-            # Leading dot = suffix (".out"), trailing dot = prefix ("in."),
-            # otherwise the keyword matches anywhere in the file name.
-            if kw.startswith("."):
-                pattern = f"*{kw}"
-            elif kw.endswith("."):
-                pattern = f"{kw}*"
-            else:
-                pattern = f"*{kw}*"
-            all_found.extend(list(path.rglob(pattern)))
+        for fpath in path.rglob("*"):
+            if fpath.is_file() and any(LogParser.keyword_hit(kw, fpath.name) for kw in search_keywords):
+                all_found.append(fpath)
         
         # 2. Filter and Group by directory
         unique_files = sorted(list(set(f for f in all_found if f.is_file())))
@@ -692,7 +701,7 @@ class LogParser:
     @staticmethod
     def get_timestep(root_path: Path) -> Optional[float]:
         """Scans for a base_input.in or single .in file to find the timestep."""
-        in_files = list(root_path.glob("*.in"))
+        in_files = [p for p in root_path.iterdir() if p.name.lower().endswith(".in")] if root_path.is_dir() else []
         target_file = None
         if len(in_files) == 1:
             target_file = in_files[0]
@@ -725,7 +734,7 @@ class LogParser:
         if not input_dir:
             return None
             
-        data_files = list(input_dir.glob("*.data"))
+        data_files = [p for p in input_dir.iterdir() if p.name.lower().endswith(".data")]
         if not data_files:
             return None
             
