@@ -61,12 +61,12 @@ If two projects contain a study folder with the same name, the study list shows 
 Plot thermo quantities (temperature, pressure, energies, volume, ...) or custom functions depending on them over steps or against each other.
 
 - Pick Study, System, and logged/custom properties (on X-Axis and Y-Axis).
-  Click `Add` to copy the plot: Plotting/Adding variants needs only few clicks.
+  Click `Add` to copy the plot: Plotting/Adding variants takes only few clicks.
 - Each row can show the raw curve (Orig), a smoothed curve (Mean, with adjustable window and method via right-click on the Mean header), and a spread band (Std).
 - With several y-axes, each gets its own axis on the side.
   The lock buttons align their zero lines or share their zoom. Right-click on it to align their 0 mark.
 - Studies with several systems offer `average` and `average & std` to plot their average y values.
-  If the runs have different lengths, a you can choose to truncate them or exclude systems.
+  If the runs have different lengths, you can choose to truncate them or exclude systems.
 - Custom properties let you combine thermo quantities into new quantities, e.g. total energy from potential plus kinetic energy.
   Add and edit them through the `Custom` entry in the axis dropdowns.
 - Curve fitting: add a fit on a plot, pick Orig or Mean as source, define the function and parameters, and run the fit.
@@ -81,7 +81,7 @@ Step through trajectory frames as scatter plots.
   A player controls play/pause, speed (FPS), replay loop, the step slider, and the editable step range.
 - Z-Filter restricts which atoms are shown based on another dump column/property, relative to the initial, current, or final frame, or a fixed step; left/right clicking in the appearing bar allows adding filtering subranges.
 - Heatmap colors atoms by another column with the same reference choices and several gradients; click the scale numbers to pin the color range.
-- Add one plot and table row with the `Add` buttom.
+- Add one plot and table row with the `Add` button.
   Each plot/row stored in the right table pane stores its own axes, filter, heatmap, current step, view lock, and point style; switching rows restores and plots everything.
 - The step slider range (min/max) is kept while you browse studies and systems, and widened back to the full trajectory when you load a different project.
 
